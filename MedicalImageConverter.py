@@ -437,16 +437,16 @@ class MedicalImageConverter:
         print('STL Read (numpy) Time: ', t2 - t1)
 
 
-def main():
-    path = r'C:\Users\csoconnor\Desktop\read_test_3'
-
-    mic = MedicalImageConverter(path, exclude_files=[], multi_folder=False, existing_ct_dataframe=None)
-    mic.file_parsar()
-    mic.check_memory()
-    mic.read_dicom()
-    # mic.read_meta()
-    # mic.read_stl()
-
-
-if __name__ == '__main__':
-    main()
+# def main():
+#     path = r'C:\Users\csoconnor\Desktop\read_test_3'
+#
+#     mic = MedicalImageConverter(path, exclude_files=[], multi_folder=False, existing_ct_dataframe=None)
+#     mic.file_parsar()
+#     mic.check_memory()
+#     mic.read_dicom()
+#     # mic.read_meta()
+#     # mic.read_stl()
+#
+#
+# if __name__ == '__main__':
+#     main()
