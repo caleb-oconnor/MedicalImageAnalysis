@@ -8,7 +8,7 @@ import pandas as pd
 import pydicom as dicom
 import SimpleITK as sitk
 
-from stl import mesh
+# from stl import mesh
 from multiprocessing import Pool
 
 
@@ -26,10 +26,10 @@ class DicomReader:
         self.dicom_files = dicom_files
 
         self.ds = []
-        self.img_df = []
-        self.img_info = []
+        self.file_info = []
+        self.img_tag_df = []
+        self.img_info = None
         self.img_data = []
-        self.img_filepath = []
         self.tag_info = None
         self.tags = ['DatasetIndex',
                      'FilePath',
@@ -54,6 +54,7 @@ class DicomReader:
         self.rt_df = pd.DataFrame(columns=rt_column_tags)
         self.roi_info = []
         self.roi_data = []
+        self.roi_name = []
 
     def read_dicom(self):
         if len(self.dicom_files) > 500:
@@ -105,7 +106,7 @@ class DicomReader:
                     thick_unique = series_df.SliceThickness.unique()
                     for thick in thick_unique:
                         thick_idx = series_df.index[series_df['SliceThickness'] == thick].tolist()
-                        self.img_df.append(series_df.loc[thick_idx])
+                        self.img_tag_df.append(series_df.loc[thick_idx])
                 else:
                     for acquisition in acquisition_unique:
                         acquisition_idx = series_df.index[series_df['AcquisitionNumber'] == acquisition].tolist()
@@ -114,7 +115,7 @@ class DicomReader:
                         thick_unique = acquisition_df.SliceThickness.unique()
                         for thick in thick_unique:
                             thick_idx = acquisition_df.index[acquisition_df['SliceThickness'] == thick].tolist()
-                            self.img_df.append(acquisition_df.loc[thick_idx])
+                            self.img_tag_df.append(acquisition_df.loc[thick_idx])
 
     def separate_rt_images(self):
         rts_idx = self.tag_info.index[self.tag_info['Modality'] == 'RTSTRUCT'].tolist()
@@ -146,63 +147,56 @@ class DicomReader:
             self.rt_df.at[ii, 'RoiSOP'] = roi_sop
             self.rt_df.at[ii, 'ContourData'] = contour
 
-    def dicom_info(self):
-        for ii in range(len(self.img_df)):
-            if len(self.img_df[ii]) > 1:
-                calculated_slice_thickness = abs(float(self.img_df[ii]['ImagePositionPatient'].iloc[1][2]) -
-                                                 float(self.img_df[ii]['ImagePositionPatient'].iloc[0][2]))
+    def get_calculated_thickness(self):
+        for ii in range(len(self.img_tag_df)):
+            if len(self.img_tag_df[ii]) > 1:
+                calculated_slice_thickness = abs(float(self.img_tag_df[ii]['ImagePositionPatient'].iloc[1][2]) -
+                                                 float(self.img_tag_df[ii]['ImagePositionPatient'].iloc[0][2]))
             else:
-                calculated_slice_thickness = self.img_df[ii]['SliceThickness'].iloc[0][2]
+                calculated_slice_thickness = self.img_tag_df[ii]['SliceThickness'].iloc[0][2]
 
-            self.img_df[ii]['CalculatedSliceThickness'] = calculated_slice_thickness
+            self.img_tag_df[ii]['CalculatedSliceThickness'] = calculated_slice_thickness
 
-        for ii in range(len(self.img_df)):
-            self.img_df[ii] = self.img_df[ii].sort_values(by=['InstanceNumber'], ascending=True)
+    def sort_instances(self):
+        for ii in range(len(self.img_tag_df)):
+            self.img_tag_df[ii] = self.img_tag_df[ii].sort_values(by=['InstanceNumber'], ascending=True)
+
+    def dicom_info(self):
+        info_tags = ['PatientID', 'PatientName', 'Modality', 'SeriesDescription', 'Date', 'Time',
+                     'SeriesInstanceUID', 'SeriesNumber', 'AcquisitionNumber',
+                     'Slices', 'SliceThickness', 'CalculatedSliceThickness', 'SliceRange',
+                     'PixelSpacing', 'Rows', 'Columns',
+                     'ImageOrientationPatient', 'PatientPosition', 'ImagePositionPatient']
+        self.img_info = pd.DataFrame(columns=info_tags)
 
         date_list = ['InstanceCreationDate', 'SeriesDate', 'AcquisitionDate', 'ContentDate']
         time_list = ['InstanceCreationTime', 'SeriesTime', 'AcquisitionTime', 'ContentTime']
-
-        for ii, img in enumerate(self.img_df):
-            img_list = [img['Modality'].iloc[0],
-                        len(img['FilePath']),
-                        img['PatientID'].iloc[0],
-                        img['SeriesDescription'].iloc[0],
-                        img['SeriesNumber'].iloc[0]]
-
-            date_hold = ''
+        for ii, img in enumerate(self.img_tag_df):
+            date_hold = 'Unknown'
             for date_idx in date_list:
                 if not img[date_idx].iloc[0] == '':
                     date_hold = img[date_idx].iloc[0]
-            if date_hold == '':
-                img_list.append('Unknown')
-            else:
-                img_list.append(date_hold)
 
-            time_hold = ''
+            time_hold = 'Unknown'
             for time_idx in time_list:
                 if not img[time_idx].iloc[0] == '':
                     time_hold = str(int(np.round(float(img[time_idx].iloc[0]))))
-            if time_hold == '':
-                img_list.append('Unknown')
-            else:
-                img_list.append(time_hold)
 
-            img_list.append(img['SliceThickness'].iloc[0])
-            img_list.append(img['PixelSpacing'].iloc[0])
-            img_list.append([img['ImagePositionPatient'].iloc[0][2], img['ImagePositionPatient'].iloc[-1][2]])
-            img_list.append(img['ImageOrientationPatient'].iloc[0])
-            img_list.append(img['PatientPosition'].iloc[0])
-            img_list.append(img['ImagePositionPatient'].iloc[0])
-            img_list.append(img['Rows'].iloc[0])
-            img_list.append(img['Columns'].iloc[0])
-            img_list.append(img['PatientName'].iloc[0])
-            img_list.append(img['CalculatedSliceThickness'].iloc[0])
-            self.img_info.append(img_list)
+            for t in info_tags:
+                if t == 'Date':
+                    self.img_info.at[ii, 'Date'] = date_hold
+                elif t == 'Time':
+                    self.img_info.at[ii, 'Time'] = time_hold
+                elif t == 'SliceRange':
+                    self.img_info.at[ii, 'SliceRange'] = [img['ImagePositionPatient'].iloc[0][2],
+                                                          img['ImagePositionPatient'].iloc[-1][2]]
+                elif t == 'Slices':
+                    self.img_info.at[ii, 'Slices'] = len(img['FilePath'])
+                else:
+                    self.img_info.at[ii, t] = img[t].iloc[0]
 
     def dicom_images(self):
-        for ii, img in enumerate(self.img_df):
-            self.img_filepath.append(img['FilePath'])
-
+        for ii, img in enumerate(self.img_tag_df):
             img_slice = []
             for idx in img['DatasetIndex']:
                 if img['Modality'][idx] == 'CT':
@@ -213,39 +207,47 @@ class DicomReader:
                 elif img['Modality'][idx] == 'MR':
                     img_slice.append(self.ds[idx].pixel_array.astype('int16'))
 
-            if self.img_info[ii][11] == 'FFS':
-                if float(self.img_info[ii][9][0]) < float(self.img_info[ii][9][1]):
+            if self.img_info.at[ii, 'PatientPosition'] == 'FFS':
+                if float(self.img_info.at[ii, 'SliceRange'][0]) < float(self.img_info.at[ii, 'SliceRange'][1]):
                     self.img_data.append(np.flip(np.flip(np.transpose(np.asarray(img_slice), (0, 2, 1)), 0), 2))
                 else:
                     self.img_data.append(np.flip(np.transpose(np.asarray(img_slice), (0, 2, 1)), 2))
             else:
-                if float(self.img_info[ii][9][0]) < float(self.img_info[ii][9][1]):
+                if float(self.img_info.at[ii, 'SliceRange'][0]) < float(self.img_info.at[ii, 'SliceRange'][1]):
                     self.img_data.append(np.flip(np.flip(np.transpose(np.asarray(img_slice), (0, 2, 1)), 0), 2))
                 else:
                     self.img_data.append(np.flip(np.transpose(np.asarray(img_slice), (0, 2, 1)), 2))
 
-    def rt_matching(self, image_dataframe):
-        if image_dataframe:
-            image_df = image_dataframe
-        else:
-            image_df = self.img_df
+    def get_file_info(self):
+        for ii, img in enumerate(self.img_tag_df):
+            files = self.img_tag_df[ii]['FilePath'].tolist()
+            sop = self.img_tag_df[ii]['SOPInstanceUID'].tolist()
 
-        for img in image_df:
-            img_series = img.SeriesInstanceUID.iloc[0]
-            img_sop = img.SOPInstanceUID.tolist()
-            spacing_array = [float(img.PixelSpacing.iloc[0][0]),
-                             float(img.PixelSpacing.iloc[0][1]),
-                             float(img.CalculatedSliceThickness.iloc[0])]
+            self.file_info.append([files, sop])
 
-            corner_array = [float(img['ImagePositionPatient'].iloc[0][0]),
-                            float(img['ImagePositionPatient'].iloc[0][1]),
-                            float(img['ImagePositionPatient'].iloc[0][2])]
+    def rt_matching(self, image_info, file_info):
+        if not image_info and not file_info:
+            image_info = self.img_info
+            file_info = self.file_info
 
-            img_direction = img['PatientPosition'].iloc[0]
-            img_z_direction = [img['ImagePositionPatient'].iloc[0][2],
-                               img['ImagePositionPatient'].iloc[-1][2]]
+        for nn in range(len(image_info.index)):
+            img_series = image_info.at[nn, 'SeriesInstanceUID']
+            img_sop = file_info[nn][1]
+            spacing_array = [image_info.at[nn, 'PixelSpacing'][0],
+                             image_info.at[nn, 'PixelSpacing'][1],
+                             image_info.at[nn, 'CalculatedSliceThickness']]
+
+            corner_array = [float(image_info.at[nn, 'ImagePositionPatient'][0]),
+                            float(image_info.at[nn, 'ImagePositionPatient'][1]),
+                            float(image_info.at[nn, 'ImagePositionPatient'][2])]
+
+            img_direction = image_info.at[nn, 'PatientPosition']
+            img_z_direction = [image_info.at[nn, 'SliceRange'][0],
+                               image_info.at[nn, 'SliceRange'][1]]
+            slices = image_info.at[nn, 'Slices']
 
             rt_hold = []
+            rt_hold_name = []
             rt_hold_contour = []
             for ii in range(len(self.rt_df)):
                 rt_series = self.rt_df.SeriesUID.iloc[ii]
@@ -254,7 +256,7 @@ class DicomReader:
                     for jj in range(len(self.rt_df.RoiNames[ii])):
 
                         roi_sop = []
-                        roi_contour = [[]]*img.shape[0]
+                        roi_contour = [[]]*slices
                         contour_count = 0
                         for kk, rt_sop in enumerate(self.rt_df.RoiSOP[ii][jj]):
                             if rt_sop in img_sop:
@@ -274,13 +276,13 @@ class DicomReader:
                                                                                  hold_contour[0, 0:2])))
                                 else:
                                     if float(img_z_direction[0]) < float(img_z_direction[1]):
-                                        if len(roi_contour[int(img.shape[0])-slice_num-1]) > 0:
-                                            roi_contour[int(img.shape[0])-slice_num-1].\
+                                        if len(roi_contour[int(slices)-slice_num-1]) > 0:
+                                            roi_contour[int(slices)-slice_num-1].\
                                                 append(np.vstack((hold_contour[:, 0:2],
                                                                   hold_contour[0, 0:2])))
                                         else:
-                                            roi_contour[int(img.shape[0])-slice_num-1] = []
-                                            roi_contour[int(img.shape[0])-slice_num-1].\
+                                            roi_contour[int(slices)-slice_num-1] = []
+                                            roi_contour[int(slices)-slice_num-1].\
                                                 append(np.vstack((hold_contour[:, 0:2],
                                                                   hold_contour[0, 0:2])))
                                     else:
@@ -294,9 +296,11 @@ class DicomReader:
                                                                   hold_contour[0, 0:2])))
 
                         if contour_count > 0:
+                            rt_hold_name.append(self.rt_df.RoiNames[ii][jj])
                             rt_hold.append([self.rt_df.FilePath[ii], self.rt_df.RoiNames[ii][jj], roi_sop])
                             rt_hold_contour.append(roi_contour)
 
+            self.roi_name.append(rt_hold_name)
             self.roi_info.append(rt_hold)
             self.roi_data.append(rt_hold_contour)
 
@@ -316,11 +320,12 @@ class DicomReader:
 
 
 class MedicalImageConverter:
-    def __init__(self, main_path, exclude_files, multi_folder, existing_ct_dataframe):
+    def __init__(self, main_path, exclude_files, multi_folder, existing_img_info, existing_file_info):
         self.main_path = main_path
         self.exclude_files = exclude_files
         self.multi_folder = multi_folder
-        self.existing_ct_dataframe = existing_ct_dataframe
+        self.existing_img_info = existing_img_info
+        self.existing_file_info = existing_file_info
 
         self.total_size = None
         self.available_memory = None
@@ -381,18 +386,33 @@ class MedicalImageConverter:
         self.dicom_reader.get_tags()
         self.dicom_reader.separate_dicom_images()
         self.dicom_reader.separate_rt_images()
+        self.dicom_reader.get_calculated_thickness()
+        self.dicom_reader.sort_instances()
         self.dicom_reader.dicom_info()
         self.dicom_reader.dicom_images()
-        self.dicom_reader.rt_matching(self.existing_ct_dataframe)
+        self.dicom_reader.get_file_info()
+        self.dicom_reader.rt_matching(self.existing_img_info, self.existing_file_info)
         self.dicom_reader.roi_contour_fix()
         t2 = time.time()
         print('Dicom Read Time: ', t2-t1)
 
-    def get_dicom_images(self):
-        return self.dicom_reader.img_data, self.dicom_reader.img_info, self.dicom_reader.img_filepath
+    def get_file_info(self):
+        return self.dicom_reader.file_info
 
-    def get_dicom_roi(self):
-        return self.dicom_reader.roi_data, self.dicom_reader.roi_info
+    def get_img_info(self):
+        return self.dicom_reader.img_info
+
+    def get_img_data(self):
+        return self.dicom_reader.img_data
+
+    def get_roi_info(self):
+        return self.dicom_reader.roi_info
+
+    def get_roi_data(self):
+        return self.dicom_reader.roi_data
+
+    def get_roi_name(self):
+        return self.dicom_reader.roi_name
 
     def sort_meta(self):
         mhd_paths_only = [item[0] for item in self.mhd_files]
@@ -429,23 +449,28 @@ class MedicalImageConverter:
         t2 = time.time()
         print('Meta Read Time: ', t2-t1)
 
-    def read_stl(self):
-        t1 = time.time()
-        for file in self.stl_files:
-            self.stl_img.append(mesh.Mesh.from_file(file[0]))
-        t2 = time.time()
-        print('STL Read (numpy) Time: ', t2 - t1)
+    # def read_stl(self):
+    #     t1 = time.time()
+    #     for file in self.stl_files:
+    #         self.stl_img.append(mesh.Mesh.from_file(file[0]))
+    #     t2 = time.time()
+    #     print('STL Read (numpy) Time: ', t2 - t1)
 
 
 # def main():
 #     path = r'C:\Users\csoconnor\Desktop\read_test_3'
 #
-#     mic = MedicalImageConverter(path, exclude_files=[], multi_folder=False, existing_ct_dataframe=None)
+#     mic = MedicalImageConverter(path,
+#                                 exclude_files=[],
+#                                 multi_folder=False,
+#                                 existing_img_info=None,
+#                                 existing_file_info=None)
 #     mic.file_parsar()
 #     mic.check_memory()
 #     mic.read_dicom()
-#     # mic.read_meta()
-#     # mic.read_stl()
+#     img_data, img_info, img_filepath = mic.get_dicom_images()
+#     roi_data, roi_info = mic.get_dicom_roi()
+#
 #
 #
 # if __name__ == '__main__':
