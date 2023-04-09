@@ -35,12 +35,12 @@ def add_dicom_extension(files):
 
 
 class RayStationCorrection:
-    def __init__(self, ds, img_info, img_tag_info, file_info, data_path):
+    def __init__(self, ds, img_info, img_tag_info, file_info, export_path):
         self.ds = ds
         self.img_info = img_info
         self.img_tag_info = img_tag_info
         self.file_info = file_info
-        self.data_path = data_path
+        self.export_path = export_path
 
         self.ds_split = []
 
@@ -63,16 +63,6 @@ class RayStationCorrection:
                         self.series_update.append([0, series[idx]])
                     else:
                         self.series_update.append([1, series[idx] + '.' + str(jj)])
-                        # last_element = series[idx].split('.')[-1]
-                        # if len(last_element) == 1:
-                        #     last_digit = int(last_element)
-                        # else:
-                        #     last_digit = int(last_element[-1])
-                        #
-                        # if last_digit + jj < 10:
-                        #     self.series_update.append([1, series[idx][:-1] + str(last_digit + jj)])
-                        # else:
-                        #     self.series_update.append([1, series[idx][:-1] + str(last_digit + jj)])
 
     def get_frame_of_reference_update(self):
         for_unique = [tag['FrameOfReferenceUID'].unique().tolist() for tag in self.img_tag_info]
@@ -118,7 +108,7 @@ class RayStationCorrection:
                     self.ds_split[ii][jj]['PatientName'].value = self.name
 
     def save_data(self):
-        save_path = os.path.join(self.data_path, 'Corrections')
+        save_path = os.path.join(self.export_path, 'Corrections')
         if not os.path.exists(save_path):
             os.mkdir(save_path)
 
@@ -126,15 +116,24 @@ class RayStationCorrection:
         ptid_path = os.path.join(save_path, ptid)
         if not os.path.exists(ptid_path):
             os.mkdir(ptid_path)
+            jj = 1
+        else:
+            jj = len([x[0] for x in os.walk(ptid_path)])
 
-            for ii, ds_img in enumerate(self.ds_split):
-                modality = self.ds_split[ii][0]['Modality'].value
-                thickness = np.round(self.img_info.at[ii, 'CalculatedSliceThickness'], 3)
-                img_path = os.path.join(ptid_path, modality + '_' + str(ii) + '_' + str(thickness) + 'mm')
-                os.mkdir(img_path)
+        for ii, ds_img in enumerate(self.ds_split):
+            modality = self.ds_split[ii][0]['Modality'].value
+            thickness = np.round(self.img_info.at[ii, 'CalculatedSliceThickness'], 3)
+            if int(thickness) == 0:
+                thickness = np.round(self.img_info.at[ii, 'SliceThickness'], 3)
+            if self.img_info.at[ii, 'ImageOrientationPatient'] == [1, 0, 0, 0, 1, 0]:
+                view = 'axial'
+            else:
+                view = 'nonaxial'
+            img_path = os.path.join(ptid_path, modality + '_' + str(ii+jj) + '_' + str(thickness) + 'mm' + '_' + view)
+            os.mkdir(img_path)
 
-                for jj, ds_file in enumerate(ds_img):
-                    ds_file.save_as(os.path.join(img_path, self.file_info[ii][0][jj].split('\\')[-1]))
+            for kk, ds_file in enumerate(ds_img):
+                ds_file.save_as(os.path.join(img_path, self.file_info[ii][0][kk].split('\\')[-1]))
 
 
 class DicomReader:
@@ -597,7 +596,11 @@ class MedicalImageConverter:
 
 
 def main():
-    data_path = r'C:\Users\csoconnor\Desktop\coh_test\COH_0001\COH_00010001'
+    # data_path = r'C:\Users\csoconnor\Desktop\coh_test\COH_0001\COH_00010001'
+    # export_path = r'C:\Users\csoconnor\Desktop\coh_test'
+
+    data_path = r'C:\Users\csoconnor\Desktop\mrn_test\Data'
+    export_path = r'C:\Users\csoconnor\Desktop\mrn_test'
 
     mic = MedicalImageConverter(data_path,
                                 exclude_files=[],
@@ -611,11 +614,11 @@ def main():
     mic.read_dicom()
 
     rs_correction = RayStationCorrection(mic.get_ds(), mic.get_img_info(), mic.get_tag_info(), mic.get_file_info(),
-                                         data_path)
+                                         export_path)
     rs_correction.get_series_update()
     rs_correction.get_frame_of_reference_update()
     rs_correction.update_ds_order()
-    rs_correction.update_ptid_and_name('COH_0001', 'COH_0001')
+    # rs_correction.update_ptid_and_name('COH_0001', 'COH_0001')
     rs_correction.apply_correction()
     rs_correction.save_data()
 
