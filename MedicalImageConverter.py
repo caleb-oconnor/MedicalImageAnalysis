@@ -3,6 +3,7 @@ import os
 import time
 import psutil
 
+import gdcm  # python-gdcm
 import numpy as np
 import pandas as pd
 import pydicom as dicom
@@ -14,11 +15,126 @@ from multiprocessing import Pool
 
 def multi_process_dicom(path):
     try:
-        datasets = dicom.dcmread(str(path), stop_before_pixels=True)
+        datasets = dicom.dcmread(str(path))
     except ImportError:
         datasets = []
 
     return datasets
+
+
+def add_dicom_extension(files):
+    new_files = []
+    for name in files:
+        a, b = os.path.splitext(name[0])
+        if not b:
+            newfile = name[0] + '.dcm'
+            os.rename(name[0], newfile)
+            new_files.append([newfile, name[1]])
+        else:
+            new_files.append(name)
+
+
+class RayStationCorrection:
+    def __init__(self, ds, img_info, img_tag_info, file_info, data_path):
+        self.ds = ds
+        self.img_info = img_info
+        self.img_tag_info = img_tag_info
+        self.file_info = file_info
+        self.data_path = data_path
+
+        self.ds_split = []
+
+        self.series_update = []
+        self.frame_reference_update = []
+        self.ptid = None
+        self.name = None
+
+    def get_series_update(self):
+        series = self.img_info['SeriesInstanceUID'].to_list()
+        unique_series = self.img_info['SeriesInstanceUID'].unique().tolist()
+
+        for s in unique_series:
+            series_idx = [ii for ii, value in enumerate(series) if value == s]
+            if len(series_idx) == 1:
+                self.series_update.append([0, series[series_idx[0]]])
+            else:
+                for jj, idx in enumerate(series_idx):
+                    if jj == 0:
+                        self.series_update.append([0, series[idx]])
+                    else:
+                        self.series_update.append([1, series[idx] + '.' + str(jj)])
+                        # last_element = series[idx].split('.')[-1]
+                        # if len(last_element) == 1:
+                        #     last_digit = int(last_element)
+                        # else:
+                        #     last_digit = int(last_element[-1])
+                        #
+                        # if last_digit + jj < 10:
+                        #     self.series_update.append([1, series[idx][:-1] + str(last_digit + jj)])
+                        # else:
+                        #     self.series_update.append([1, series[idx][:-1] + str(last_digit + jj)])
+
+    def get_frame_of_reference_update(self):
+        for_unique = [tag['FrameOfReferenceUID'].unique().tolist() for tag in self.img_tag_info]
+
+        for for_img in for_unique:
+            if len(for_img) == 1:
+                self.frame_reference_update.append([0, for_img[0]])
+            else:
+                self.frame_reference_update.append([1, for_img[0]])
+
+    def update_ds_order(self):
+        for ii, info in enumerate(self.img_tag_info):
+            ds_idx = self.img_tag_info[ii]['DatasetIndex'].tolist()
+
+            hold_ds = []
+            for idx in ds_idx:
+                hold_ds.append(self.ds[idx])
+
+            self.ds_split.append(hold_ds)
+
+    def update_ptid_and_name(self, ptid, name):
+        self.ptid = ptid
+        self.name = name
+
+    def apply_correction(self):
+        for ii, info in enumerate(self.img_tag_info):
+            ds_idx = self.img_tag_info[ii]['DatasetIndex'].tolist()
+
+            if self.series_update[ii][0] == 1:
+                for jj in range(len(ds_idx)):
+                    self.ds_split[ii][jj]['SeriesInstanceUID'].value = self.series_update[ii][1]
+
+            if self.frame_reference_update[ii][0] == 1:
+                for jj in range(len(ds_idx)):
+                    self.ds_split[ii][jj]['FrameOfReferenceUID'].value = self.frame_reference_update[ii][1]
+
+            if self.ptid:
+                for jj in range(len(ds_idx)):
+                    self.ds_split[ii][jj]['PatientID'].value = self.ptid
+
+            if self.name:
+                for jj in range(len(ds_idx)):
+                    self.ds_split[ii][jj]['PatientName'].value = self.name
+
+    def save_data(self):
+        save_path = os.path.join(self.data_path, 'Corrections')
+        if not os.path.exists(save_path):
+            os.mkdir(save_path)
+
+        ptid = self.ds_split[0][0]['PatientID'].value
+        ptid_path = os.path.join(save_path, ptid)
+        if not os.path.exists(ptid_path):
+            os.mkdir(ptid_path)
+
+            for ii, ds_img in enumerate(self.ds_split):
+                modality = self.ds_split[ii][0]['Modality'].value
+                thickness = np.round(self.img_info.at[ii, 'CalculatedSliceThickness'], 3)
+                img_path = os.path.join(ptid_path, modality + '_' + str(ii) + '_' + str(thickness) + 'mm')
+                os.mkdir(img_path)
+
+                for jj, ds_file in enumerate(ds_img):
+                    ds_file.save_as(os.path.join(img_path, self.file_info[ii][0][jj].split('\\')[-1]))
 
 
 class DicomReader:
@@ -153,7 +269,8 @@ class DicomReader:
                 calculated_slice_thickness = abs(float(self.img_tag_df[ii]['ImagePositionPatient'].iloc[1][2]) -
                                                  float(self.img_tag_df[ii]['ImagePositionPatient'].iloc[0][2]))
             else:
-                calculated_slice_thickness = self.img_tag_df[ii]['SliceThickness'].iloc[0][2]
+                idx = self.img_tag_df[ii].index.tolist()
+                calculated_slice_thickness = self.img_tag_df[ii].at[idx[0], 'SliceThickness']
 
             self.img_tag_df[ii]['CalculatedSliceThickness'] = calculated_slice_thickness
 
@@ -204,6 +321,7 @@ class DicomReader:
                         img_slice.append(self.ds[idx].pixel_array - 1024)
                     else:
                         img_slice.append(self.ds[idx].pixel_array.astype('int16') - 1024)
+
                 elif img['Modality'][idx] == 'MR':
                     img_slice.append(self.ds[idx].pixel_array.astype('int16'))
 
@@ -267,22 +385,33 @@ class DicomReader:
                                 hold_contour[:, 1] = 511 - hold_contour[:, 1]
                                 slice_num = int(hold_contour[0][2])
                                 if img_direction == 'FFS':
-                                    if len(roi_contour[slice_num]) > 0:
-                                        roi_contour[slice_num].append(np.vstack((hold_contour[:, 0:2],
-                                                                                 hold_contour[0, 0:2])))
+                                    if float(img_z_direction[1]) < float(img_z_direction[0]):
+                                        if len(roi_contour[slice_num]) > 0:
+                                            roi_contour[slice_num].append(np.vstack((hold_contour[:, 0:2],
+                                                                                     hold_contour[0, 0:2])))
+                                        else:
+                                            roi_contour[slice_num] = []
+                                            roi_contour[slice_num].append(np.vstack((hold_contour[:, 0:2],
+                                                                                     hold_contour[0, 0:2])))
                                     else:
-                                        roi_contour[slice_num] = []
-                                        roi_contour[slice_num].append(np.vstack((hold_contour[:, 0:2],
-                                                                                 hold_contour[0, 0:2])))
-                                else:
-                                    if float(img_z_direction[0]) < float(img_z_direction[1]):
-                                        if len(roi_contour[int(slices)-slice_num-1]) > 0:
-                                            roi_contour[int(slices)-slice_num-1].\
+                                        if len(roi_contour[int(slices) - slice_num - 1]) > 0:
+                                            roi_contour[int(slices) - slice_num - 1]. \
                                                 append(np.vstack((hold_contour[:, 0:2],
                                                                   hold_contour[0, 0:2])))
                                         else:
-                                            roi_contour[int(slices)-slice_num-1] = []
-                                            roi_contour[int(slices)-slice_num-1].\
+                                            roi_contour[int(slices) - slice_num - 1] = []
+                                            roi_contour[int(slices) - slice_num - 1]. \
+                                                append(np.vstack((hold_contour[:, 0:2],
+                                                                  hold_contour[0, 0:2])))
+                                else:
+                                    if float(img_z_direction[0]) < float(img_z_direction[1]):
+                                        if len(roi_contour[int(slices) - slice_num - 1]) > 0:
+                                            roi_contour[int(slices) - slice_num - 1]. \
+                                                append(np.vstack((hold_contour[:, 0:2],
+                                                                  hold_contour[0, 0:2])))
+                                        else:
+                                            roi_contour[int(slices) - slice_num - 1] = []
+                                            roi_contour[int(slices) - slice_num - 1]. \
                                                 append(np.vstack((hold_contour[:, 0:2],
                                                                   hold_contour[0, 0:2])))
                                     else:
@@ -291,7 +420,7 @@ class DicomReader:
                                                                                      hold_contour[0, 0:2])))
                                         else:
                                             roi_contour[slice_num] = []
-                                            roi_contour[slice_num].\
+                                            roi_contour[slice_num]. \
                                                 append(np.vstack((hold_contour[:, 0:2],
                                                                   hold_contour[0, 0:2])))
 
@@ -333,6 +462,7 @@ class MedicalImageConverter:
 
         self.dicom_reader = None
 
+        self.no_file_extenstion = []
         self.dicom_files = []
         self.mhd_files = []
         self.raw_files = []
@@ -353,14 +483,17 @@ class MedicalImageConverter:
                 for name in files:
                     filepath = os.path.join(root, name)
                     if filepath not in self.exclude_files:
-                        if name.endswith('.dcm'):
+                        filename, file_extension = os.path.splitext(filepath)
+                        if file_extension == '.dcm':
                             self.dicom_files.append(filepath)
-                        elif name.endswith('.mhd'):
+                        elif file_extension == '.mhd':
                             self.mhd_files.append([filepath, n])
-                        elif name.endswith('.raw'):
+                        elif file_extension == '.raw':
                             self.raw_files.append([filepath, n])
-                        elif name.endswith('.stl'):
+                        elif file_extension == '.stl':
                             self.stl_files.append([filepath, n])
+                        elif file_extension == '':
+                            self.no_file_extenstion.append([filepath, n])
 
     def check_memory(self):
         dicom_size = 0
@@ -414,6 +547,12 @@ class MedicalImageConverter:
     def get_roi_name(self):
         return self.dicom_reader.roi_name
 
+    def get_tag_info(self):
+        return self.dicom_reader.img_tag_df
+
+    def get_ds(self):
+        return self.dicom_reader.ds
+
     def sort_meta(self):
         mhd_paths_only = [item[0] for item in self.mhd_files]
         raw_paths_only = [item[0] for item in self.raw_files]
@@ -457,21 +596,29 @@ class MedicalImageConverter:
     #     print('STL Read (numpy) Time: ', t2 - t1)
 
 
-# def main():
-#     path = r'C:\Users\csoconnor\Desktop\read_test_3'
-#
-#     mic = MedicalImageConverter(path,
-#                                 exclude_files=[],
-#                                 multi_folder=False,
-#                                 existing_img_info=None,
-#                                 existing_file_info=None)
-#     mic.file_parsar()
-#     mic.check_memory()
-#     mic.read_dicom()
-#     img_data, img_info, img_filepath = mic.get_dicom_images()
-#     roi_data, roi_info = mic.get_dicom_roi()
-#
-#
-#
-# if __name__ == '__main__':
-#     main()
+def main():
+    data_path = r'C:\Users\csoconnor\Desktop\coh_test\COH_0001\COH_00010001'
+
+    mic = MedicalImageConverter(data_path,
+                                exclude_files=[],
+                                multi_folder=False,
+                                existing_img_info=None,
+                                existing_file_info=None)
+    mic.file_parsar()
+    if mic.no_file_extenstion:
+        add_dicom_extension(mic.no_file_extenstion)
+    mic.check_memory()
+    mic.read_dicom()
+
+    rs_correction = RayStationCorrection(mic.get_ds(), mic.get_img_info(), mic.get_tag_info(), mic.get_file_info(),
+                                         data_path)
+    rs_correction.get_series_update()
+    rs_correction.get_frame_of_reference_update()
+    rs_correction.update_ds_order()
+    rs_correction.update_ptid_and_name('COH_0001', 'COH_0001')
+    rs_correction.apply_correction()
+    rs_correction.save_data()
+
+
+if __name__ == '__main__':
+    main()
