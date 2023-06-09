@@ -9,6 +9,9 @@ import pandas as pd
 import pydicom as dicom
 import SimpleITK as sitk
 
+from pydicom.uid import generate_uid
+
+
 # from stl import mesh
 from multiprocessing import Pool
 
@@ -16,10 +19,10 @@ from multiprocessing import Pool
 def multi_process_dicom(path):
     try:
         datasets = dicom.dcmread(str(path))
-    except ImportError:
+    except:
         datasets = []
 
-    return datasets
+    return datasets, path
 
 
 def add_dicom_extension(files):
@@ -29,9 +32,11 @@ def add_dicom_extension(files):
         if not b:
             newfile = name[0] + '.dcm'
             os.rename(name[0], newfile)
-            new_files.append([newfile, name[1]])
+            new_files.append(newfile)
         else:
-            new_files.append(name)
+            new_files.append(name[0])
+
+    return new_files
 
 
 class RayStationCorrection:
@@ -46,8 +51,11 @@ class RayStationCorrection:
 
         self.series_update = []
         self.frame_reference_update = []
+
         self.ptid = None
         self.name = None
+        self.ds_date = None
+        self.ds_time = None
 
     def get_series_update(self):
         series = self.img_info['SeriesInstanceUID'].to_list()
@@ -62,14 +70,17 @@ class RayStationCorrection:
                     if jj == 0:
                         self.series_update.append([0, series[idx]])
                     else:
-                        self.series_update.append([1, series[idx] + '.' + str(jj)])
+                        self.series_update.append([1, generate_uid()])
 
     def get_frame_of_reference_update(self):
         for_unique = [tag['FrameOfReferenceUID'].unique().tolist() for tag in self.img_tag_info]
 
         for for_img in for_unique:
             if len(for_img) == 1:
-                self.frame_reference_update.append([0, for_img[0]])
+                if for_img[0] != '':
+                    self.frame_reference_update.append([0, for_img[0]])
+                else:
+                    self.frame_reference_update.append([1, generate_uid()])
             else:
                 self.frame_reference_update.append([1, for_img[0]])
 
@@ -79,13 +90,19 @@ class RayStationCorrection:
 
             hold_ds = []
             for idx in ds_idx:
-                hold_ds.append(self.ds[idx])
+                hold_ds.append(self.ds[int(idx)])
 
             self.ds_split.append(hold_ds)
 
     def update_ptid_and_name(self, ptid, name):
         self.ptid = ptid
         self.name = name
+
+    def update_date(self, ds_date):
+        self.ds_date = ds_date
+
+    def update_time(self, ds_time):
+        self.ds_time = ds_time
 
     def apply_correction(self):
         for ii, info in enumerate(self.img_tag_info):
@@ -107,7 +124,37 @@ class RayStationCorrection:
                 for jj in range(len(ds_idx)):
                     self.ds_split[ii][jj]['PatientName'].value = self.name
 
+            if self.ds_date:
+                for jj in range(len(ds_idx)):
+                    self.ds_split[ii][jj]['StudyDate'].value = self.ds_date
+
+            if self.ds_time:
+                for jj in range(len(ds_idx)):
+                    self.ds_split[ii][jj]['StudyTime'].value = self.ds_time
+
     def save_data(self):
+        ptid_path, ptid_count = self.get_ptid_path()
+        img_path = self.get_img_path(ptid_path, ptid_count)
+        change_idx = [x[0] for x in self.series_update]
+        if 1 in change_idx:
+            self.save_new_uid(ptid_path, img_path)
+
+        for ii, ds_img in enumerate(self.ds_split):
+            unique_padding = self.img_tag_info[ii]['PixelPaddingValue'].unique().tolist()
+            padding = unique_padding[0]
+            for jj, ds_file in enumerate(ds_img):
+                if (0x0008, 0x1032) in ds_file:
+                    del ds_file[0x0008, 0x1032]
+                if (0x0012, 0x0063) in ds_file:
+                    del ds_file[0x0012, 0x0063]
+                if (0x0012, 0x0064) in ds_file:
+                    del ds_file[0x0012, 0x0064]
+                if (0x0028, 0x0120) in ds_file and padding:
+                    ds_file[0x0028, 0x0120].value = int(padding)
+
+                ds_file.save_as(os.path.join(img_path[ii], self.file_info[ii][0][jj].split('\\')[-1]))
+
+    def get_ptid_path(self):
         save_path = os.path.join(self.export_path, 'Corrections')
         if not os.path.exists(save_path):
             os.mkdir(save_path)
@@ -116,29 +163,57 @@ class RayStationCorrection:
         ptid_path = os.path.join(save_path, ptid)
         if not os.path.exists(ptid_path):
             os.mkdir(ptid_path)
-            jj = 1
+            ptid_count = 1
         else:
-            jj = len([x[0] for x in os.walk(ptid_path)])
+            ptid_count = len([x[0] for x in os.walk(ptid_path)])
 
+        return ptid_path, ptid_count
+
+    def get_img_path(self, ptid_path, ptid_count):
+        img_path = []
         for ii, ds_img in enumerate(self.ds_split):
             modality = self.ds_split[ii][0]['Modality'].value
             thickness = np.round(self.img_info.at[ii, 'CalculatedSliceThickness'], 3)
+
+            if ii + ptid_count < 10:
+                ct_number = '0' + str(ii+ptid_count)
+            else:
+                ct_number = str(ii+ptid_count)
+
             if int(thickness) == 0:
                 thickness = np.round(self.img_info.at[ii, 'SliceThickness'], 3)
+
             if self.img_info.at[ii, 'ImageOrientationPatient'] == [1, 0, 0, 0, 1, 0]:
                 view = 'axial'
             else:
                 view = 'nonaxial'
-            img_path = os.path.join(ptid_path, modality + '_' + str(ii+jj) + '_' + str(thickness) + 'mm' + '_' + view)
-            os.mkdir(img_path)
 
-            for kk, ds_file in enumerate(ds_img):
-                ds_file.save_as(os.path.join(img_path, self.file_info[ii][0][kk].split('\\')[-1]))
+            img_path.append(os.path.join(ptid_path,
+                            modality + '_' + ct_number + '_' + str(thickness) + 'mm' + '_' + view))
+            os.mkdir(img_path[-1])
+
+        return img_path
+
+    def save_new_uid(self, ptid_path, img_path):
+        file = os.path.join(ptid_path, 'series_uid_changes.txt')
+        if os.path.isfile(file):
+            read_type = "a"
+        else:
+            read_type = "w"
+
+        with open(file, read_type) as f:
+            for ii, new_uid in enumerate(self.series_update):
+                if new_uid[0] == 1:
+                    f.write(img_path[ii].split('\\')[-1] + '\t' +
+                            self.img_info.at[ii, 'SeriesInstanceUID'] + '\t' +
+                            new_uid[1] + '\n')
+        f.close()
 
 
 class DicomReader:
     def __init__(self, dicom_files):
         self.dicom_files = dicom_files
+        self.processing_files = []
 
         self.ds = []
         self.file_info = []
@@ -174,13 +249,18 @@ class DicomReader:
     def read_dicom(self):
         if len(self.dicom_files) > 500:
             p = Pool()
-            for x in p.imap_unordered(multi_process_dicom, self.dicom_files):
+            for x, y in p.imap_unordered(multi_process_dicom, self.dicom_files):
                 if x:
                     self.ds.append(x)
+                    self.processing_files.append(y)
             p.close()
         else:
             for path in self.dicom_files:
-                self.ds.append(dicom.dcmread(path))
+                try:
+                    self.ds.append(dicom.dcmread(path))
+                except:
+                    self.ds.append([])
+                self.processing_files.append(path)
 
     def get_tags(self):
         tag_list = []
@@ -191,13 +271,35 @@ class DicomReader:
                     if t == 'DatasetIndex':
                         tag_hold.append(ii)
                     elif t == 'FilePath':
-                        tag_hold.append(self.dicom_files[ii])
+                        tag_hold.append(self.processing_files[ii])
                     elif t == 'CalculatedSliceThickness':
                         tag_hold.append('')
                     elif t in info:
                         tag_hold.append(info[t].value)
                     else:
                         tag_hold.append('')
+
+                if (0x0018, 0x0050) in info:
+                    if not info['SliceThickness'].value:
+                        tag_hold = []
+                        for t in self.tags:
+                            tag_hold.append('')
+                else:
+                    if (0x0008, 0x0060) in info and info['Modality'].value != 'RTSTRUCT':
+                        tag_hold = []
+                        for t in self.tags:
+                            tag_hold.append('')
+
+                if (0x0020, 0x0052) not in info:
+                    tag_hold = []
+                    for t in self.tags:
+                        tag_hold.append('')
+
+                if (0x7fe0, 0x0010) not in info:
+                    tag_hold = []
+                    for t in self.tags:
+                        tag_hold.append('')
+
             else:
                 for t in self.tags:
                     tag_hold.append('')
@@ -312,17 +414,31 @@ class DicomReader:
                     self.img_info.at[ii, t] = img[t].iloc[0]
 
     def dicom_images(self):
+        delete_index = []
+        for ii, img in enumerate(self.img_tag_df):
+            if len(img['Rows'].unique().tolist()) > 1 or len(img['Columns'].unique().tolist()) > 1:
+                delete_index.append(ii)
+
+        if delete_index:
+            delete_index.reverse()
+            for idx in delete_index:
+                self.img_info.drop(idx, inplace=True)
+                del self.img_tag_df[idx]
+
+            new_idx = [ii for ii in range(len(self.img_tag_df))]
+            self.img_info.index = new_idx
+
         for ii, img in enumerate(self.img_tag_df):
             img_slice = []
             for idx in img['DatasetIndex']:
                 if img['Modality'][idx] == 'CT':
-                    if isinstance(self.ds[idx].pixel_array[0][0], np.int16):
-                        img_slice.append(self.ds[idx].pixel_array - 1024)
+                    if isinstance(self.ds[int(idx)].pixel_array[0][0], np.int16):
+                        img_slice.append(self.ds[int(idx)].pixel_array - 1024)
                     else:
-                        img_slice.append(self.ds[idx].pixel_array.astype('int16') - 1024)
+                        img_slice.append(self.ds[int(idx)].pixel_array.astype('int16') - 1024)
 
-                elif img['Modality'][idx] == 'MR':
-                    img_slice.append(self.ds[idx].pixel_array.astype('int16'))
+                elif img['Modality'][int(idx)] == 'MR':
+                    img_slice.append(self.ds[int(idx)].pixel_array.astype('int16'))
 
             if self.img_info.at[ii, 'PatientPosition'] == 'FFS':
                 if float(self.img_info.at[ii, 'SliceRange'][0]) < float(self.img_info.at[ii, 'SliceRange'][1]):
@@ -497,7 +613,10 @@ class MedicalImageConverter:
     def check_memory(self):
         dicom_size = 0
         for file in self.dicom_files:
-            dicom_size = dicom_size + os.path.getsize(file)
+            try:
+                dicom_size = dicom_size + os.path.getsize(file)
+            except:
+                print(1)
 
         raw_size = 0
         for file in self.raw_files:
@@ -595,33 +714,53 @@ class MedicalImageConverter:
     #     print('STL Read (numpy) Time: ', t2 - t1)
 
 
-def main():
-    # data_path = r'C:\Users\csoconnor\Desktop\coh_test\COH_0001\COH_00010001'
-    # export_path = r'C:\Users\csoconnor\Desktop\coh_test'
+def read_main():
+    dir_path = r'C:\Users\csoconnor\Desktop\mic_test_data'
 
-    data_path = r'C:\Users\csoconnor\Desktop\mrn_test\Data'
-    export_path = r'C:\Users\csoconnor\Desktop\mrn_test'
-
-    mic = MedicalImageConverter(data_path,
+    mic = MedicalImageConverter(dir_path,
                                 exclude_files=[],
                                 multi_folder=False,
                                 existing_img_info=None,
                                 existing_file_info=None)
     mic.file_parsar()
     if mic.no_file_extenstion:
-        add_dicom_extension(mic.no_file_extenstion)
+        mic.dicom_files = add_dicom_extension(mic.no_file_extenstion)
     mic.check_memory()
     mic.read_dicom()
 
-    rs_correction = RayStationCorrection(mic.get_ds(), mic.get_img_info(), mic.get_tag_info(), mic.get_file_info(),
-                                         export_path)
-    rs_correction.get_series_update()
-    rs_correction.get_frame_of_reference_update()
-    rs_correction.update_ds_order()
-    # rs_correction.update_ptid_and_name('COH_0001', 'COH_0001')
-    rs_correction.apply_correction()
-    rs_correction.save_data()
+    print(1)
+
+
+def rs_main():
+    dir_path = r'C:\Users\csoconnor\Desktop\UPMC'
+    export_path = r'C:\Users\csoconnor\Desktop\UPMC'
+
+    subfolders = [x[0] for x in os.walk(dir_path)]
+    for folder in subfolders:
+        files = [f for f in os.listdir(folder) if os.path.isfile(os.path.join(folder, f))]
+        if len(files) > 1:
+            print(folder)
+            mic = MedicalImageConverter(folder,
+                                        exclude_files=[],
+                                        multi_folder=False,
+                                        existing_img_info=None,
+                                        existing_file_info=None)
+            mic.file_parsar()
+            if mic.no_file_extenstion:
+                mic.dicom_files = add_dicom_extension(mic.no_file_extenstion)
+            mic.check_memory()
+            mic.read_dicom()
+
+            if mic.get_tag_info():
+                rs_correction = RayStationCorrection(mic.get_ds(), mic.get_img_info(), mic.get_tag_info(),
+                                                     mic.get_file_info(), export_path)
+                rs_correction.get_series_update()
+                rs_correction.get_frame_of_reference_update()
+                rs_correction.update_ds_order()
+                rs_correction.apply_correction()
+                rs_correction.save_data()
 
 
 if __name__ == '__main__':
-    main()
+    # rs_main()
+    read_main()
