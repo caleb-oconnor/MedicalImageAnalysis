@@ -1,0 +1,7 @@
+psutil~=5.9.4
+opencv-python~=4.7.0.72
+numpy~=1.24.2
+pandas~=1.5.3
+pydicom~=2.3.1
+python-gdcm~=3.0.21
+setuptools~=60.2.0
