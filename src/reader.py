@@ -7,24 +7,28 @@ Email - csoconnor@mdanderson.org
 
 
 Description:
-    This is a "supposed" to be a multi data medical imagery reader. Currently, it just reads dicom images of CT, MR, US,
-    and RTSTRUCTs, currently only works for dicom. The secondary requirement is that the images are in orientation of
-    [1, 0, 0, 0, 1 ,0]. This is also the reader that is used for DRAGON.
+    This is a "supposed" to be a multi data medical imagery reader. Currently, only works for dicom.
+    Secondly, only images of an orientation [1, 0, 0, 0, 1 ,0] have been tested for 3D image volume and ROI volume
+    output.
 
     Using the "DicomReader" class the user can input a folder directory and output the images in numpy arrays along with
     their respective rois (if any). The data does not need to be organized inside folder directory, the reader will
     sort the images appropriately. It does not separate different patients if they exist in the same folder.
 
-    Using the "RayStationCorrection" class follows after the "DicomReader" class. This is used to correct the dicom tags
-    in a way that is readable into RayStation. It will also copy the dicoms into new image folders and if duplicate
-    SeriesInstanceUIDS are present it will assign new UIDs. This has the same requirement as "DicomReader", only 1
-    patient per instance.
+    The reader currently imports 9 different modalites and RTSTRUCT files. The accepted modalites are:
+        CT
+        MR
+        US
+        PT
+        MG
+        DX
+        NM
+        XA
+        CR
 
-Code Overview:
-    -
-
-Requirements:
-    -
+    The CT and MR modalities have been tested extensively, along with their respective ROIs. The other 7 modalities
+    have been tested but only on a few datasets a piece. For RTSTRUCTS, only those referencing CT and MR have been
+    tested.
 """
 
 import os
@@ -36,10 +40,19 @@ import numpy as np
 import pandas as pd
 import pydicom as dicom
 
-from parsar import file_parsar
-
 
 def multi_process_dicom(path):
+    """
+    Uses pydicom to read in dicom files.
+
+    Parameters
+    ----------
+    path - this is the path for a single file
+
+    Returns
+    -------
+
+    """
     try:
         datasets = dicom.dcmread(str(path))
     except:
@@ -69,6 +82,12 @@ class DicomReader:
         self.roi_data = []
 
     def add_dicom_extension(self):
+        """
+        Will add .dcm extension to any file inside self.dicom_files that doesn't have an extension
+        Returns
+        -------
+
+        """
         for ii, name in enumerate(self.dicom_files):
             a, b = os.path.splitext(name)
             if not b:
@@ -106,9 +125,9 @@ class DicomReader:
 
     def separate_modalities(self):
         """
-        Currently, separates the files into 4 different modalities (CT, MR, US, RTSTRUCT). Files with a different
-        modality are not kept. Certain tags are required depending on the modality, if those tags don't exist for its
-        respective modality then it is not kept.
+        Currently, separates the files into 10 different modalities. Files with a different modality are not kept.
+        Certain tags are required depending on the modality, if those tags don't exist for its respective modality
+        then it is not kept.
 
         Returns
         -------
@@ -149,8 +168,8 @@ class DicomReader:
              empty, if so then '1001' is inserted in its place. All the unique combinations are found using series
              instance uid, slice thickness, acquisition number. The unique combinations are used in a for loop and
              all slices that match that criteria are selected. Those slices are then sorted by image position patient.
-        MR - same as CT
-        US - The images are just sorted using series instance uid.
+        MR/PT - same as CT
+        US/DX/MG/NM/XA/CR - The images are just sorted using series instance uid.
 
 
         Note: slices thickness is needed because some scans are saved with the first slice being a single slice of
@@ -294,15 +313,17 @@ class DicomReader:
 
     def convert_images(self):
         """
-        Gets the 3D array of the images. I take a shortcut right now and assume all CT/MR data is int16 with an
-        intercept of -1024. Technically, you are supposed to use the tag information to determine this, however this
-        is the standard I have only seen for those two modalities.
+        Gets the 2D slice for each image and combines them into a 3D array per each image. Uses the RescaleIntercept
+        and RescaleSlope to adjust the HU.
 
         The US is a different story. The image was saved as an RGB value, which also contained like metadata and
         patient information embedded in the image itself. Luckily there was a simple way to get the actual US out, and
         that was using the fact that when all three RGB values are the same thing it corresponds to the image (this
         pulls some additional none image stuff but not nearly as bad). The quickest way I thought would be to find the
         standard deviation of all three values and if it is zero then it is a keeper.
+
+        Sometimes the images are in a shape [1, 10, 512, 512] meaning 10 "slices" by 512x512 array. Not sure why the 1
+        is there, so it checks if the shape is 4 and if so it only saves the image as a [10, 512, 512]
         Returns
         -------
 
@@ -338,6 +359,20 @@ class DicomReader:
                 self.image_data.append(image_hold)
 
     def create_masks(self):
+        """
+        existing_image_info is required if the users only loads a RTSTRUCT file, because to make the mask the spacing
+        and origin from the CT is needed.
+
+        It is pretty gross after that. For a given ROI each contour is read-in, an empty full sized image array is
+        created. Using cv2 the contours are converted to a binary slice, then all the slices are combined. To save
+        memory allocation the binary mask is reduced to the minimum box size possible. Which is why the physical and
+        array coordinates are stored. Physical means the distance location on the array in mm, and array is the
+        voxel number the box first start on.
+
+        Returns
+        -------
+
+        """
         info = self.image_info
         if self.existing_image_info:
             info.append(self.existing_image_info)
@@ -441,4 +476,3 @@ class DicomReader:
 
     def get_ds_images(self):
         return self.ds_images
-
