@@ -476,3 +476,7 @@ class DicomReader:
 
     def get_ds_images(self):
         return self.ds_images
+
+
+if __name__ == '__main__':
+    pass

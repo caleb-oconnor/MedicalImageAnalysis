@@ -38,3 +38,7 @@ def file_parsar(path, exclude_files):
                        'NoExtension': no_file_extension}
 
     return file_dictionary
+
+
+if __name__ == '__main__':
+    pass
