@@ -22,8 +22,9 @@ setup(
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: GNU Affero General Public License v3"
     ],
-    install_requires=['numpy==1.24.2',
-                      'pandas==2.0.3',
-                      'psutil==5.9.5',
-                      'pydicom==2.4.2']
+    install_requires=['numpy>=1.24.2',
+                      'pandas>=2.0.3',
+                      'psutil>=5.9.5',
+                      'pydicom>=2.4.2',
+                      'opencv-python>=4.7.0.72']
 )
