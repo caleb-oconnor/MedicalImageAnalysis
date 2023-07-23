@@ -1,8 +1,0 @@
-Metadata-Version: 2.1
-Name: MedicalImageConverter
-Version: 1.0.0
-Summary: Reads in medical images and converts them into numpy arrays.
-Home-page: https://github.com/caleb-oconnor/MedicalImageConverter
-Author: Caleb OConnor
-Author-email: csoconnor@mdanderson.org
-Description-Content-Type: text/markdown
