@@ -20,5 +20,9 @@ setup(
     packages=['MedicalImageConverter'],
     include_package_data=True,
     url='https://github.com/caleb-oconnor/MedicalImageConverter',
+    classifiers=[
+        "Programming Language :: Python :: 3",
+        "License :: OSI Approved :: GNU Affero General Public License v3"
+    ],
     install_requires=required,
 )
