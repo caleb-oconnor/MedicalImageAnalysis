@@ -21,3 +21,7 @@ def check_memory(file_dictionary):
     memory_left = (available_memory - total_size) / 1000000000
 
     return total_size, available_memory, memory_left
+
+
+if __name__ == '__main__':
+    pass
