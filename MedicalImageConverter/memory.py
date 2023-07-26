@@ -7,7 +7,7 @@ def check_memory(file_dictionary):
     dicom_size = 0
     for file in file_dictionary['Dicom']:
         dicom_size = dicom_size + os.path.getsize(file)
-
+        
     raw_size = 0
     for file in file_dictionary['Raw']:
         raw_size = raw_size + os.path.getsize(file)
