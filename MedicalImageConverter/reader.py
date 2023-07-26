@@ -39,6 +39,7 @@ import cv2
 import numpy as np
 import pandas as pd
 import pydicom as dicom
+import SimpleITK as sitk
 
 
 def multi_process_dicom(path):
@@ -74,11 +75,12 @@ class DicomReader:
         keep_tags = ['FilePath', 'SOPInstanceUID', 'PatientID', 'PatientName', 'Modality',
                      'SeriesDescription', 'SeriesDate', 'SeriesTime', 'SeriesInstanceUID', 'SeriesNumber',
                      'AcquisitionNumber', 'SliceThickness', 'PixelSpacing', 'Rows', 'Columns', 'ImagePositionPatient',
-                     'Slices', 'DefaultWindow']
+                     'Slices', 'DefaultWindow', 'FullWindow']
         self.image_info = pd.DataFrame(columns=keep_tags)
         self.image_data = []
 
-        self.roi_info = pd.DataFrame(columns=['FilePath', 'RoiNames', 'PhysicalCoordinates', 'ArrayCoordinates'])
+        self.roi_info = pd.DataFrame(columns=['FilePath', 'RoiNames', 'PhysicalCoordinates', 'ArrayCoordinates',
+                                              'Volume', 'COM'])
         self.roi_data = []
 
     def add_dicom_extension(self):
@@ -297,9 +299,6 @@ class DicomReader:
                             if not isinstance(width, float):
                                 width = width[0]
                             self.image_info.at[ii, t] = [int(center), int(np.round(width/2))]
-
-                    elif image[0].Modality == 'PT':
-                        self.image_info.at[ii, t] = [8000, 8000]
                     elif image[0].Modality == 'US':
                         self.image_info.at[ii, t] = [128, 128]
                     else:
@@ -358,6 +357,10 @@ class DicomReader:
             else:
                 self.image_data.append(image_hold)
 
+            image_min = np.min(self.image_data[-1])
+            image_max = np.max(self.image_data[-1])
+            self.image_info.at[ii, 'FullWindow'] = [image_min, image_max]
+
     def create_masks(self):
         """
         existing_image_info is required if the users only loads a RTSTRUCT file, because to make the mask the spacing
@@ -392,6 +395,8 @@ class DicomReader:
             columns = int(info.at[ii, 'Columns'])
             slices = len(self.ds_images[ii])
 
+            mask_com = []
+            mask_volume = []
             mask_reduced = []
             roi_filepaths, roi_names = [], []
             physical_coordinates, array_coordinates = [], []
@@ -447,6 +452,16 @@ class DicomReader:
                                                           [region[2], region[3]],
                                                           [region[4], region[5]]])
 
+                                new_mask_sitk = sitk.GetImageFromArray(new_mask)
+                                new_mask_sitk.SetSpacing(spacing_array)
+                                new_mask_sitk.SetOrigin(physical_coordinates[-1])
+
+                                label_statistic = sitk.LabelShapeStatisticsImageFilter()
+                                label_statistic.Execute(new_mask_sitk)
+                                mask_com.append(np.round(label_statistic.GetCentroid(1), 2))
+
+                                volume = np.sum(new_mask) * spacing_array[0] * spacing_array[1] * spacing_array[2]
+                                mask_volume.append(np.round(volume/(10*10*10), 2))
                                 mask_reduced.append(new_mask)
 
             if len(mask_reduced) > 0:
@@ -455,12 +470,16 @@ class DicomReader:
                 self.roi_info.at[ii, 'RoiNames'] = roi_names
                 self.roi_info.at[ii, 'PhysicalCoordinates'] = physical_coordinates
                 self.roi_info.at[ii, 'ArrayCoordinates'] = array_coordinates
+                self.roi_info.at[ii, 'Volume'] = mask_volume
+                self.roi_info.at[ii, 'COM'] = mask_com
             else:
                 self.roi_data.append(mask_reduced)
                 self.roi_info.at[ii, 'FilePath'] = None
                 self.roi_info.at[ii, 'RoiNames'] = None
                 self.roi_info.at[ii, 'PhysicalCoordinates'] = None
                 self.roi_info.at[ii, 'ArrayCoordinates'] = None
+                self.roi_info.at[ii, 'Volume'] = None
+                self.roi_info.at[ii, 'COM'] = None
 
     def get_image_info(self):
         return self.image_info

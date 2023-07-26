@@ -13,6 +13,7 @@ def file_parsar(path, exclude_files):
         if files:
             for name in files:
                 filepath = os.path.join(root, name)
+
                 if filepath not in exclude_files:
                     filename, file_extension = os.path.splitext(filepath)
 
