@@ -41,6 +41,12 @@ import pandas as pd
 import pydicom as dicom
 import SimpleITK as sitk
 
+import vtk
+from vtk.util import numpy_support
+from vtk.numpy_interface import dataset_adapter as dsa
+import pyacvd
+import pyvista as pv
+
 
 def multi_process_dicom(path):
     """
@@ -81,7 +87,9 @@ class DicomReader:
 
         self.roi_info = pd.DataFrame(columns=['FilePath', 'RoiNames', 'PhysicalCoordinates', 'ArrayCoordinates',
                                               'Volume', 'COM'])
-        self.roi_data = []
+        self.roi_contour = []
+        self.roi_mask = []
+        self.roi_trimesh = []
 
     def add_dicom_extension(self):
         """
@@ -103,7 +111,7 @@ class DicomReader:
         self.separate_rt_images()
         self.standard_useful_tags()
         self.convert_images()
-        self.create_masks()
+        self.separate_contours()
         t2 = time.time()
         print('Dicom Read Time: ', t2 - t1)
 
@@ -193,7 +201,7 @@ class DicomReader:
                                                for ii, img in enumerate(self.ds_dictionary[mod])])
                 else:
                     sorting_tags = np.asarray([[img['SeriesInstanceUID'].value, img['SliceThickness'].value,
-                                                None, img['ImagePositionPatient'].value[2],ii]
+                                                None, img['ImagePositionPatient'].value[2], ii]
                                                for ii, img in enumerate(self.ds_dictionary[mod])])
                 sorting_tags_fix = np.asarray([[s[0], s[1], '1001', s[3], s[4]]
                                                if s[2] is None else s for s in sorting_tags])
@@ -303,7 +311,8 @@ class DicomReader:
                         self.image_info.at[ii, t] = [128, 128]
                     else:
                         self.image_info.at[ii, t] = None
-
+                elif t == 'FullWindow':
+                    self.image_info.at[ii, t] = None
                 else:
                     if t in image[0]:
                         self.image_info.at[ii, t] = image[0][t].value
@@ -360,6 +369,148 @@ class DicomReader:
             image_min = np.min(self.image_data[-1])
             image_max = np.max(self.image_data[-1])
             self.image_info.at[ii, 'FullWindow'] = [image_min, image_max]
+
+    def separate_contours(self):
+        """
+        existing_image_info is required if the users only loads a RTSTRUCT file, because to make the mask the spacing
+        and origin from the CT is needed.
+
+        It is pretty gross after that. For a given ROI each contour is read-in, an empty full sized image array is
+        created. Using cv2 the contours are converted to a binary slice, then all the slices are combined.
+
+        Returns
+        -------
+
+        """
+        info = self.image_info
+        if self.existing_image_info:
+            info.append(self.existing_image_info)
+
+        for ii in range(len(info.index)):
+            img_sop = info.at[ii, 'SOPInstanceUID']
+            img_series = info.at[ii, 'SeriesInstanceUID']
+
+            image_contour_list = []
+            roi_names = []
+            roi_filepaths = []
+            for jj in range(len(self.rt_df.index)):
+                if img_series == self.rt_df.at[jj, 'SeriesInstanceUID'] and self.rt_df.at[jj, 'RoiSOP'][0] in img_sop:
+                    roi_sequence = self.ds_dictionary['RTSTRUCT'][jj].ROIContourSequence
+                    for kk, sequence in enumerate(roi_sequence):
+                        contour_list = []
+                        for c in sequence.ContourSequence:
+                            if int(c.NumberOfContourPoints) > 1:
+                                contour_hold = np.round(np.array(c['ContourData'].value), 3)
+                                contour = contour_hold.reshape(int(len(contour_hold) / 3), 3)
+                                contour_list.append(contour)
+
+                        image_contour_list.append(contour_list)
+                        if len(contour_list) > 0:
+                            roi_filepaths.append(self.rt_df.at[jj, 'FilePath'])
+                            roi_names.append(self.rt_df.RoiNames[jj][kk])
+
+            if len(roi_names) > 0:
+                self.roi_contour.append(image_contour_list)
+                self.roi_info.at[ii, 'FilePath'] = roi_filepaths
+                self.roi_info.at[ii, 'RoiNames'] = roi_names
+                self.roi_info.at[ii, 'PhysicalCoordinates'] = None
+                self.roi_info.at[ii, 'ArrayCoordinates'] = None
+                self.roi_info.at[ii, 'Volume'] = None
+                self.roi_info.at[ii, 'COM'] = None
+            else:
+                self.roi_contour.append(image_contour_list)
+                self.roi_info.at[ii, 'FilePath'] = None
+                self.roi_info.at[ii, 'RoiNames'] = None
+                self.roi_info.at[ii, 'PhysicalCoordinates'] = None
+                self.roi_info.at[ii, 'ArrayCoordinates'] = None
+                self.roi_info.at[ii, 'Volume'] = None
+                self.roi_info.at[ii, 'COM'] = None
+
+    # def roi_trimesh(self):
+    #     info = self.image_info
+    #     if self.existing_image_info:
+    #         info.append(self.existing_image_info)
+    #
+    #     for ii in range(len(info.index)):
+    #         img_sop = info.at[ii, 'SOPInstanceUID']
+    #         img_series = info.at[ii, 'SeriesInstanceUID']
+    #         spacing_array = [info.at[ii, 'PixelSpacing'][0],
+    #                          info.at[ii, 'PixelSpacing'][1],
+    #                          info.at[ii, 'SliceThickness']]
+    #
+    #         corner_array = [float(info.at[ii, 'ImagePositionPatient'][0]),
+    #                         float(info.at[ii, 'ImagePositionPatient'][1]),
+    #                         float(info.at[ii, 'ImagePositionPatient'][2])]
+    #
+    #         rows = int(info.at[ii, 'Rows'])
+    #         columns = int(info.at[ii, 'Columns'])
+    #         slices = len(self.ds_images[ii])
+    #
+    #         mask_com = []
+    #         mask_volume = []
+    #         mask_reduced = []
+    #         roi_filepaths, roi_names = [], []
+    #         physical_coordinates, array_coordinates = [], []
+    #         for jj in range(len(self.rt_df.index)):
+    #             if img_series == self.rt_df.at[jj, 'SeriesInstanceUID'] and self.rt_df.at[jj, 'RoiSOP'][0] in img_sop:
+    #                 roi_sequence = self.ds_dictionary['RTSTRUCT'][jj].ROIContourSequence
+    #                 for kk, sequence in enumerate(roi_sequence):
+    #                     slice_check = np.zeros(slices)
+    #
+    #                     r, col, s = [], [], []
+    #                     mask = np.zeros([slices, rows, columns], dtype=np.uint8)
+    #                     c_list = []
+    #                     for c in sequence.ContourSequence:
+    #                         if int(c.NumberOfContourPoints) > 1:
+    #                             contour_hold = np.round(np.array(c['ContourData'].value), 3)
+    #                             contour = contour_hold.reshape(int(len(contour_hold) / 3), 3)
+    #                             c_list.append(contour)
+    #                             contour_indexing = np.round(np.abs((contour - corner_array) / spacing_array))
+    #                             slice_num = slices - \
+    #                                         (img_sop.index(c.ContourImageSequence[0].ReferencedSOPInstanceUID) + 1)
+    #
+    #                             roi_contour = np.vstack((contour_indexing[:, 0:2],  contour_indexing[0, 0:2]))
+    #                             new_contour = np.array([roi_contour], dtype=np.int32)
+    #                             image = np.zeros([rows, columns], dtype=np.uint8)
+    #                             cv2.fillPoly(image, new_contour, 1)
+    #
+    #                             if slice_check[slice_num] == 0:
+    #                                 mask[slice_num, :, :] = image
+    #                                 slice_check[slice_num] = 1
+    #                             else:
+    #                                 mask[slice_num, :, :] = mask[slice_num, :, :] + image
+    #
+    #                     if np.sum(slice_check) > 0:
+    #                         label = numpy_support.numpy_to_vtk(num_array=np.asarray(mask).ravel(), deep=True,
+    #                                                            array_type=vtk.VTK_FLOAT)
+    #                         origin = corner_array
+    #                         spacing = spacing_array
+    #                         dim = [rows, columns, slices]
+    #
+    #                         img_vtk = vtk.vtkImageData()
+    #                         img_vtk.SetDimensions(dim)
+    #                         img_vtk.SetSpacing(spacing)
+    #                         img_vtk.SetOrigin(origin)
+    #                         img_vtk.GetPointData().SetScalars(label)
+    #
+    #                         MarchingCubeFilter = vtk.vtkDiscreteMarchingCubes()
+    #                         MarchingCubeFilter.SetInputData(img_vtk)
+    #                         MarchingCubeFilter.GenerateValues(1, 1, 1)
+    #                         MarchingCubeFilter.Update()
+    #
+    #                         smoothing_iterations = 20
+    #                         pass_band = 0.001
+    #                         feature_angle = 60.0
+    #                         smoother = vtk.vtkWindowedSincPolyDataFilter()
+    #                         smoother.SetInputConnection(MarchingCubeFilter.GetOutputPort())
+    #                         smoother.SetNumberOfIterations(smoothing_iterations)
+    #                         smoother.BoundarySmoothingOff()
+    #                         smoother.FeatureEdgeSmoothingOff()
+    #                         smoother.SetFeatureAngle(feature_angle)
+    #                         smoother.SetPassBand(pass_band)
+    #                         smoother.NonManifoldSmoothingOn()
+    #                         smoother.NormalizeCoordinatesOff()
+    #                         smoother.Update()
 
     def create_masks(self):
         """
@@ -465,7 +616,7 @@ class DicomReader:
                                 mask_reduced.append(new_mask)
 
             if len(mask_reduced) > 0:
-                self.roi_data.append(mask_reduced)
+                self.roi_mask.append(mask_reduced)
                 self.roi_info.at[ii, 'FilePath'] = roi_filepaths
                 self.roi_info.at[ii, 'RoiNames'] = roi_names
                 self.roi_info.at[ii, 'PhysicalCoordinates'] = physical_coordinates
@@ -473,7 +624,7 @@ class DicomReader:
                 self.roi_info.at[ii, 'Volume'] = mask_volume
                 self.roi_info.at[ii, 'COM'] = mask_com
             else:
-                self.roi_data.append(mask_reduced)
+                self.roi_mask.append(mask_reduced)
                 self.roi_info.at[ii, 'FilePath'] = None
                 self.roi_info.at[ii, 'RoiNames'] = None
                 self.roi_info.at[ii, 'PhysicalCoordinates'] = None
@@ -487,8 +638,14 @@ class DicomReader:
     def get_image_data(self):
         return self.image_data
 
-    def get_roi_data(self):
-        return self.roi_data
+    def get_roi_contour(self):
+        return self.roi_contour
+
+    def get_roi_mask(self):
+        return self.roi_mask
+
+    def get_roi_trimesh(self):
+        return self.roi_trimesh
 
     def get_roi_info(self):
         return self.roi_info
@@ -497,5 +654,16 @@ class DicomReader:
         return self.ds_images
 
 
+def main():
+    from parsar import file_parsar
+
+    path = r'C:\Users\csoconnor\Desktop\read_test_3'
+    files = file_parsar(path, [])
+    dicom_reader = DicomReader(files['Dicom'], None)
+    dicom_reader.load_dicom()
+
+    print(1)
+
+
 if __name__ == '__main__':
-    pass
+    main()
