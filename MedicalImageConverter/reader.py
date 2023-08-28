@@ -393,8 +393,8 @@ class DicomReader:
                                 contour = contour_hold.reshape(int(len(contour_hold) / 3), 3)
                                 contour_list.append(contour)
 
-                        image_contour_list.append(contour_list)
                         if len(contour_list) > 0:
+                            image_contour_list.append(contour_list)
                             roi_filepaths.append(self.rt_df.at[jj, 'FilePath'])
                             roi_names.append(self.rt_df.RoiNames[jj][kk])
 
@@ -402,10 +402,6 @@ class DicomReader:
                 self.roi_contour.append(image_contour_list)
                 self.roi_info.at[ii, 'FilePath'] = roi_filepaths
                 self.roi_info.at[ii, 'RoiNames'] = roi_names
-            else:
-                self.roi_contour.append(image_contour_list)
-                self.roi_info.at[ii, 'FilePath'] = None
-                self.roi_info.at[ii, 'RoiNames'] = None
 
     def get_image_info(self):
         return self.image_info
