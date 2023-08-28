@@ -35,17 +35,9 @@ import os
 import time
 from multiprocessing import Pool
 
-import cv2
 import numpy as np
 import pandas as pd
 import pydicom as dicom
-import SimpleITK as sitk
-
-import vtk
-from vtk.util import numpy_support
-from vtk.numpy_interface import dataset_adapter as dsa
-import pyacvd
-import pyvista as pv
 
 
 def multi_process_dicom(path):
@@ -85,11 +77,8 @@ class DicomReader:
         self.image_info = pd.DataFrame(columns=keep_tags)
         self.image_data = []
 
-        self.roi_info = pd.DataFrame(columns=['FilePath', 'RoiNames', 'PhysicalCoordinates', 'ArrayCoordinates',
-                                              'Volume', 'COM'])
+        self.roi_info = pd.DataFrame(columns=['FilePath', 'RoiNames'])
         self.roi_contour = []
-        self.roi_mask = []
-        self.roi_trimesh = []
 
     def add_dicom_extension(self):
         """
@@ -372,11 +361,11 @@ class DicomReader:
 
     def separate_contours(self):
         """
-        existing_image_info is required if the users only loads a RTSTRUCT file, because to make the mask the spacing
-        and origin from the CT is needed.
+        existing_image_info is required if the users only loads a RTSTRUCT file, this is needed to match contours with
+        the image they correspond to.
 
-        It is pretty gross after that. For a given ROI each contour is read-in, an empty full sized image array is
-        created. Using cv2 the contours are converted to a binary slice, then all the slices are combined.
+        It is pretty gross after that. For a given ROI each contour is read-in, matched with their image, then combined
+        all the slices of each contour into there own numpy array.
 
         Returns
         -------
@@ -413,224 +402,10 @@ class DicomReader:
                 self.roi_contour.append(image_contour_list)
                 self.roi_info.at[ii, 'FilePath'] = roi_filepaths
                 self.roi_info.at[ii, 'RoiNames'] = roi_names
-                self.roi_info.at[ii, 'PhysicalCoordinates'] = None
-                self.roi_info.at[ii, 'ArrayCoordinates'] = None
-                self.roi_info.at[ii, 'Volume'] = None
-                self.roi_info.at[ii, 'COM'] = None
             else:
                 self.roi_contour.append(image_contour_list)
                 self.roi_info.at[ii, 'FilePath'] = None
                 self.roi_info.at[ii, 'RoiNames'] = None
-                self.roi_info.at[ii, 'PhysicalCoordinates'] = None
-                self.roi_info.at[ii, 'ArrayCoordinates'] = None
-                self.roi_info.at[ii, 'Volume'] = None
-                self.roi_info.at[ii, 'COM'] = None
-
-    # def roi_trimesh(self):
-    #     info = self.image_info
-    #     if self.existing_image_info:
-    #         info.append(self.existing_image_info)
-    #
-    #     for ii in range(len(info.index)):
-    #         img_sop = info.at[ii, 'SOPInstanceUID']
-    #         img_series = info.at[ii, 'SeriesInstanceUID']
-    #         spacing_array = [info.at[ii, 'PixelSpacing'][0],
-    #                          info.at[ii, 'PixelSpacing'][1],
-    #                          info.at[ii, 'SliceThickness']]
-    #
-    #         corner_array = [float(info.at[ii, 'ImagePositionPatient'][0]),
-    #                         float(info.at[ii, 'ImagePositionPatient'][1]),
-    #                         float(info.at[ii, 'ImagePositionPatient'][2])]
-    #
-    #         rows = int(info.at[ii, 'Rows'])
-    #         columns = int(info.at[ii, 'Columns'])
-    #         slices = len(self.ds_images[ii])
-    #
-    #         mask_com = []
-    #         mask_volume = []
-    #         mask_reduced = []
-    #         roi_filepaths, roi_names = [], []
-    #         physical_coordinates, array_coordinates = [], []
-    #         for jj in range(len(self.rt_df.index)):
-    #             if img_series == self.rt_df.at[jj, 'SeriesInstanceUID'] and self.rt_df.at[jj, 'RoiSOP'][0] in img_sop:
-    #                 roi_sequence = self.ds_dictionary['RTSTRUCT'][jj].ROIContourSequence
-    #                 for kk, sequence in enumerate(roi_sequence):
-    #                     slice_check = np.zeros(slices)
-    #
-    #                     r, col, s = [], [], []
-    #                     mask = np.zeros([slices, rows, columns], dtype=np.uint8)
-    #                     c_list = []
-    #                     for c in sequence.ContourSequence:
-    #                         if int(c.NumberOfContourPoints) > 1:
-    #                             contour_hold = np.round(np.array(c['ContourData'].value), 3)
-    #                             contour = contour_hold.reshape(int(len(contour_hold) / 3), 3)
-    #                             c_list.append(contour)
-    #                             contour_indexing = np.round(np.abs((contour - corner_array) / spacing_array))
-    #                             slice_num = slices - \
-    #                                         (img_sop.index(c.ContourImageSequence[0].ReferencedSOPInstanceUID) + 1)
-    #
-    #                             roi_contour = np.vstack((contour_indexing[:, 0:2],  contour_indexing[0, 0:2]))
-    #                             new_contour = np.array([roi_contour], dtype=np.int32)
-    #                             image = np.zeros([rows, columns], dtype=np.uint8)
-    #                             cv2.fillPoly(image, new_contour, 1)
-    #
-    #                             if slice_check[slice_num] == 0:
-    #                                 mask[slice_num, :, :] = image
-    #                                 slice_check[slice_num] = 1
-    #                             else:
-    #                                 mask[slice_num, :, :] = mask[slice_num, :, :] + image
-    #
-    #                     if np.sum(slice_check) > 0:
-    #                         label = numpy_support.numpy_to_vtk(num_array=np.asarray(mask).ravel(), deep=True,
-    #                                                            array_type=vtk.VTK_FLOAT)
-    #                         origin = corner_array
-    #                         spacing = spacing_array
-    #                         dim = [rows, columns, slices]
-    #
-    #                         img_vtk = vtk.vtkImageData()
-    #                         img_vtk.SetDimensions(dim)
-    #                         img_vtk.SetSpacing(spacing)
-    #                         img_vtk.SetOrigin(origin)
-    #                         img_vtk.GetPointData().SetScalars(label)
-    #
-    #                         MarchingCubeFilter = vtk.vtkDiscreteMarchingCubes()
-    #                         MarchingCubeFilter.SetInputData(img_vtk)
-    #                         MarchingCubeFilter.GenerateValues(1, 1, 1)
-    #                         MarchingCubeFilter.Update()
-    #
-    #                         smoothing_iterations = 20
-    #                         pass_band = 0.001
-    #                         feature_angle = 60.0
-    #                         smoother = vtk.vtkWindowedSincPolyDataFilter()
-    #                         smoother.SetInputConnection(MarchingCubeFilter.GetOutputPort())
-    #                         smoother.SetNumberOfIterations(smoothing_iterations)
-    #                         smoother.BoundarySmoothingOff()
-    #                         smoother.FeatureEdgeSmoothingOff()
-    #                         smoother.SetFeatureAngle(feature_angle)
-    #                         smoother.SetPassBand(pass_band)
-    #                         smoother.NonManifoldSmoothingOn()
-    #                         smoother.NormalizeCoordinatesOff()
-    #                         smoother.Update()
-
-    def create_masks(self):
-        """
-        existing_image_info is required if the users only loads a RTSTRUCT file, because to make the mask the spacing
-        and origin from the CT is needed.
-
-        It is pretty gross after that. For a given ROI each contour is read-in, an empty full sized image array is
-        created. Using cv2 the contours are converted to a binary slice, then all the slices are combined. To save
-        memory allocation the binary mask is reduced to the minimum box size possible. Which is why the physical and
-        array coordinates are stored. Physical means the distance location on the array in mm, and array is the
-        voxel number the box first start on.
-
-        Returns
-        -------
-
-        """
-        info = self.image_info
-        if self.existing_image_info:
-            info.append(self.existing_image_info)
-
-        for ii in range(len(info.index)):
-            img_sop = info.at[ii, 'SOPInstanceUID']
-            img_series = info.at[ii, 'SeriesInstanceUID']
-            spacing_array = [info.at[ii, 'PixelSpacing'][0],
-                             info.at[ii, 'PixelSpacing'][1],
-                             info.at[ii, 'SliceThickness']]
-
-            corner_array = [float(info.at[ii, 'ImagePositionPatient'][0]),
-                            float(info.at[ii, 'ImagePositionPatient'][1]),
-                            float(info.at[ii, 'ImagePositionPatient'][2])]
-
-            rows = int(info.at[ii, 'Rows'])
-            columns = int(info.at[ii, 'Columns'])
-            slices = len(self.ds_images[ii])
-
-            mask_com = []
-            mask_volume = []
-            mask_reduced = []
-            roi_filepaths, roi_names = [], []
-            physical_coordinates, array_coordinates = [], []
-            for jj in range(len(self.rt_df.index)):
-                if img_series == self.rt_df.at[jj, 'SeriesInstanceUID'] and self.rt_df.at[jj, 'RoiSOP'][0] in img_sop:
-                    roi_sequence = self.ds_dictionary['RTSTRUCT'][jj].ROIContourSequence
-                    for kk, sequence in enumerate(roi_sequence):
-                        slice_check = np.zeros(slices)
-
-                        r, col, s = [], [], []
-                        mask = np.zeros([slices, rows, columns], dtype=np.uint8)
-                        for c in sequence.ContourSequence:
-                            if int(c.NumberOfContourPoints) > 1:
-                                contour_hold = np.round(np.array(c['ContourData'].value), 3)
-                                contour = contour_hold.reshape(int(len(contour_hold) / 3), 3)
-
-                                contour_indexing = np.round(np.abs((contour - corner_array) / spacing_array))
-                                slice_num = slices - \
-                                            (img_sop.index(c.ContourImageSequence[0].ReferencedSOPInstanceUID) + 1)
-
-                                roi_contour = np.vstack((contour_indexing[:, 0:2],  contour_indexing[0, 0:2]))
-                                new_contour = np.array([roi_contour], dtype=np.int32)
-                                image = np.zeros([rows, columns], dtype=np.uint8)
-                                cv2.fillPoly(image, new_contour, 1)
-
-                                if slice_check[slice_num] == 0:
-                                    mask[slice_num, :, :] = image
-                                    slice_check[slice_num] = 1
-                                else:
-                                    mask[slice_num, :, :] = mask[slice_num, :, :] + image
-
-                                x1, y1, x2, y2 = cv2.boundingRect(image)
-                                r.append(x1)
-                                r.append(x1+x2)
-                                col.append(y1)
-                                col.append(y1+y2)
-                                s.append(slice_num)
-
-                        if len(s) > 0:
-                            region = [np.min(s), np.max(s)+1,
-                                      np.min(col), np.max(col),
-                                      np.min(r), np.max(r)]
-
-                            new_mask = mask[region[0]:region[1], region[2]:region[3], region[4]:region[5]]
-                            if new_mask.size > 1:
-                                roi_filepaths.append(self.rt_df.at[jj, 'FilePath'])
-                                roi_names.append(self.rt_df.RoiNames[jj][kk])
-
-                                physical_coordinates.append([(region[0]*spacing_array[2]) + corner_array[2],
-                                                             (region[2]*spacing_array[1]) + corner_array[1],
-                                                             (region[4]*spacing_array[0]) + corner_array[0]])
-                                array_coordinates.append([[region[0], region[1]],
-                                                          [region[2], region[3]],
-                                                          [region[4], region[5]]])
-
-                                new_mask_sitk = sitk.GetImageFromArray(new_mask)
-                                new_mask_sitk.SetSpacing(spacing_array)
-                                new_mask_sitk.SetOrigin(physical_coordinates[-1])
-
-                                label_statistic = sitk.LabelShapeStatisticsImageFilter()
-                                label_statistic.Execute(new_mask_sitk)
-                                mask_com.append(np.round(label_statistic.GetCentroid(1), 2))
-
-                                volume = np.sum(new_mask) * spacing_array[0] * spacing_array[1] * spacing_array[2]
-                                mask_volume.append(np.round(volume/(10*10*10), 2))
-                                mask_reduced.append(new_mask)
-
-            if len(mask_reduced) > 0:
-                self.roi_mask.append(mask_reduced)
-                self.roi_info.at[ii, 'FilePath'] = roi_filepaths
-                self.roi_info.at[ii, 'RoiNames'] = roi_names
-                self.roi_info.at[ii, 'PhysicalCoordinates'] = physical_coordinates
-                self.roi_info.at[ii, 'ArrayCoordinates'] = array_coordinates
-                self.roi_info.at[ii, 'Volume'] = mask_volume
-                self.roi_info.at[ii, 'COM'] = mask_com
-            else:
-                self.roi_mask.append(mask_reduced)
-                self.roi_info.at[ii, 'FilePath'] = None
-                self.roi_info.at[ii, 'RoiNames'] = None
-                self.roi_info.at[ii, 'PhysicalCoordinates'] = None
-                self.roi_info.at[ii, 'ArrayCoordinates'] = None
-                self.roi_info.at[ii, 'Volume'] = None
-                self.roi_info.at[ii, 'COM'] = None
 
     def get_image_info(self):
         return self.image_info
@@ -640,12 +415,6 @@ class DicomReader:
 
     def get_roi_contour(self):
         return self.roi_contour
-
-    def get_roi_mask(self):
-        return self.roi_mask
-
-    def get_roi_trimesh(self):
-        return self.roi_trimesh
 
     def get_roi_info(self):
         return self.roi_info
@@ -657,12 +426,10 @@ class DicomReader:
 def main():
     from parsar import file_parsar
 
-    path = r'C:\Users\csoconnor\Desktop\read_test_3'
+    path = r'path'
     files = file_parsar(path, [])
     dicom_reader = DicomReader(files['Dicom'], None)
     dicom_reader.load_dicom()
-
-    print(1)
 
 
 if __name__ == '__main__':
