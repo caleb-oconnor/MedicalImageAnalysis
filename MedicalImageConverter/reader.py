@@ -402,6 +402,10 @@ class DicomReader:
                 self.roi_contour.append(image_contour_list)
                 self.roi_info.at[ii, 'FilePath'] = roi_filepaths
                 self.roi_info.at[ii, 'RoiNames'] = roi_names
+            else:
+                self.roi_contour.append([])
+                self.roi_info.at[ii, 'FilePath'] = None
+                self.roi_info.at[ii, 'RoiNames'] = None
 
     def get_image_info(self):
         return self.image_info
