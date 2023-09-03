@@ -3,7 +3,7 @@
 
 *MedicalImageConverter* is a Python package for working with medical image files. It
 lets the user read in images or ROIs (regions of interest), and converts them to 3D
-volumes. It also allows the user to input non-organized datasets (multiple images 
+numpy arrays. It also allows the user to input non-organized datasets (multiple images 
 inside a single folder). Currently, this module only works for Dicom data with the hopes of expanding to 
 other data formats in the future. 
 
@@ -23,12 +23,8 @@ The CT and MR modalities have been tested extensively, along with their respecti
 ROIs. The other 7 modalities have been tested but only on a few datasets a piece.
 For RTSTRUCTS, only those referencing CT and MR have been tested.
 
-For sorting images or needing to output tags this module ideally works for any 
-image orientation. However, if the user wants to output the 3D volumes of the image
-data or ROIs then the only orientation that currently works for is 
-[1, 0, 0, 0, 1, 0] (this is the standard view of an axial image). It means the left
-side of the image is the right-side of the patient and the front of the image (top
-of image if you think in turns of 2D) is the anterior of the patient.
+The images will be converted to Head-First-Supine (if not so already), and the 
+image position will be updated to reflect the needed rotations.
 
 Disclaimer: All the files will be loaded into memory so be sure you have enough 
 RAM available. Meaning don't select a folder path that contains 10s of different 
@@ -90,17 +86,13 @@ PixelSpacing, Rows, Columns, ImagePositionPatient, Slices, DefaultWindow</span>
 
 ### Retrieve ROI information:
 ```python
-roi_data = dicom_reader.get_roi_data()  # Returns a list of lists containing each 3D volume ROI per image
+roi_data = dicom_reader.get_roi_contour()  # Returns a list of lists containing each ROI contour per image
 roi_info = dicom_reader.get_roi_info()  # Returns a pandas dataframe containing important tag information
 ```
 
 Tags in *roi_info*:
 <span style="font-size:.8em;">FilePath, RoiNames, PhysicalCoordinates,
 ArrayCoordinates</span>
-
-To save space the ROIs are stored in the smallest 3D volume binary possible, 
-instead of the full image. So the *roi_info* tags are needed to reference where 
-each ROI exist on an image.
 
 ### Retrieve Sorted Files
 ```python
