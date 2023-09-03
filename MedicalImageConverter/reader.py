@@ -7,9 +7,8 @@ Email - csoconnor@mdanderson.org
 
 
 Description:
-    This is a "supposed" to be a multi data medical imagery reader. Currently, only works for dicom.
-    Secondly, only images of an orientation [1, 0, 0, 0, 1 ,0] have been tested for 3D image volume and ROI volume
-    output.
+    This is a "supposed" to be a multi data medical imagery reader. Currently, only works for dicom file types. Reads in
+    imagery data and converts them to separate 3D numpy arrays. Also, will read in any associated ROI contours.
 
     Using the "DicomReader" class the user can input a folder directory and output the images in numpy arrays along with
     their respective rois (if any). The data does not need to be organized inside folder directory, the reader will
@@ -62,6 +61,32 @@ def multi_process_dicom(path):
 
 class DicomReader:
     def __init__(self, dicom_files, existing_image_info):
+        """
+        This reader splits dicom images/rtstructs using the SeriesInstanceUID/AcquisitionNumber. It can read any of
+        these modalities:
+            CT
+            MR
+            US
+            PT
+            MG
+            DX
+            NM
+            XA
+            CR
+            RTSTRUCT
+
+        The images are combined into 3D numpy arrays. CT/MR/PT images are corrected to be Head-First-Supine (HFS) if not
+        already. The ROIs are combined into a numpy array list of list with each inner list being the points on a given
+        slice.
+
+
+        Parameters
+        ----------
+        dicom_files - list of dicom files created using file_parsar function
+        existing_image_info - either None or a dataframe containing image information, this would be required when only
+                loading an RTSTRUCT it needs to reference to original image. The format of the dataframe is the same as
+                the variable image_info below.
+        """
         self.dicom_files = dicom_files
         self.existing_image_info = existing_image_info
 
@@ -72,8 +97,8 @@ class DicomReader:
 
         keep_tags = ['FilePath', 'SOPInstanceUID', 'PatientID', 'PatientName', 'Modality',
                      'SeriesDescription', 'SeriesDate', 'SeriesTime', 'SeriesInstanceUID', 'SeriesNumber',
-                     'AcquisitionNumber', 'SliceThickness', 'PixelSpacing', 'Rows', 'Columns', 'ImagePositionPatient',
-                     'Slices', 'DefaultWindow', 'FullWindow']
+                     'AcquisitionNumber', 'SliceThickness', 'PixelSpacing', 'Rows', 'Columns', 'PatientPosition',
+                     'ImagePositionPatient', 'ImageOrientationPatient', 'Slices', 'DefaultWindow', 'FullWindow']
         self.image_info = pd.DataFrame(columns=keep_tags)
         self.image_data = []
 
@@ -92,7 +117,18 @@ class DicomReader:
             if not b:
                 self.dicom_files[ii] = name + '.dcm'
 
-    def load_dicom(self):
+    def load_dicom(self, display_time=True):
+        """
+        Runs through all the base functions required to load in images/rois.
+
+        Parameters
+        ----------
+        display_time - True if user wants to print load time
+
+        Returns
+        -------
+
+        """
         t1 = time.time()
         self.read()
         self.separate_modalities()
@@ -100,9 +136,11 @@ class DicomReader:
         self.separate_rt_images()
         self.standard_useful_tags()
         self.convert_images()
+        self.fix_orientation()
         self.separate_contours()
         t2 = time.time()
-        print('Dicom Read Time: ', t2 - t1)
+        if display_time:
+            print('Dicom Read Time: ', t2 - t1)
 
     def read(self):
         """
@@ -186,11 +224,15 @@ class DicomReader:
             if len(self.ds_dictionary[mod]) > 0:
                 if mod in ['CT', 'MR']:
                     sorting_tags = np.asarray([[img['SeriesInstanceUID'].value, img['SliceThickness'].value,
-                                                img['AcquisitionNumber'].value, img['ImagePositionPatient'].value[2], ii]
+                                                img['AcquisitionNumber'].value, img['ImagePositionPatient'].value[0],
+                                                img['ImagePositionPatient'].value[1],
+                                                img['ImagePositionPatient'].value[2], ii]
                                                for ii, img in enumerate(self.ds_dictionary[mod])])
                 else:
                     sorting_tags = np.asarray([[img['SeriesInstanceUID'].value, img['SliceThickness'].value,
-                                                None, img['ImagePositionPatient'].value[2], ii]
+                                                None, img['ImagePositionPatient'].value[0],
+                                                img['ImagePositionPatient'].value[1],
+                                                img['ImagePositionPatient'].value[2], ii]
                                                for ii, img in enumerate(self.ds_dictionary[mod])])
                 sorting_tags_fix = np.asarray([[s[0], s[1], '1001', s[3], s[4]]
                                                if s[2] is None else s for s in sorting_tags])
@@ -201,9 +243,22 @@ class DicomReader:
                                                                 (sorting_tags_fix[:, 1] == tags[1]) &
                                                                 (sorting_tags_fix[:, 2] == tags[2]))]
 
-                    sorted_values = unsorted_values[np.argsort(unsorted_values[:, 3].astype('float'))[::-1]]
+                    # noinspection PyBroadException
+                    try:
+                        orientation = np.round(self.ds_dictionary[mod][0].ImageOrientationPatient)
+                        if orientation[0] == 1 and orientation[4] == 1:
+                            orient_idx = 5
+                        elif orientation[0] == 0 and orientation[3] == 0:
+                            orient_idx = 3
+                        elif orientation[1] == 0 and orientation[4] == 0:
+                            orient_idx = 4
+                        else:
+                            orient_idx = 5
+                    except:
+                        orient_idx = 5
 
-                    self.ds_images.append([self.ds_dictionary[mod][int(idx[4])] for idx in sorted_values])
+                    sorted_values = unsorted_values[np.argsort(unsorted_values[:, orient_idx].astype('float'))[::-1]]
+                    self.ds_images.append([self.ds_dictionary[mod][int(idx[6])] for idx in sorted_values])
 
         nonstandard_modalities = ['US', 'DX', 'MG', 'NM', 'XA', 'CR']
         for mod in nonstandard_modalities:
@@ -358,6 +413,23 @@ class DicomReader:
             image_min = np.min(self.image_data[-1])
             image_max = np.max(self.image_data[-1])
             self.image_info.at[ii, 'FullWindow'] = [image_min, image_max]
+
+    def fix_orientation(self):
+        for ii, image in enumerate(self.image_data):
+            if self.image_info.at[ii, 'PatientPosition']:
+                position = self.image_info.at[ii, 'PatientPosition']
+                if position not in ['HFS', 'FFS']:
+                    coordinates = self.image_info.at[ii, 'ImagePositionPatient']
+                    if position in ['HFDR', 'FFDR']:
+                        self.image_data[ii] = np.rot90(image, 1, (1, 2))
+                        self.image_info.at[ii, 'ImagePositionPatient'][1] = -coordinates[1]
+                    elif position in ['HFP', 'FFP']:
+                        self.image_data[ii] = np.rot90(image, 2, (1, 2))
+                        self.image_info.at[ii, 'ImagePositionPatient'][0] = -coordinates[0]
+                        self.image_info.at[ii, 'ImagePositionPatient'][1] = -coordinates[1]
+                    elif position in ['HFDL', 'FFDL']:
+                        self.image_data[ii] = np.rot90(image, 3, (1, 2))
+                        self.image_info.at[ii, 'ImagePositionPatient'][0] = -coordinates[0]
 
     def separate_contours(self):
         """
