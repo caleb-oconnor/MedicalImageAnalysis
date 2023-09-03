@@ -82,7 +82,8 @@ Tags in *image_info*:
 <span style="font-size:.8em;">FilePath, SOPInstanceUID, PatientID,
 PatientName, Modality, SeriesDescription, SeriesDate, SeriesTime, 
 SeriesInstanceUID, SeriesNumber, AcquisitionNumber, SliceThickness,
-PixelSpacing, Rows, Columns, ImagePositionPatient, Slices, DefaultWindow</span>
+PixelSpacing, Rows, Columns, PatientPosition, ImagePositionPatient, 
+ImageOrientationPatient, Slices, DefaultWindow, FullWindow</span>
 
 ### Retrieve ROI information:
 ```python
@@ -91,8 +92,7 @@ roi_info = dicom_reader.get_roi_info()  # Returns a pandas dataframe containing 
 ```
 
 Tags in *roi_info*:
-<span style="font-size:.8em;">FilePath, RoiNames, PhysicalCoordinates,
-ArrayCoordinates</span>
+<span style="font-size:.8em;">FilePath, RoiNames</span>
 
 ### Retrieve Sorted Files
 ```python
