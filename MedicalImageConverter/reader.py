@@ -234,10 +234,11 @@ class DicomReader:
                                                 img['ImagePositionPatient'].value[1],
                                                 img['ImagePositionPatient'].value[2], ii]
                                                for ii, img in enumerate(self.ds_dictionary[mod])])
-                sorting_tags_fix = np.asarray([[s[0], s[1], '1001', s[3], s[4]]
-                                               if s[2] is None else s for s in sorting_tags])
 
+                sorting_tags_fix = np.asarray([[s[0], s[1], '1001', s[3], s[4], s[5], s[6]] if s[2] is None else s
+                                               for s in sorting_tags])
                 unique_tags = np.unique(sorting_tags_fix[:, 0:3].astype(str), axis=0)
+
                 for tags in unique_tags:
                     unsorted_values = sorting_tags_fix[np.where((sorting_tags_fix[:, 0] == tags[0]) &
                                                                 (sorting_tags_fix[:, 1] == tags[1]) &
