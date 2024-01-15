@@ -496,14 +496,5 @@ class DicomReader:
         return self.ds_images
 
 
-def main():
-    from parsar import file_parsar
-
-    path = r'C:\\Users\\csoconnor\\Desktop\\Ost\\Corrections\\1015660\\CT_01_2.0mm_axial'
-    files = file_parsar(path, [])
-    dicom_reader = DicomReader(files['Dicom'], None)
-    dicom_reader.load_dicom()
-
-
 if __name__ == '__main__':
-    main()
+    pass
