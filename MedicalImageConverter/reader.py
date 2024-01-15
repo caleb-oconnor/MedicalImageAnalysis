@@ -182,7 +182,7 @@ class DicomReader:
                'NM': ['SeriesInstanceUID', 'PixelData'],
                'XA': ['SeriesInstanceUID', 'NumberOfFrames', 'PixelData'],
                'CR': ['SeriesInstanceUID', 'PixelData'],
-               'RTSTRUCT': ['SeriesInstanceUID', 'FrameOfReferenceUID']}
+               'RTSTRUCT': ['SeriesInstanceUID']}
 
         for modality in list(self.ds_dictionary.keys()):
             ds_modality = [d for d in self.ds if d['Modality'].value == modality]
@@ -499,7 +499,7 @@ class DicomReader:
 def main():
     from parsar import file_parsar
 
-    path = r'path'
+    path = r'C:\\Users\\csoconnor\\Desktop\\Ost\\Corrections\\1015660\\CT_01_2.0mm_axial'
     files = file_parsar(path, [])
     dicom_reader = DicomReader(files['Dicom'], None)
     dicom_reader.load_dicom()
