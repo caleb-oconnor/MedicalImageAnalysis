@@ -182,7 +182,7 @@ class DicomReader:
                'NM': ['SeriesInstanceUID', 'PixelData'],
                'XA': ['SeriesInstanceUID', 'NumberOfFrames', 'PixelData'],
                'CR': ['SeriesInstanceUID', 'PixelData'],
-               'RTSTRUCT': ['SeriesInstanceUID', 'FrameOfReferenceUID']}
+               'RTSTRUCT': ['SeriesInstanceUID']}
 
         for modality in list(self.ds_dictionary.keys()):
             ds_modality = [d for d in self.ds if d['Modality'].value == modality]
