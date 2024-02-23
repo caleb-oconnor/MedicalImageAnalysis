@@ -60,7 +60,7 @@ def multi_process_dicom(path):
 
 
 class DicomReader:
-    def __init__(self, dicom_files, existing_image_info):
+    def __init__(self, dicom_files, existing_image_info=None, only_load_roi_names=None):
         """
         This reader splits dicom images/rtstructs using the SeriesInstanceUID/AcquisitionNumber. It can read any of
         these modalities:
@@ -89,6 +89,7 @@ class DicomReader:
         """
         self.dicom_files = dicom_files
         self.existing_image_info = existing_image_info
+        self.only_load_roi_names = only_load_roi_names
 
         self.ds = []
         self.ds_images = []
@@ -460,16 +461,17 @@ class DicomReader:
                     roi_sequence = self.ds_dictionary['RTSTRUCT'][jj].ROIContourSequence
                     for kk, sequence in enumerate(roi_sequence):
                         contour_list = []
-                        for c in sequence.ContourSequence:
-                            if int(c.NumberOfContourPoints) > 1:
-                                contour_hold = np.round(np.array(c['ContourData'].value), 3)
-                                contour = contour_hold.reshape(int(len(contour_hold) / 3), 3)
-                                contour_list.append(contour)
+                        if not self.only_load_roi_names or self.rt_df.RoiNames[jj][kk] in self.only_load_roi_names:
+                            for c in sequence.ContourSequence:
+                                if int(c.NumberOfContourPoints) > 1:
+                                    contour_hold = np.round(np.array(c['ContourData'].value), 3)
+                                    contour = contour_hold.reshape(int(len(contour_hold) / 3), 3)
+                                    contour_list.append(contour)
 
-                        if len(contour_list) > 0:
-                            image_contour_list.append(contour_list)
-                            roi_filepaths.append(self.rt_df.at[jj, 'FilePath'])
-                            roi_names.append(self.rt_df.RoiNames[jj][kk])
+                            if len(contour_list) > 0:
+                                image_contour_list.append(contour_list)
+                                roi_filepaths.append(self.rt_df.at[jj, 'FilePath'])
+                                roi_names.append(self.rt_df.RoiNames[jj][kk])
 
             if len(roi_names) > 0:
                 self.roi_contour.append(image_contour_list)

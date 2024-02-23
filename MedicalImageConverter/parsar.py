@@ -2,7 +2,9 @@
 import os
 
 
-def file_parsar(path, exclude_files):
+def file_parsar(path, exclude_files=None):
+    if not exclude_files:
+        exclude_files = []
     no_file_extension = []
     dicom_files = []
     mhd_files = []
