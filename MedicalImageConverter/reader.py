@@ -421,17 +421,28 @@ class DicomReader:
             if self.image_info.at[ii, 'PatientPosition']:
                 position = self.image_info.at[ii, 'PatientPosition']
                 if position not in ['HFS', 'FFS']:
+                    rows = self.image_info.at[ii, 'Rows']
+                    columns = self.image_info.at[ii, 'Columns']
+                    spacing = self.image_info.at[ii, 'PixelSpacing']
                     coordinates = self.image_info.at[ii, 'ImagePositionPatient']
                     if position in ['HFDR', 'FFDR']:
-                        self.image_data[ii] = np.rot90(image, 1, (1, 2))
-                        self.image_info.at[ii, 'ImagePositionPatient'][1] = -coordinates[1]
+                        self.image_data[ii] = np.rot90(image, 3, (1, 2))
+
+                        new_coordinates = np.double(coordinates[0]) - spacing[0]*columns
+                        self.image_info.at[ii, 'ImagePositionPatient'][0] = new_coordinates
                     elif position in ['HFP', 'FFP']:
                         self.image_data[ii] = np.rot90(image, 2, (1, 2))
-                        self.image_info.at[ii, 'ImagePositionPatient'][0] = -coordinates[0]
-                        self.image_info.at[ii, 'ImagePositionPatient'][1] = -coordinates[1]
+
+                        new_coordinates = np.double(coordinates[0]) - spacing[0] * columns
+                        self.image_info.at[ii, 'ImagePositionPatient'][0] = new_coordinates
+
+                        new_coordinates = np.double(coordinates[1]) - spacing[1] * rows
+                        self.image_info.at[ii, 'ImagePositionPatient'][1] = new_coordinates
                     elif position in ['HFDL', 'FFDL']:
-                        self.image_data[ii] = np.rot90(image, 3, (1, 2))
-                        self.image_info.at[ii, 'ImagePositionPatient'][0] = -coordinates[0]
+                        self.image_data[ii] = np.rot90(image, 1, (1, 2))
+
+                        new_coordinates = np.double(coordinates[1]) - spacing[1]*rows
+                        self.image_info.at[ii, 'ImagePositionPatient'][1] = new_coordinates
 
     def separate_contours(self):
         """
@@ -446,12 +457,16 @@ class DicomReader:
 
         """
         info = self.image_info
-        if self.existing_image_info:
-            info.append(self.existing_image_info)
+        if self.existing_image_info is not None:
+            if len(list(info.index)) > 0:
+                print('fix')
+            else:
+                info = self.existing_image_info
 
+        index_list = list(info.index)
         for ii in range(len(info.index)):
-            img_sop = info.at[ii, 'SOPInstanceUID']
-            img_series = info.at[ii, 'SeriesInstanceUID']
+            img_sop = info.at[index_list[ii], 'SOPInstanceUID']
+            img_series = info.at[index_list[ii], 'SeriesInstanceUID']
 
             image_contour_list = []
             roi_names = []
@@ -499,4 +514,13 @@ class DicomReader:
 
 
 if __name__ == '__main__':
-    pass
+    # pass
+    from parsar import file_parsar
+
+    path = r'C:\Users\csoconnor\Desktop\Data\Bird\Surgery\Results\BoneGPS_03'
+    file_dictionary = file_parsar(path)
+    dicom_reader = DicomReader(file_dictionary['Dicom'])
+    dicom_reader.load_dicom()
+
+    time.sleep(1000)
+    print(1)
