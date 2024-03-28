@@ -32,31 +32,26 @@ Description:
 
 import os
 import time
-from multiprocessing import Pool
+import threading
 
 import numpy as np
 import pandas as pd
 import pydicom as dicom
 
 
-def multi_process_dicom(path):
-    """
-    Uses pydicom to read in dicom files.
-
-    Parameters
-    ----------
-    path - this is the path for a single file
-
-    Returns
-    -------
-
-    """
+def thread_process_dicom(path):
     try:
         datasets = dicom.dcmread(str(path))
     except:
         datasets = []
 
-    return datasets, path
+    return datasets
+
+
+def thread_process_contour(c):
+    contour_hold = np.round(np.array(c['ContourData'].value), 3)
+    contour = contour_hold.reshape(int(len(contour_hold) / 3), 3)
+    return contour
 
 
 class DicomReader:
@@ -106,6 +101,8 @@ class DicomReader:
         self.roi_info = pd.DataFrame(columns=['FilePath', 'RoiNames'])
         self.roi_contour = []
 
+        self.contours = []
+
     def add_dicom_extension(self):
         """
         Will add .dcm extension to any file inside self.dicom_files that doesn't have an extension
@@ -145,9 +142,7 @@ class DicomReader:
 
     def read(self):
         """
-        Uses the multiprocessing module to read in the data. The dicom files are sent to "multi_process_dicom"
-        function outside this class, which returns the read-in dicom tags/data. The tags/data are only kept if there
-        is a Modality tag.
+        Uses the threading to read in the data.
 
         self.ds -> contains tag/data from pydicom read-in
 
@@ -155,11 +150,18 @@ class DicomReader:
         -------
 
         """
-        p = Pool()
-        for x, y in p.imap_unordered(multi_process_dicom, self.dicom_files):
-            if x and 'Modality' in x:
-                self.ds.append(x)
-        p.close()
+        threads = []
+
+        def read_file_thread(file_path):
+            self.ds.append(thread_process_dicom(file_path))
+
+        for file_path in self.dicom_files:
+            thread = threading.Thread(target=read_file_thread, args=(file_path,))
+            threads.append(thread)
+            thread.start()
+
+        for thread in threads:
+            thread.join()
 
     def separate_modalities(self):
         """
@@ -514,13 +516,5 @@ class DicomReader:
 
 
 if __name__ == '__main__':
-    # pass
-    from parsar import file_parsar
+    pass
 
-    path = r'C:\Users\csoconnor\Desktop\Data\Bird\Surgery\Results\BoneGPS_03'
-    file_dictionary = file_parsar(path)
-    dicom_reader = DicomReader(file_dictionary['Dicom'])
-    dicom_reader.load_dicom()
-
-    time.sleep(1000)
-    print(1)
