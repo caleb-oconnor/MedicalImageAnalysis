@@ -339,6 +339,15 @@ class DicomReader:
                     else:
                         self.image_info.at[ii, t] = image[-1].ImagePositionPatient
 
+                elif t == 'SliceThickness':
+                    if len(image) > 1:
+                        thickness = (np.asarray(image[0]['ImagePositionPatient'].value[2]).astype(float) -
+                                     np.asarray(image[1]['ImagePositionPatient'].value[2]).astype(float))
+                    else:
+                        thickness = np.asarray(image[0]['SliceThickness']).astype(float)
+
+                    self.image_info.at[ii, t] = thickness
+
                 elif t == 'Slices':
                     self.image_info.at[ii, t] = len(image)
 
@@ -422,29 +431,29 @@ class DicomReader:
         for ii, image in enumerate(self.image_data):
             if self.image_info.at[ii, 'PatientPosition']:
                 position = self.image_info.at[ii, 'PatientPosition']
-                if position not in ['HFS', 'FFS']:
-                    rows = self.image_info.at[ii, 'Rows']
-                    columns = self.image_info.at[ii, 'Columns']
-                    spacing = self.image_info.at[ii, 'PixelSpacing']
-                    coordinates = self.image_info.at[ii, 'ImagePositionPatient']
-                    if position in ['HFDR', 'FFDR']:
-                        self.image_data[ii] = np.rot90(image, 3, (1, 2))
+                rows = self.image_info.at[ii, 'Rows']
+                columns = self.image_info.at[ii, 'Columns']
+                spacing = self.image_info.at[ii, 'PixelSpacing']
+                coordinates = self.image_info.at[ii, 'ImagePositionPatient']
 
-                        new_coordinates = np.double(coordinates[0]) - spacing[0]*columns
-                        self.image_info.at[ii, 'ImagePositionPatient'][0] = new_coordinates
-                    elif position in ['HFP', 'FFP']:
-                        self.image_data[ii] = np.rot90(image, 2, (1, 2))
+                if position in ['HFDR', 'FFDR']:
+                    self.image_data[ii] = np.rot90(image, 3, (1, 2))
 
-                        new_coordinates = np.double(coordinates[0]) - spacing[0] * columns
-                        self.image_info.at[ii, 'ImagePositionPatient'][0] = new_coordinates
+                    new_coordinates = np.double(coordinates[0]) - spacing[0] * (columns - 1)
+                    self.image_info.at[ii, 'ImagePositionPatient'][0] = new_coordinates
+                elif position in ['HFP', 'FFP']:
+                    self.image_data[ii] = np.rot90(image, 2, (1, 2))
 
-                        new_coordinates = np.double(coordinates[1]) - spacing[1] * rows
-                        self.image_info.at[ii, 'ImagePositionPatient'][1] = new_coordinates
-                    elif position in ['HFDL', 'FFDL']:
-                        self.image_data[ii] = np.rot90(image, 1, (1, 2))
+                    new_coordinates = np.double(coordinates[0]) - spacing[0] * (columns - 1)
+                    self.image_info.at[ii, 'ImagePositionPatient'][0] = new_coordinates
 
-                        new_coordinates = np.double(coordinates[1]) - spacing[1]*rows
-                        self.image_info.at[ii, 'ImagePositionPatient'][1] = new_coordinates
+                    new_coordinates = np.double(coordinates[1]) - spacing[1] * (rows - 1)
+                    self.image_info.at[ii, 'ImagePositionPatient'][1] = new_coordinates
+                elif position in ['HFDL', 'FFDL']:
+                    self.image_data[ii] = np.rot90(image, 1, (1, 2))
+
+                    new_coordinates = np.double(coordinates[1]) - spacing[1] * (rows - 1)
+                    self.image_info.at[ii, 'ImagePositionPatient'][1] = new_coordinates
 
     def separate_contours(self):
         """
