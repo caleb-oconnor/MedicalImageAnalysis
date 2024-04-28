@@ -416,6 +416,7 @@ class DicomReader:
                     image_slices = (us_binary * us_data[:, :, :, 0]).astype('uint8')
                 else:
                     print('Need to finish')
+                self.image_info.at[ii, 'Slices'] = len(image_slices)
 
             image_hold = np.asarray(image_slices)
             if len(image_hold.shape) > 3:
