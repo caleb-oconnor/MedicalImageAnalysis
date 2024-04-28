@@ -344,7 +344,7 @@ class DicomReader:
                         thickness = (np.asarray(image[0]['ImagePositionPatient'].value[2]).astype(float) -
                                      np.asarray(image[1]['ImagePositionPatient'].value[2]).astype(float))
                     else:
-                        thickness = np.asarray(image[0]['SliceThickness']).astype(float)
+                        thickness = 1
 
                     self.image_info.at[ii, t] = thickness
 
@@ -526,4 +526,3 @@ class DicomReader:
 
 if __name__ == '__main__':
     pass
-
