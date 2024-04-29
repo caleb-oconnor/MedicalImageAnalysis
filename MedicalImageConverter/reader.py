@@ -326,8 +326,8 @@ class DicomReader:
                 elif t == 'PixelSpacing':
                     if image[0].Modality == 'US':
                         self.image_info.at[ii, t] = [
-                            np.round(image[0].SequenceOfUltrasoundRegions[0].PhysicalDeltaX, 4),
-                            np.round(image[0].SequenceOfUltrasoundRegions[0].PhysicalDeltaY, 4)]
+                            10 * np.round(image[0].SequenceOfUltrasoundRegions[0].PhysicalDeltaX, 4),
+                            10 * np.round(image[0].SequenceOfUltrasoundRegions[0].PhysicalDeltaY, 4)]
                     elif image[0].Modality in ['DX', 'XA']:
                         self.image_info.at[ii, t] = image[0].ImagerPixelSpacing
                     else:
