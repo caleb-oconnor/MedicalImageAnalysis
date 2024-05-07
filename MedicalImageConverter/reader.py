@@ -395,7 +395,7 @@ class DicomReader:
         """
         for ii, image in enumerate(self.ds_images):
             image_slices = []
-            if self.image_info.at[ii, 'Modality'] in ['CT', 'MR', 'PT', 'DX', 'MG', 'NM', 'XA', 'CR']:
+            if self.image_info.at[ii, 'Modality'] in ['CT', 'MR', 'PT', 'MG', 'NM', 'XA', 'CR']:
                 for slice_ in reversed(image):
                     if (0x0028, 0x1052) in slice_:
                         intercept = slice_.RescaleIntercept
@@ -408,6 +408,16 @@ class DicomReader:
                         slope = 1
 
                     image_slices.append(((slice_.pixel_array*slope)+intercept).astype('int16'))
+
+            elif self.image_info.at[ii, 'Modality'] == 'DX':
+                if (0x2050, 0x0020) in image[0]:
+                    if image[0].PresentationLUTShape == 'INVERSE':
+                        hold_array = image[0].pixel_array.astype('int16')
+                        image_slices.append(16383 - hold_array)
+                    else:
+                        image_slices.append(image[0].pixel_array.astype('int16'))
+                else:
+                    image_slices.append(image[0].pixel_array.astype('int16'))
 
             elif self.image_info.at[ii, 'Modality'] == 'US':
                 if len(image) == 1:
