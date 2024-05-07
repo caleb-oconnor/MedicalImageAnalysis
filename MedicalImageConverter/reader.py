@@ -354,8 +354,8 @@ class DicomReader:
                 elif t == 'DefaultWindow':
                     if (0x0028, 0x1050) in image[0] and (0x0028, 0x1051) in image[0]:
                         if image[0].Modality == 'DX':
-                            self.image_info.at[ii, t] = [int(image[0].WindowCenter[0]),
-                                                         int(np.round(image[0].WindowWidth[0]/2))]
+                            self.image_info.at[ii, t] = [int(image[0].WindowCenter),
+                                                         int(np.round(image[0].WindowWidth/2))]
                         else:
                             center = image[0].WindowCenter
                             width = image[0].WindowWidth
@@ -526,4 +526,13 @@ class DicomReader:
 
 
 if __name__ == '__main__':
-    pass
+    from parsar import file_parsar
+
+    path = r'C:\Users\csoconnor\OneDrive - Inside MD Anderson\Documents\Breast_Pathology\759335'
+    exclude_files = []
+    existing_image_info = None
+    file_dictionary = file_parsar(path, exclude_files)
+    dicom_reader = DicomReader(file_dictionary['Dicom'], existing_image_info)
+    dicom_reader.load_dicom()
+
+    # pass
