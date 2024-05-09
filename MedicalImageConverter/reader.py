@@ -414,6 +414,7 @@ class DicomReader:
                     if image[0].PresentationLUTShape == 'INVERSE':
                         hold_array = image[0].pixel_array.astype('int16')
                         image_slices.append(16383 - hold_array)
+                        self.image_info.at[ii, 'DefaultWindow'][0] = 16383 - self.image_info.at[ii, 'DefaultWindow'][0]
                     else:
                         image_slices.append(image[0].pixel_array.astype('int16'))
                 else:
