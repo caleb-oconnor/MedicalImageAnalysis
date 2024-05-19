@@ -164,116 +164,46 @@ class DicomReader:
             thread.join()
 
     def separate_modalities(self):
-        """
-        Currently, separates the files into 10 different modalities. Files with a different modality are not kept.
-        Certain tags are required depending on the modality, if those tags don't exist for its respective modality
-        then it is not kept.
-
-        Returns
-        -------
-
-        """
-        req = {'CT': ['SeriesInstanceUID', 'AcquisitionNumber', 'ImagePositionPatient', 'SliceThickness', 'PixelData',
-                      'FrameOfReferenceUID'],
-               'MR': ['SeriesInstanceUID', 'AcquisitionNumber', 'ImagePositionPatient', 'SliceThickness', 'PixelData',
-                      'FrameOfReferenceUID'],
-               'PT': ['SeriesInstanceUID', 'ImagePositionPatient', 'SliceThickness', 'PixelData',
-                      'FrameOfReferenceUID'],
-               'US': ['SeriesInstanceUID', 'PixelData'],
-               'DX': ['SeriesInstanceUID', 'PixelData'],
-               'MG': ['SeriesInstanceUID', 'PixelData'],
-               'NM': ['SeriesInstanceUID', 'PixelData'],
-               'XA': ['SeriesInstanceUID', 'NumberOfFrames', 'PixelData'],
-               'CR': ['SeriesInstanceUID', 'PixelData'],
-               'RTSTRUCT': ['SeriesInstanceUID']}
-
         for modality in list(self.ds_dictionary.keys()):
             ds_modality = [d for d in self.ds if d['Modality'].value == modality]
-            if modality == 'CT' or modality == 'MR' or modality == 'PT':
-                self.ds_dictionary[modality] = [ds_mod for ds_mod in ds_modality if
-                                                len([r for r in req[modality] if r in ds_mod]) == len(req[modality]) and
-                                                ds_mod['SliceThickness'].value]
-            else:
-                self.ds_dictionary[modality] = [ds_mod for ds_mod in ds_modality if
-                                                len([r for r in req[modality] if r in ds_mod]) == len(req[modality])]
+            self.ds_dictionary[modality] = [ds_mod for ds_mod in ds_modality]
 
     def separate_images(self):
-        """
-        This is used to separate the different modalities into images. Each modality has specific requirements to exist
-        in the tags:
-            CT/MR = SeriesInstanceUID, SliceThickness, AcquisitionNumber, ImagePositionPatient
-            US = SeriesInstanceUID
+        for modality in list(self.ds_dictionary.keys()):
+            if len(self.ds_dictionary[modality]) > 0 and modality != 'RTSTRUCT' and modality != 'US':
+                sorting_tags = np.asarray([[img['SeriesInstanceUID'].value, img['AcquisitionNumber'].value]
+                                           if 'AcquisitionNumber' in img and img['AcquisitionNumber'].value is not None
+                                           else [img['SeriesInstanceUID'].value, 1]
+                                           for img in self.ds_dictionary[modality]])
 
-        CT - the 4 main tags are pulled into a numpy array. There is a quick fix because sometimes AcquisitionNumber is
-             empty, if so then '1001' is inserted in its place. All the unique combinations are found using series
-             instance uid, slice thickness, acquisition number. The unique combinations are used in a for loop and
-             all slices that match that criteria are selected. Those slices are then sorted by image position patient.
-        MR/PT - same as CT
-        US/DX/MG/NM/XA/CR - The images are just sorted using series instance uid.
+                unique_tags = np.unique(sorting_tags, axis=0)
+                for tag in unique_tags:
+                    sorted_idx = np.where((sorting_tags[:, 0] == tag[0]) & (sorting_tags[:, 1] == tag[1]))
+                    image_tags = [self.ds_dictionary[modality][idx] for idx in sorted_idx[0]]
 
+                    if 'ImageOrientationPatient' in image_tags[0] and 'ImagePositionPatient' in image_tags[0]:
+                        orientation = image_tags[0]['ImageOrientationPatient'].value
+                        position_tags = np.asarray([t['ImagePositionPatient'].value for t in image_tags])
 
-        Note: slices thickness is needed because some scans are saved with the first slice being a single slice of
-              coronal plane, then the rest of the slices are in the axial plane. I think it is called a scout scan,
-              basically they have a single coronal slice to show the area that will be covered, then it is followed
-              by your standard axial plane view. Anyway, I separate out that slice using the slice thickness because
-              it will be different from the axial.
+                        x = np.abs(orientation[0]) + np.abs(orientation[3])
+                        y = np.abs(orientation[1]) + np.abs(orientation[4])
+                        z = np.abs(orientation[2]) + np.abs(orientation[5])
 
-        Returns
-        -------
-
-        """
-        standard_modalities = ['CT', 'MR', 'PT']
-        for mod in standard_modalities:
-            if len(self.ds_dictionary[mod]) > 0:
-                if mod in ['CT', 'MR']:
-                    sorting_tags = np.asarray([[img['SeriesInstanceUID'].value, img['SliceThickness'].value,
-                                                img['AcquisitionNumber'].value, img['ImagePositionPatient'].value[0],
-                                                img['ImagePositionPatient'].value[1],
-                                                img['ImagePositionPatient'].value[2], ii]
-                                               for ii, img in enumerate(self.ds_dictionary[mod])])
-                else:
-                    sorting_tags = np.asarray([[img['SeriesInstanceUID'].value, img['SliceThickness'].value,
-                                                None, img['ImagePositionPatient'].value[0],
-                                                img['ImagePositionPatient'].value[1],
-                                                img['ImagePositionPatient'].value[2], ii]
-                                               for ii, img in enumerate(self.ds_dictionary[mod])])
-
-                sorting_tags_fix = np.asarray([[s[0], s[1], '1001', s[3], s[4], s[5], s[6]] if s[2] is None else s
-                                               for s in sorting_tags])
-                unique_tags = np.unique(sorting_tags_fix[:, 0:3].astype(str), axis=0)
-
-                for tags in unique_tags:
-                    unsorted_values = sorting_tags_fix[np.where((sorting_tags_fix[:, 0] == tags[0]) &
-                                                                (sorting_tags_fix[:, 1] == tags[1]) &
-                                                                (sorting_tags_fix[:, 2] == tags[2]))]
-
-                    # noinspection PyBroadException
-                    try:
-                        orientation = np.round(self.ds_dictionary[mod][0].ImageOrientationPatient)
-                        if orientation[0] == 1 and orientation[4] == 1:
-                            orient_idx = 5
-                        elif orientation[0] == 0 and orientation[3] == 0:
-                            orient_idx = 3
-                        elif orientation[1] == 0 and orientation[4] == 0:
-                            orient_idx = 4
+                        if x < y and x < z:
+                            slice_idx = np.argsort(position_tags[:, 0])
+                        elif y < x and y < z:
+                            slice_idx = np.argsort(position_tags[:, 1])
                         else:
-                            orient_idx = 5
-                    except:
-                        orient_idx = 5
+                            slice_idx = np.argsort(position_tags[:, 2])
 
-                    sorted_values = unsorted_values[np.argsort(unsorted_values[:, orient_idx].astype('float'))[::-1]]
-                    self.ds_images.append([self.ds_dictionary[mod][int(idx[6])] for idx in sorted_values])
+                        self.ds_images.append([image_tags[idx] for idx in slice_idx])
 
-        nonstandard_modalities = ['US', 'DX', 'MG', 'NM', 'XA', 'CR']
-        for mod in nonstandard_modalities:
-            if len(self.ds_dictionary[mod]) > 0:
-                sorting_tags = np.asarray([[img['SeriesInstanceUID'].value, ii]
-                                           for ii, img in enumerate(self.ds_dictionary[mod])])
-                unique_tags = np.unique(sorting_tags[:, 0], axis=0)
-                for tags in unique_tags:
-                    unsorted_values = sorting_tags[np.where(sorting_tags[:, 0] == tags)]
-                    sorted_values = unsorted_values[np.argsort(unsorted_values[:, 0])]
-                    self.ds_images.append([self.ds_dictionary[mod][int(idx[1])] for idx in sorted_values])
+                    else:
+                        self.ds_images.append(image_tags)
+
+            elif len(self.ds_dictionary[modality]) > 0 and modality != 'US':
+                for image in self.ds_dictionary[modality]:
+                    self.ds_images.append(image)
 
     def separate_rt_images(self):
         """
@@ -316,6 +246,7 @@ class DicomReader:
 
         """
         for ii, image in enumerate(self.ds_images):
+            print(ii)
             for t in list(self.image_info.keys()):
                 if t == 'FilePath':
                     self.image_info.at[ii, t] = [img.filename for img in image]
@@ -328,8 +259,10 @@ class DicomReader:
                         self.image_info.at[ii, t] = [
                             10 * np.round(image[0].SequenceOfUltrasoundRegions[0].PhysicalDeltaX, 4),
                             10 * np.round(image[0].SequenceOfUltrasoundRegions[0].PhysicalDeltaY, 4)]
+
                     elif image[0].Modality in ['DX', 'XA']:
                         self.image_info.at[ii, t] = image[0].ImagerPixelSpacing
+
                     else:
                         self.image_info.at[ii, t] = image[0].PixelSpacing
 
@@ -473,7 +406,7 @@ class DicomReader:
         the image they correspond to.
 
         It is pretty gross after that. For a given ROI each contour is read-in, matched with their image, then combined
-        all the slices of each contour into there own numpy array.
+        all the slices of each contour into their own numpy array.
 
         Returns
         -------
@@ -539,11 +472,9 @@ class DicomReader:
 if __name__ == '__main__':
     from parsar import file_parsar
 
-    path = r'C:\Users\csoconnor\OneDrive - Inside MD Anderson\Documents\Breast_Pathology\759335'
-    exclude_files = []
-    existing_image_info = None
-    file_dictionary = file_parsar(path, exclude_files)
-    dicom_reader = DicomReader(file_dictionary['Dicom'], existing_image_info)
+    path = r'C:\Users\csoconnor\Desktop\Data\Dragon_test_data'
+    file_dictionary = file_parsar(path)
+    dicom_reader = DicomReader(file_dictionary['Dicom'])
     dicom_reader.load_dicom()
 
     # pass
