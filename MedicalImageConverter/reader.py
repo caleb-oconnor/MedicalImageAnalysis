@@ -365,8 +365,13 @@ class DicomReader:
             elif self.image_info.at[ii, 'Modality'] == 'US':
                 if len(image) == 1:
                     us_data = image[0].pixel_array
-                    us_binary = (1 * (np.std(us_data, axis=3) == 0) == 1)
-                    image_slices = (us_binary * us_data[:, :, :, 0]).astype('uint8')
+                    if len(us_data.shape) == 3:
+                        us_binary = (1 * (np.std(us_data, axis=2) == 0) == 1)
+                        image_slices = (us_binary * us_data[:, :, 0]).astype('uint8')
+
+                    else:
+                        us_binary = (1 * (np.std(us_data, axis=3) == 0) == 1)
+                        image_slices = (us_binary * us_data[:, :, :, 0]).astype('uint8')
                 else:
                     print('Need to finish')
                 self.image_info.at[ii, 'Slices'] = len(image_slices)
