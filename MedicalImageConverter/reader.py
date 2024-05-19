@@ -170,7 +170,7 @@ class DicomReader:
 
     def separate_images(self):
         for modality in list(self.ds_dictionary.keys()):
-            if len(self.ds_dictionary[modality]) > 0 and modality != 'RTSTRUCT' and modality != 'US':
+            if len(self.ds_dictionary[modality]) > 0 and modality not in ['RTSTRUCT', 'US', 'DX']:
                 sorting_tags = np.asarray([[img['SeriesInstanceUID'].value, img['AcquisitionNumber'].value]
                                            if 'AcquisitionNumber' in img and img['AcquisitionNumber'].value is not None
                                            else [img['SeriesInstanceUID'].value, 1]
@@ -201,9 +201,9 @@ class DicomReader:
                     else:
                         self.ds_images.append(image_tags)
 
-            elif len(self.ds_dictionary[modality]) > 0 and modality != 'US':
+            elif len(self.ds_dictionary[modality]) > 0 and modality in ['US', 'DX']:
                 for image in self.ds_dictionary[modality]:
-                    self.ds_images.append(image)
+                    self.ds_images.append([image])
 
     def separate_rt_images(self):
         """
@@ -246,7 +246,6 @@ class DicomReader:
 
         """
         for ii, image in enumerate(self.ds_images):
-            print(ii)
             for t in list(self.image_info.keys()):
                 if t == 'FilePath':
                     self.image_info.at[ii, t] = [img.filename for img in image]
@@ -256,15 +255,23 @@ class DicomReader:
 
                 elif t == 'PixelSpacing':
                     if image[0].Modality == 'US':
-                        self.image_info.at[ii, t] = [
-                            10 * np.round(image[0].SequenceOfUltrasoundRegions[0].PhysicalDeltaX, 4),
-                            10 * np.round(image[0].SequenceOfUltrasoundRegions[0].PhysicalDeltaY, 4)]
+                        if 'PhysicalDeltaX' in image[0]:
+                            self.image_info.at[ii, t] = [
+                                10 * np.round(image[0].SequenceOfUltrasoundRegions[0].PhysicalDeltaX, 4),
+                                10 * np.round(image[0].SequenceOfUltrasoundRegions[0].PhysicalDeltaY, 4)]
+                        else:
+                            self.image_info.at[ii, t] = [1, 1]
 
                     elif image[0].Modality in ['DX', 'XA']:
                         self.image_info.at[ii, t] = image[0].ImagerPixelSpacing
 
-                    else:
+                    elif 'PixelSpacing' in image[0]:
                         self.image_info.at[ii, t] = image[0].PixelSpacing
+
+                    elif 'ContributingSourcesSequence' in image[0]:
+                        sequence = 'ContributingSourcesSequence'
+                        if 'DetectorElementSpacing' in image[0][sequence][0]:
+                            self.image_info.at[ii, t] = image[0][sequence][0]['DetectorElementSpacing'].value
 
                 elif t == 'ImagePositionPatient':
                     if image[0].Modality in ['US', 'CR', 'DX', 'MG', 'NM', 'XA']:
@@ -286,23 +293,25 @@ class DicomReader:
 
                 elif t == 'DefaultWindow':
                     if (0x0028, 0x1050) in image[0] and (0x0028, 0x1051) in image[0]:
-                        if image[0].Modality == 'DX':
-                            self.image_info.at[ii, t] = [int(image[0].WindowCenter),
-                                                         int(np.round(image[0].WindowWidth/2))]
-                        else:
-                            center = image[0].WindowCenter
-                            width = image[0].WindowWidth
-                            if not isinstance(center, float):
-                                center = center[0]
-                            if not isinstance(width, float):
-                                width = width[0]
-                            self.image_info.at[ii, t] = [int(center), int(np.round(width/2))]
+                        center = image[0].WindowCenter
+                        width = image[0].WindowWidth
+                        if not isinstance(center, float):
+                            center = center[0]
+
+                        if not isinstance(width, float):
+                            width = width[0]
+
+                        self.image_info.at[ii, t] = [int(center), int(np.round(width/2))]
+
                     elif image[0].Modality == 'US':
                         self.image_info.at[ii, t] = [128, 128]
+
                     else:
                         self.image_info.at[ii, t] = None
+
                 elif t == 'FullWindow':
                     self.image_info.at[ii, t] = None
+
                 else:
                     if t in image[0]:
                         self.image_info.at[ii, t] = image[0][t].value
@@ -470,11 +479,4 @@ class DicomReader:
 
 
 if __name__ == '__main__':
-    from parsar import file_parsar
-
-    path = r'C:\Users\csoconnor\Desktop\Data\Dragon_test_data'
-    file_dictionary = file_parsar(path)
-    dicom_reader = DicomReader(file_dictionary['Dicom'])
-    dicom_reader.load_dicom()
-
-    # pass
+    pass
