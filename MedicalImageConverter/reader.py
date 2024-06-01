@@ -32,6 +32,7 @@ Description:
 
 import os
 import time
+import gdcm
 import threading
 
 import numpy as np
@@ -94,7 +95,8 @@ class DicomReader:
         keep_tags = ['FilePath', 'SOPInstanceUID', 'PatientID', 'PatientName', 'Modality',
                      'SeriesDescription', 'SeriesDate', 'SeriesTime', 'SeriesInstanceUID', 'SeriesNumber',
                      'AcquisitionNumber', 'SliceThickness', 'PixelSpacing', 'Rows', 'Columns', 'PatientPosition',
-                     'ImagePositionPatient', 'ImageOrientationPatient', 'Slices', 'DefaultWindow', 'FullWindow']
+                     'ImagePositionPatient', 'ImageOrientationPatient', 'ImageMatrix', 'Slices', 'DefaultWindow',
+                     'FullWindow']
         self.image_info = pd.DataFrame(columns=keep_tags)
         self.image_data = []
 
@@ -281,8 +283,8 @@ class DicomReader:
 
                 elif t == 'SliceThickness':
                     if len(image) > 1:
-                        thickness = (np.asarray(image[0]['ImagePositionPatient'].value[2]).astype(float) -
-                                     np.asarray(image[1]['ImagePositionPatient'].value[2]).astype(float))
+                        thickness = (np.asarray(image[1]['ImagePositionPatient'].value[2]).astype(float) -
+                                     np.asarray(image[0]['ImagePositionPatient'].value[2]).astype(float))
                     else:
                         thickness = 1
 
@@ -311,6 +313,26 @@ class DicomReader:
 
                 elif t == 'FullWindow':
                     self.image_info.at[ii, t] = None
+
+                elif t == 'ImageMatrix':
+                    row_direction = np.array(self.image_info.at[ii, 'ImageOrientationPatient'][:3])
+                    column_direction = np.array(self.image_info.at[ii, 'ImageOrientationPatient'][3:])
+                    slice_direction = np.cross(row_direction, column_direction)
+                    offset = np.asarray(self.image_info.at[0, 'ImagePositionPatient'])
+
+                    row_spacing = self.image_info.at[ii, 'PixelSpacing'][0]
+                    column_spacing = self.image_info.at[ii, 'PixelSpacing'][1]
+                    slice_spacing = self.image_info.at[0, 'SliceThickness']
+
+                    linear = np.identity(3, dtype=np.float32)
+                    linear[0, :3] = row_direction / row_spacing
+                    linear[1, :3] = column_direction / column_spacing
+                    linear[2, :3] = slice_direction / slice_spacing
+
+                    mat = np.identity(4, dtype=np.float32)
+                    mat[:3, :3] = linear
+                    mat[:3, 3] = offset.dot(-linear.T)
+                    self.image_info.at[ii, t] = mat
 
                 else:
                     if t in image[0]:
