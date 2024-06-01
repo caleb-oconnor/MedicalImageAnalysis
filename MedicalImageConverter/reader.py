@@ -315,24 +315,7 @@ class DicomReader:
                     self.image_info.at[ii, t] = None
 
                 elif t == 'ImageMatrix':
-                    row_direction = np.array(self.image_info.at[ii, 'ImageOrientationPatient'][:3])
-                    column_direction = np.array(self.image_info.at[ii, 'ImageOrientationPatient'][3:])
-                    slice_direction = np.cross(row_direction, column_direction)
-                    offset = np.asarray(self.image_info.at[0, 'ImagePositionPatient'])
-
-                    row_spacing = self.image_info.at[ii, 'PixelSpacing'][0]
-                    column_spacing = self.image_info.at[ii, 'PixelSpacing'][1]
-                    slice_spacing = self.image_info.at[0, 'SliceThickness']
-
-                    linear = np.identity(3, dtype=np.float32)
-                    linear[0, :3] = row_direction / row_spacing
-                    linear[1, :3] = column_direction / column_spacing
-                    linear[2, :3] = slice_direction / slice_spacing
-
-                    mat = np.identity(4, dtype=np.float32)
-                    mat[:3, :3] = linear
-                    mat[:3, 3] = offset.dot(-linear.T)
-                    self.image_info.at[ii, t] = mat
+                    pass
 
                 else:
                     if t in image[0]:
@@ -422,6 +405,7 @@ class DicomReader:
 
                     new_coordinates = np.double(coordinates[0]) - spacing[0] * (columns - 1)
                     self.image_info.at[ii, 'ImagePositionPatient'][0] = new_coordinates
+
                 elif position in ['HFP', 'FFP']:
                     self.image_data[ii] = np.rot90(image, 2, (1, 2))
 
@@ -435,6 +419,29 @@ class DicomReader:
 
                     new_coordinates = np.double(coordinates[1]) - spacing[1] * (rows - 1)
                     self.image_info.at[ii, 'ImagePositionPatient'][1] = new_coordinates
+
+                self.compute_image_matrix(ii)
+
+    def compute_image_matrix(self, ii):
+        row_direction = np.array(self.image_info.at[ii, 'ImageOrientationPatient'][:3])
+        column_direction = np.array(self.image_info.at[ii, 'ImageOrientationPatient'][3:])
+        # noinspection PyUnreachableCode
+        slice_direction = np.cross(row_direction, column_direction)
+        offset = np.asarray(self.image_info.at[0, 'ImagePositionPatient'])
+
+        row_spacing = self.image_info.at[ii, 'PixelSpacing'][0]
+        column_spacing = self.image_info.at[ii, 'PixelSpacing'][1]
+        slice_spacing = self.image_info.at[0, 'SliceThickness']
+
+        linear = np.identity(3, dtype=np.float32)
+        linear[0, :3] = row_direction / row_spacing
+        linear[1, :3] = column_direction / column_spacing
+        linear[2, :3] = slice_direction / slice_spacing
+
+        mat = np.identity(4, dtype=np.float32)
+        mat[:3, :3] = linear
+        mat[:3, 3] = offset.dot(-linear.T)
+        self.image_info.at[ii, 'ImageMatrix'] = mat
 
     def separate_contours(self):
         """
