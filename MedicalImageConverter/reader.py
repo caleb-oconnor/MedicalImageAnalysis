@@ -102,6 +102,7 @@ class DicomReader:
 
         self.roi_info = pd.DataFrame(columns=['FilePath', 'RoiNames'])
         self.roi_contour = []
+        self.roi_pixel_position = []
 
         self.contours = []
 
@@ -279,7 +280,7 @@ class DicomReader:
                     if image[0].Modality in ['US', 'CR', 'DX', 'MG', 'NM', 'XA']:
                         self.image_info.at[ii, t] = [0, 0, 0]
                     else:
-                        self.image_info.at[ii, t] = image[-1].ImagePositionPatient
+                        self.image_info.at[ii, t] = image[0].ImagePositionPatient
 
                 elif t == 'SliceThickness':
                     if len(image) > 1:
@@ -427,11 +428,16 @@ class DicomReader:
         column_direction = np.array(self.image_info.at[ii, 'ImageOrientationPatient'][3:])
         # noinspection PyUnreachableCode
         slice_direction = np.cross(row_direction, column_direction)
-        offset = np.asarray(self.image_info.at[0, 'ImagePositionPatient'])
+        offset = np.asarray(self.image_info.at[ii, 'ImagePositionPatient'])
 
         row_spacing = self.image_info.at[ii, 'PixelSpacing'][0]
         column_spacing = self.image_info.at[ii, 'PixelSpacing'][1]
-        slice_spacing = self.image_info.at[0, 'SliceThickness']
+
+        first = np.dot(slice_direction, self.ds_images[ii][0].ImagePositionPatient)
+        last = np.dot(slice_direction, self.ds_images[ii][-1].ImagePositionPatient)
+
+        self.image_info.at[ii, 'SliceThickness'] = (last - first) / (self.image_info.at[ii, 'Slices'] - 1)
+        slice_spacing = self.image_info.at[ii, 'SliceThickness']
 
         linear = np.identity(3, dtype=np.float32)
         linear[0, :3] = row_direction / row_spacing
@@ -495,6 +501,21 @@ class DicomReader:
                 self.roi_contour.append([])
                 self.roi_info.at[ii, 'FilePath'] = None
                 self.roi_info.at[ii, 'RoiNames'] = None
+
+    def contour_pixel_location(self):
+        for ii, roi in enumerate(self.roi_contour):
+            matrix = self.image_info.at[ii, 'ImageMatrix']
+
+            roi_hold = []
+            for r in roi:
+                r_hold = []
+                for contours in r:
+                    c = np.concatenate((contours, np.ones((contours.shape[0], 1))), axis=1)
+                    r_hold.append(c.dot(matrix.T)[:, :3])
+
+                roi_hold.append(r_hold)
+
+            self.roi_pixel_position.append(roi_hold)
 
     def get_image_info(self):
         return self.image_info
