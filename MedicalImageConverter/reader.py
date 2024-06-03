@@ -329,8 +329,23 @@ class DicomReader:
                 else:
                     if t in image[0]:
                         self.image_info.at[ii, t] = image[0][t].value
+
                     else:
-                        self.image_info.at[ii, t] = None
+                        if t == 'SeriesDate':
+                            if 'StudyDate' in image[0]:
+                                self.image_info.at[ii, t] = image[0]['StudyDate'].value
+                            else:
+                                self.image_info.at[ii, t] = '0'
+
+                        elif t == 'SeriesTime':
+                            if 'StudyTime' in image[0]:
+                                self.image_info.at[ii, t] = image[0]['StudyTime'].value
+                            else:
+                                self.image_info.at[ii, t] = '00000'
+
+                        elif t == 'SeriesDescription':
+                            self.image_info.at[ii, t] = 'None'
+
 
     def convert_images(self):
         """
