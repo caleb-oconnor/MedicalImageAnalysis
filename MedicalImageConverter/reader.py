@@ -320,11 +320,11 @@ class DicomReader:
                     z = np.abs(orientation[2]) + np.abs(orientation[5])
 
                     if x < y and x < z:
-                        self.image_info.at[ii, t] = 'Axial'
-                    elif y < x and y < z:
                         self.image_info.at[ii, t] = 'Sagittal'
-                    else:
+                    elif y < x and y < z:
                         self.image_info.at[ii, t] = 'Coronal'
+                    else:
+                        self.image_info.at[ii, t] = 'Axial'
 
                 else:
                     if t in image[0]:
