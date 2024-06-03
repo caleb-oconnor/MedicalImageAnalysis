@@ -408,12 +408,19 @@ class DicomReader:
                 columns = self.image_info.at[ii, 'Columns']
                 spacing = self.image_info.at[ii, 'PixelSpacing']
                 coordinates = self.image_info.at[ii, 'ImagePositionPatient']
+                orientation = np.asarray(self.image_info.at[ii, 'ImageOrientationPatient'])
 
                 if position in ['HFDR', 'FFDR']:
                     self.image_data[ii] = np.rot90(image, 3, (1, 2))
 
                     new_coordinates = np.double(coordinates[0]) - spacing[0] * (columns - 1)
                     self.image_info.at[ii, 'ImagePositionPatient'][0] = new_coordinates
+                    self.image_info.at[ii, 'ImageOrientationPatient'] = [-orientation[0],
+                                                                         orientation[1],
+                                                                         -orientation[2],
+                                                                         -orientation[3],
+                                                                         orientation[4],
+                                                                         -orientation[5]]
 
                 elif position in ['HFP', 'FFP']:
                     self.image_data[ii] = np.rot90(image, 2, (1, 2))
@@ -423,11 +430,23 @@ class DicomReader:
 
                     new_coordinates = np.double(coordinates[1]) - spacing[1] * (rows - 1)
                     self.image_info.at[ii, 'ImagePositionPatient'][1] = new_coordinates
+                    self.image_info.at[ii, 'ImageOrientationPatient'] = [-orientation[0],
+                                                                         -orientation[1],
+                                                                         -orientation[2],
+                                                                         -orientation[3],
+                                                                         -orientation[4],
+                                                                         -orientation[5]]
                 elif position in ['HFDL', 'FFDL']:
                     self.image_data[ii] = np.rot90(image, 1, (1, 2))
 
                     new_coordinates = np.double(coordinates[1]) - spacing[1] * (rows - 1)
                     self.image_info.at[ii, 'ImagePositionPatient'][1] = new_coordinates
+                    self.image_info.at[ii, 'ImageOrientationPatient'] = [orientation[0],
+                                                                         -orientation[1],
+                                                                         -orientation[2],
+                                                                         orientation[3],
+                                                                         -orientation[4],
+                                                                         -orientation[5]]
 
                 self.compute_image_matrix(ii)
 
@@ -513,13 +532,26 @@ class DicomReader:
     def contour_pixel_location(self):
         for ii, roi in enumerate(self.roi_contour):
             matrix = self.image_info.at[ii, 'ImageMatrix']
+            plane = self.image_info.at[ii, 'ImagePlane']
 
             roi_hold = []
             for r in roi:
                 r_hold = []
                 for contours in r:
                     c = np.concatenate((contours, np.ones((contours.shape[0], 1))), axis=1)
-                    r_hold.append(c.dot(matrix.T)[:, :3])
+                    contour_convert = c.dot(matrix.T)[:, :3]
+
+                    if plane == 'Axial':
+                        contour_convert[:, 2] = np.round(contour_convert[:, 2], 0)
+                        r_hold.append(contour_convert)
+
+                    elif plane == 'Sagittal':
+                        contour_convert[:, 1] = np.round(contour_convert[:, 1], 0)
+                        r_hold.append(contour_convert)
+
+                    else:
+                        contour_convert[:, 0] = np.round(contour_convert[:, 0], 0)
+                        r_hold.append(contour_convert)
 
                 roi_hold.append(r_hold)
 
