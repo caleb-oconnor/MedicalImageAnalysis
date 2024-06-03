@@ -415,12 +415,12 @@ class DicomReader:
 
                     new_coordinates = np.double(coordinates[0]) - spacing[0] * (columns - 1)
                     self.image_info.at[ii, 'ImagePositionPatient'][0] = new_coordinates
-                    self.image_info.at[ii, 'ImageOrientationPatient'] = [-orientation[0],
+                    self.image_info.at[ii, 'ImageOrientationPatient'] = [-orientation[3],
+                                                                         -orientation[4],
+                                                                         -orientation[5],
+                                                                         orientation[0],
                                                                          orientation[1],
-                                                                         -orientation[2],
-                                                                         -orientation[3],
-                                                                         orientation[4],
-                                                                         -orientation[5]]
+                                                                         orientation[2]]
 
                 elif position in ['HFP', 'FFP']:
                     self.image_data[ii] = np.rot90(image, 2, (1, 2))
@@ -441,12 +441,12 @@ class DicomReader:
 
                     new_coordinates = np.double(coordinates[1]) - spacing[1] * (rows - 1)
                     self.image_info.at[ii, 'ImagePositionPatient'][1] = new_coordinates
-                    self.image_info.at[ii, 'ImageOrientationPatient'] = [orientation[0],
+                    self.image_info.at[ii, 'ImageOrientationPatient'] = [orientation[3],
+                                                                         orientation[4],
+                                                                         orientation[5],
+                                                                         -orientation[0],
                                                                          -orientation[1],
-                                                                         -orientation[2],
-                                                                         orientation[3],
-                                                                         -orientation[4],
-                                                                         -orientation[5]]
+                                                                         -orientation[2]]
 
                 self.compute_image_matrix(ii)
 
@@ -463,7 +463,7 @@ class DicomReader:
         first = np.dot(slice_direction, self.ds_images[ii][0].ImagePositionPatient)
         last = np.dot(slice_direction, self.ds_images[ii][-1].ImagePositionPatient)
 
-        self.image_info.at[ii, 'SliceThickness'] = (last - first) / (self.image_info.at[ii, 'Slices'] - 1)
+        self.image_info.at[ii, 'SliceThickness'] = np.asarray((last - first) / (self.image_info.at[ii, 'Slices'] - 1))
         slice_spacing = self.image_info.at[ii, 'SliceThickness']
 
         linear = np.identity(3, dtype=np.float32)
