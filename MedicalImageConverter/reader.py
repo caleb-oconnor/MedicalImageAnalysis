@@ -352,7 +352,7 @@ class DicomReader:
         for ii, image in enumerate(self.ds_images):
             image_slices = []
             if self.image_info.at[ii, 'Modality'] in ['CT', 'MR', 'PT', 'MG', 'NM', 'XA', 'CR']:
-                for slice_ in reversed(image):
+                for slice_ in image:
                     if (0x0028, 0x1052) in slice_:
                         intercept = slice_.RescaleIntercept
                     else:
