@@ -95,8 +95,8 @@ class DicomReader:
         keep_tags = ['FilePath', 'SOPInstanceUID', 'PatientID', 'PatientName', 'Modality',
                      'SeriesDescription', 'SeriesDate', 'SeriesTime', 'SeriesInstanceUID', 'SeriesNumber',
                      'AcquisitionNumber', 'SliceThickness', 'PixelSpacing', 'Rows', 'Columns', 'PatientPosition',
-                     'ImagePositionPatient', 'ImageOrientationPatient', 'ImageMatrix', 'Slices', 'DefaultWindow',
-                     'FullWindow']
+                     'ImagePositionPatient', 'ImageOrientationPatient', 'ImageMatrix', 'ImagePlane', 'Slices',
+                     'DefaultWindow', 'FullWindow']
         self.image_info = pd.DataFrame(columns=keep_tags)
         self.image_data = []
 
@@ -239,11 +239,6 @@ class DicomReader:
     def standard_useful_tags(self):
         """
         Important tags for each image that I use in DRAGON:
-            ['FilePath', 'SOPInstanceUID', 'PatientID', 'PatientName', 'Modality',
-             'SeriesDescription', 'SeriesDate', 'SeriesTime', 'SeriesInstanceUID', 'SeriesNumber',
-             'AcquisitionNumber', 'SliceThickness', 'PixelSpacing', 'Rows', 'Columns', 'ImagePositionPatient',
-             'Slices', 'DefaultWindow']
-
         Returns
         -------
 
@@ -317,6 +312,19 @@ class DicomReader:
 
                 elif t == 'ImageMatrix':
                     pass
+
+                elif t == 'ImagePlane':
+                    orientation = image[0]['ImageOrientationPatient'].value
+                    x = np.abs(orientation[0]) + np.abs(orientation[3])
+                    y = np.abs(orientation[1]) + np.abs(orientation[4])
+                    z = np.abs(orientation[2]) + np.abs(orientation[5])
+
+                    if x < y and x < z:
+                        self.image_info.at[ii, t] = 'Axial'
+                    elif y < x and y < z:
+                        self.image_info.at[ii, t] = 'Sagittal'
+                    else:
+                        self.image_info.at[ii, t] = 'Coronal'
 
                 else:
                     if t in image[0]:
