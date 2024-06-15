@@ -346,7 +346,6 @@ class DicomReader:
                         elif t == 'SeriesDescription':
                             self.image_info.at[ii, t] = 'None'
 
-
     def convert_images(self):
         """
         Gets the 2D slice for each image and combines them into a 3D array per each image. Uses the RescaleIntercept
@@ -546,8 +545,15 @@ class DicomReader:
 
     def contour_pixel_location(self):
         for ii, roi in enumerate(self.roi_contour):
-            matrix = self.image_info.at[ii, 'ImageMatrix']
-            plane = self.image_info.at[ii, 'ImagePlane']
+            info = self.image_info
+            if self.existing_image_info is not None:
+                if len(list(info.index)) > 0:
+                    print('fix')
+                else:
+                    info = self.existing_image_info
+
+            matrix = info.at[ii, 'ImageMatrix']
+            plane = info.at[ii, 'ImagePlane']
 
             roi_hold = []
             for r in roi:
