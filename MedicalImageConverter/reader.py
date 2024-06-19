@@ -6,28 +6,35 @@ Author - Caleb O'Connor
 Email - csoconnor@mdanderson.org
 
 
-Description:
-    This is a "supposed" to be a multi data medical imagery reader. Currently, only works for dicom file types. Reads in
-    imagery data and converts them to separate 3D numpy arrays. Also, will read in any associated ROI contours.
+ThreeMfReader:
+    Converts 3mf file to pyvista polydata mesh.
 
-    Using the "DicomReader" class the user can input a folder directory and output the images in numpy arrays along with
-    their respective rois (if any). The data does not need to be organized inside folder directory, the reader will
-    sort the images appropriately. It does not separate different patients if they exist in the same folder.
 
-    The reader currently imports 9 different modalites and RTSTRUCT files. The accepted modalites are:
-        CT
-        MR
-        US
-        PT
-        MG
-        DX
-        NM
-        XA
-        CR
+Dicom Reader:
+    Reads in dicom files and creates 2D or 3D image data sets, depending on the modality type. Also, reads in rtstruct
+    files and output roi data in either contour position or pixel location.
 
-    The CT and MR modalities have been tested extensively, along with their respective ROIs. The other 7 modalities
-    have been tested but only on a few datasets a piece. For RTSTRUCTS, only those referencing CT and MR have been
-    tested.
+    Fully tested modalities:
+    - CT
+    - RTSTRUCT
+
+    Limited tested modalities:
+    - MR
+    - US
+    - MG
+    - DX
+    - MG
+    - NM
+    - PT
+
+    Final variables:
+    image_data = a list of list, where each index is either a 2D/3D array depending on the modality
+    image_info = dataframe(index=images, columns=tags), 23 of what I think are the most important user and image
+                 information tags. For images with multiple slices only a tag for the first slice is kept for that
+                 image. Meaning for a 100 slice CT I don't store Pixel Spacing 100 times, only the 100 filepaths and
+                 SOPInstanceUID (needed for RTSTRUCTS) are saved.
+
+    # Note all images are converted to being FFS, the positioning is corrected as well as the roi locations.
 """
 
 import os
@@ -180,32 +187,42 @@ def thread_process_contour(c):
 
 
 class DicomReader:
+    """
+    Reads in dicom files and creates 2D or 3D image data sets, depending on the modality type. Also, reads in rtstruct
+    files and output roi data in either contour position or pixel location.
+
+    Fully tested modalities:
+    - CT
+    - RTSTRUCT
+
+    Limited tested modalities:
+    - MR
+    - US
+    - MG
+    - DX
+    - MG
+    - NM
+    - PT
+
+    Final variables:
+    image_data = a list of list, where each index is either a 2D/3D array depending on the modality
+    image_info = dataframe(index=images, columns=tags), 23 of what I think are the most important user and image
+                 information tags. For images with multiple slices only a tag for the first slice is kept for that
+                 image. Meaning for a 100 slice CT I don't store Pixel Spacing 100 times, only the 100 filepaths and
+                 SOPInstanceUID (needed for RTSTRUCTS) are saved.
+
+    # Note all images are converted to being FFS, the positioning is corrected as well as the roi locations.
+
+    """
     def __init__(self, dicom_files, existing_image_info=None, only_load_roi_names=None):
         """
-        This reader splits dicom images/rtstructs using the SeriesInstanceUID/AcquisitionNumber. It can read any of
-        these modalities:
-            CT
-            MR
-            US
-            PT
-            MG
-            DX
-            NM
-            XA
-            CR
-            RTSTRUCT
-
-        The images are combined into 3D numpy arrays. CT/MR/PT images are corrected to be Head-First-Supine (HFS) if not
-        already. The ROIs are combined into a numpy array list of list with each inner list being the points on a given
-        slice.
-
 
         Parameters
         ----------
-        dicom_files - list of dicom files created using file_parsar function
-        existing_image_info - either None or a dataframe containing image information, this would be required when only
-                loading an RTSTRUCT it needs to reference to original image. The format of the dataframe is the same as
-                the variable image_info below.
+        dicom_files - list of all the dicom paths
+        existing_image_info - dataframe of image_info same as structure below (for when only loading RTSTRUCTS)
+        only_load_roi_names - list of Roi names that will only be uploaded (so total segementator won't load all 100
+                              rois)
         """
         self.dicom_files = dicom_files
         self.existing_image_info = existing_image_info
@@ -291,11 +308,26 @@ class DicomReader:
             thread.join()
 
     def separate_modalities(self):
+        """
+        Separate read in files by their modality.
+
+        ds_dictionary - dictionary of different modalities
+        Returns
+        -------
+
+        """
         for modality in list(self.ds_dictionary.keys()):
             ds_modality = [d for d in self.ds if d['Modality'].value == modality]
             self.ds_dictionary[modality] = [ds_mod for ds_mod in ds_modality]
 
     def separate_images(self):
+        """
+        Runs through each modality and if multiple images exist per modality they are separated.
+
+        Returns
+        -------
+
+        """
         for modality in list(self.ds_dictionary.keys()):
             if len(self.ds_dictionary[modality]) > 0 and modality not in ['RTSTRUCT', 'US', 'DX']:
                 sorting_tags = np.asarray([[img['SeriesInstanceUID'].value, img['AcquisitionNumber'].value]
@@ -539,6 +571,13 @@ class DicomReader:
             self.image_info.at[ii, 'FullWindow'] = [image_min, image_max]
 
     def fix_orientation(self):
+        """
+        Corrects position for orientation fix. I force everything to be FFS so for non-FFS images the corner position
+        is incorrect, below corrects for the position using the Pixel Spacing and Orientation Matrix
+        Returns
+        -------
+
+        """
         for ii, image in enumerate(self.image_data):
             if self.image_info.at[ii, 'PatientPosition']:
                 position = self.image_info.at[ii, 'PatientPosition']
@@ -589,6 +628,14 @@ class DicomReader:
                 self.compute_image_matrix(ii)
 
     def compute_image_matrix(self, ii):
+        """
+        Computes the image rotation matrix, often seen in MR images where the image is tilted.
+
+
+        Returns
+        -------
+
+        """
         row_direction = np.array(self.image_info.at[ii, 'ImageOrientationPatient'][:3])
         column_direction = np.array(self.image_info.at[ii, 'ImageOrientationPatient'][3:])
         # noinspection PyUnreachableCode
@@ -668,6 +715,12 @@ class DicomReader:
                 self.roi_info.at[ii, 'RoiNames'] = None
 
     def contour_pixel_location(self):
+        """
+        Converts from contour position to pixel array location.
+        Returns
+        -------
+
+        """
         for ii, roi in enumerate(self.roi_contour):
             info = self.image_info
             if self.existing_image_info is not None:
