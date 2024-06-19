@@ -37,7 +37,131 @@ import threading
 
 import numpy as np
 import pandas as pd
+import pyvista as pv
 import pydicom as dicom
+
+
+class ThreeMfReader:
+    """
+    Converts 3mf file to pyvista polydata mesh.
+    """
+    def __init__(self, path, load=True):
+        self.path = path
+        self.mesh = None
+
+        if load:
+            self.load_3mf()
+
+    def load_3mf(self):
+        """
+        Loads in the 3mf file, gets the vertices/vertice colors/triangles and creates a polydata 3D model using pyvista.
+
+        Returns
+        -------
+
+        """
+        namespace = {"3mf": "http://schemas.microsoft.com/3dmanufacturing/core/2015/02",
+                     "m": "http://schemas.microsoft.com/3dmanufacturing/material/2015/02"}
+
+        archive = zipfile.ZipFile(path, "r")
+        root = ET.parse(archive.open("3D/3dmodel.model"))
+        color_list = list()
+        colors = root.findall('.//m:color', namespace)
+        if colors:
+            for color in colors:
+                color_list.append(color.get("color", 0))
+
+        obj = root.findall("./3mf:resources/3mf:object", namespace)[0]
+        triangles = obj.findall(".//3mf:triangle", namespace)
+
+        vertex_list = []
+        for vertex in obj.findall(".//3mf:vertex", namespace):
+            vertex_list.append([vertex.get("x"), vertex.get("y"), vertex.get("z")])
+
+        triangle_list = np.empty((1, 4 * len(triangles)))
+        vertices_color = np.zeros((len(vertex_list), 3))
+        for ii, triangle in enumerate(triangles):
+            v1 = int(triangle.get("v1"))
+            v2 = int(triangle.get("v2"))
+            v3 = int(triangle.get("v3"))
+            tricolor = color_avg(color_list, (triangle.get("p1")), (triangle.get("p2")), (triangle.get("p3")))
+            rgb_color = list(ImageColor.getcolor(tricolor, "RGB")[0:3])
+            vertices_color[v1] = rgb_color
+            vertices_color[v2] = rgb_color
+            vertices_color[v3] = rgb_color
+            triangle_list[0, ii * 4:(ii + 1) * 4] = [3, v1, v2, v3]
+
+        self.mesh = pv.PolyData(np.float64(np.asarray(vertex_list)), triangle_list[0, :].astype(int))
+        self.mesh['colors'] = np.abs(255-vertices_color)
+
+    @staticmethod
+    def color_avg(color_list, p1, p2, p3):
+        """
+        Get the average color from color list.
+
+        Parameters
+        ----------
+        color_list
+        p1
+        p2
+        p3
+
+        Returns
+        -------
+
+        """
+        p2rgb = None
+        p3rgb = None
+        p1hex = color_list[int(p1)]
+        p1rgb = hex_to_rgb(p1hex)
+        if isinstance(p2, int):
+            p2hex = color_list[int(p2)]
+            p2rgb = hex_to_rgb(p2hex)
+
+        if isinstance(p3, int):
+            p3hex = color_list[int(p3)]
+            p3rgb = hex_to_rgb(p3hex)
+
+        if p2rgb is not None and p3rgb is not None:
+            rgbAvg = np.average(np.array(p1rgb), np.array(p2rgb), np.array(p3rgb))
+
+        elif p2rgb is not None:
+            rgbAvg = np.average(np.array(p1rgb), np.array(p2rgb))
+
+        else:
+            rgbAvg = p1rgb
+
+        hexAvg = rgb_to_hex(rgbAvg[0], rgbAvg[1], rgbAvg[2])
+
+        return hexAvg
+
+    @staticmethod
+    def hex_to_rgb(value):
+        """
+
+        Parameters
+        ----------
+        value
+
+        Returns - (red, green, blue) for the color given as #rrggbb
+        """
+        value = value.lstrip('#')
+        lv = len(value)
+        return tuple(int(value[i:i + lv // 3], 16) for i in range(0, lv, lv // 3))
+
+    @staticmethod
+    def rgb_to_hex(red, green, blue):
+        """
+
+        Parameters
+        ----------
+        red
+        green
+        blue
+
+        Returns - Return color as #rrggbb for the given color values
+        """
+        return '#%02x%02x%02x' % (red, green, blue)
 
 
 def thread_process_dicom(path):
