@@ -25,6 +25,14 @@ class ModelToMask:
     The mask is given a spacing buffer of 5 indexes on each side x, y, z.
     """
     def __init__(self, models, empty_array=True, convert=True):
+        """
+
+        Parameters
+        ----------
+        models - List of all models
+        empty_array -
+        convert
+        """
         self.models = models
         self.empty_array = empty_array
 
@@ -76,7 +84,7 @@ class ModelToMask:
             self.origin = [self.bounds[0], self.bounds[2], self.bounds[4]]
 
             self.slice_locations = [i for i in range(self.bounds[4], self.bounds[5], self.spacing[2])]
-            self.dims = [len(slice_location), self.bounds[1] - self.bounds[0] + 1, self.bounds[3] - self.bounds[2] + 1]
+            self.dims = [len(self.slice_locations), self.bounds[1] - self.bounds[0] + 1, self.bounds[3] - self.bounds[2] + 1]
 
     def compute_mask(self):
         """
@@ -93,7 +101,7 @@ class ModelToMask:
                 org_bounds = model.GetBounds()
 
                 contours = []
-                for s in self.slice_location:
+                for s in self.slice_locations:
                     if org_bounds[4] < s < org_bounds[5]:
                         hold_contour = model.slice(normal='z', origin=[com[0], com[1], s])
                         contours.append((np.asarray(hold_contour.points)[:, 0:2] -
@@ -101,12 +109,14 @@ class ModelToMask:
                     else:
                         contours.append([])
 
-                for ii, s in enumerate(self.slice_location):
+                for ii, s in enumerate(self.slice_locations):
                     if len(contours[ii]) > 0:
-                        frame = np.zeros((self.dim[2], self.dim[1]))
+                        frame = np.zeros((self.dims[2], self.dims[1]))
                         # noinspection PyTypeChecker
                         cv2.fillPoly(frame, np.array([contours[ii]], dtype=np.int32), 1)
                         self.mask[ii, :, :] = self.mask[ii, :, :] + frame
+
+        self.mask = self.mask.astype(np.int8)
 
     def save_image(self, path):
         """
