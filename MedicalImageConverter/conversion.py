@@ -41,11 +41,13 @@ class ModelToMask:
         self.dims = None
         self.slice_locations = None
 
+        self.contours = []
         self.mask = None
         self.origin = None
 
         if convert:
             self.compute_bounds()
+            self.compute_contours()
             self.compute_mask()
 
     def set_bounds(self, bounds):
@@ -86,35 +88,47 @@ class ModelToMask:
             self.slice_locations = [i for i in range(self.bounds[4], self.bounds[5], self.spacing[2])]
             self.dims = [len(self.slice_locations), self.bounds[1] - self.bounds[0] + 1, self.bounds[3] - self.bounds[2] + 1]
 
+    def compute_contours(self):
+        """
+        Compute the contours along the z-axis for all models.
+        Returns
+        -------
+
+        """
+        for model in self.models:
+            com = model.center
+            org_bounds = model.GetBounds()
+
+            model_contours = []
+            for s in self.slice_locations:
+                if org_bounds[4] < s < org_bounds[5]:
+                    hold_contour = model.slice(normal='z', origin=[com[0], com[1], s])
+                    model_contours.append((np.asarray(hold_contour.points)[:, 0:2] -
+                                     (self.bounds[0], self.bounds[2])) / (self.spacing[0:2]))
+                else:
+                    model_contours.append([])
+
+            self.contours.append(model_contours)
+
     def compute_mask(self):
         """
-        Default is a empty array. If a binary mask is wanted then the contours are computed for each model, then the
-        contours are used to fill the binary mask.
+        Default is an empty array. Use the computed contours to fill the mask, not needed if the user wants a empty
+        array.
         Returns
         -------
 
         """
         self.mask = np.zeros((self.dims[0], self.dims[2], self.dims[1]))
         if not self.empty_array:
-            for model in self.models:
-                com = model.center
-                org_bounds = model.GetBounds()
+            for ii, model in enumerate(self.models):
 
-                contours = []
-                for s in self.slice_locations:
-                    if org_bounds[4] < s < org_bounds[5]:
-                        hold_contour = model.slice(normal='z', origin=[com[0], com[1], s])
-                        contours.append((np.asarray(hold_contour.points)[:, 0:2] -
-                                         (self.bounds[0], self.bounds[2])) / (self.spacing[0:2]))
-                    else:
-                        contours.append([])
-
-                for ii, s in enumerate(self.slice_locations):
-                    if len(contours[ii]) > 0:
+                model_contours = self.contours[ii]
+                for jj, s in enumerate(self.slice_locations):
+                    if len(model_contours[jj]) > 0:
                         frame = np.zeros((self.dims[2], self.dims[1]))
                         # noinspection PyTypeChecker
-                        cv2.fillPoly(frame, np.array([contours[ii]], dtype=np.int32), 1)
-                        self.mask[ii, :, :] = self.mask[ii, :, :] + frame
+                        cv2.fillPoly(frame, np.array([model_contours[jj]], dtype=np.int32), 1)
+                        self.mask[jj, :, :] = self.mask[jj, :, :] + frame
 
         self.mask = self.mask.astype(np.int8)
 
