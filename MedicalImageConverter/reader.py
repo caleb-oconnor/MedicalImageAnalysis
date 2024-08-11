@@ -623,34 +623,19 @@ class DicomReader:
         row_direction = np.array(self.image_info.at[ii, 'ImageOrientationPatient'][:3])
         column_direction = np.array(self.image_info.at[ii, 'ImageOrientationPatient'][3:])
         offset = np.asarray(self.image_info.at[ii, 'ImagePositionPatient'])
-        if np.min(1 - np.abs(row_direction)) < .001 and np.min(1 - np.abs(column_direction)) < .001:
-            mat = np.asarray([[1, 0, 0, offset[0]],
-                              [0, 1, 0, offset[1]],
-                              [0, 0, 1, offset[2]],
-                              [0, 0, 0, 1]])
 
-        else:
-            # noinspection PyUnreachableCode
-            slice_direction = np.cross(row_direction, column_direction)
+        # noinspection PyUnreachableCode
+        slice_direction = np.cross(row_direction, column_direction)
+        first = np.dot(slice_direction, self.ds_images[ii][0].ImagePositionPatient)
+        last = np.dot(slice_direction, self.ds_images[ii][-1].ImagePositionPatient)
+        slice_spacing = np.asarray((last - first) / (self.image_info.at[ii, 'Slices'] - 1))
+        self.image_info.at[ii, 'SliceThickness'] = slice_spacing
 
-
-            row_spacing = self.image_info.at[ii, 'PixelSpacing'][0]
-            column_spacing = self.image_info.at[ii, 'PixelSpacing'][1]
-
-            first = np.dot(slice_direction, self.ds_images[ii][0].ImagePositionPatient)
-            last = np.dot(slice_direction, self.ds_images[ii][-1].ImagePositionPatient)
-
-            slice_spacing = np.asarray((last - first) / (self.image_info.at[ii, 'Slices'] - 1))
-            self.image_info.at[ii, 'SliceThickness'] = slice_spacing
-
-            linear = np.identity(3, dtype=np.float32)
-            linear[0, :3] = row_direction / row_spacing
-            linear[1, :3] = column_direction / column_spacing
-            linear[2, :3] = slice_direction / slice_spacing
-
-            mat = np.identity(4, dtype=np.float32)
-            mat[:3, :3] = linear
-            mat[:3, 3] = offset.dot(-linear.T)
+        mat = np.identity(4, dtype=np.float32)
+        mat[0, :3] = row_direction
+        mat[1, :3] = column_direction
+        mat[2, :3] = slice_direction
+        mat[0:3, 3] = -offset
 
         self.image_info.at[ii, 'ImageMatrix'] = mat
 
@@ -706,47 +691,6 @@ class DicomReader:
                 self.roi_contour.append([])
                 self.roi_info.at[ii, 'FilePath'] = None
                 self.roi_info.at[ii, 'RoiNames'] = None
-
-    def contour_pixel_location(self):
-        """
-        Converts from contour position to pixel array location.
-        Returns
-        -------
-
-        """
-        for ii, roi in enumerate(self.roi_contour):
-            info = self.image_info
-            if self.existing_image_info is not None:
-                if len(list(info.index)) > 0:
-                    print('fix')
-                else:
-                    info = self.existing_image_info
-
-            matrix = info.at[ii, 'ImageMatrix']
-            plane = info.at[ii, 'ImagePlane']
-
-            roi_hold = []
-            for r in roi:
-                r_hold = []
-                for contours in r:
-                    c = np.concatenate((contours, np.ones((contours.shape[0], 1))), axis=1)
-                    contour_convert = c.dot(matrix.T)[:, :3]
-
-                    if plane == 'Axial':
-                        contour_convert[:, 2] = np.round(contour_convert[:, 2], 0)
-                        r_hold.append(contour_convert)
-
-                    elif plane == 'Sagittal':
-                        contour_convert[:, 1] = np.round(contour_convert[:, 1], 0)
-                        r_hold.append(contour_convert)
-
-                    else:
-                        contour_convert[:, 0] = np.round(contour_convert[:, 0], 0)
-                        r_hold.append(contour_convert)
-
-                roi_hold.append(r_hold)
-
-            self.roi_pixel_position.append(roi_hold)
 
     def get_image_info(self):
         return self.image_info
