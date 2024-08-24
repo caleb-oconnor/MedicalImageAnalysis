@@ -154,6 +154,10 @@ class ThreeMfReader:
 
         return hexAvg
 
+    def downsample_mesh(self, points):
+        ds_mesh = self.mesh.decimate(1 - (points / len(self.mesh.points)))
+        ds_points = np.asarray(ds_mesh.points)
+
 
 def thread_process_dicom(path):
     try:
@@ -454,17 +458,20 @@ class DicomReader:
                     pass
 
                 elif t == 'ImagePlane':
-                    orientation = image[0]['ImageOrientationPatient'].value
-                    x = np.abs(orientation[0]) + np.abs(orientation[3])
-                    y = np.abs(orientation[1]) + np.abs(orientation[4])
-                    z = np.abs(orientation[2]) + np.abs(orientation[5])
-
-                    if x < y and x < z:
-                        self.image_info.at[ii, t] = 'Sagittal'
-                    elif y < x and y < z:
-                        self.image_info.at[ii, t] = 'Coronal'
-                    else:
+                    if image[0].Modality in ['US', 'CR', 'DX', 'MG', 'NM', 'XA']:
                         self.image_info.at[ii, t] = 'Axial'
+                    else:
+                        orientation = image[0]['ImageOrientationPatient'].value
+                        x = np.abs(orientation[0]) + np.abs(orientation[3])
+                        y = np.abs(orientation[1]) + np.abs(orientation[4])
+                        z = np.abs(orientation[2]) + np.abs(orientation[5])
+
+                        if x < y and x < z:
+                            self.image_info.at[ii, t] = 'Sagittal'
+                        elif y < x and y < z:
+                            self.image_info.at[ii, t] = 'Coronal'
+                        else:
+                            self.image_info.at[ii, t] = 'Axial'
 
                 else:
                     if t in image[0]:
@@ -563,53 +570,56 @@ class DicomReader:
 
         """
         for ii, image in enumerate(self.image_data):
-            if self.image_info.at[ii, 'PatientPosition']:
-                position = self.image_info.at[ii, 'PatientPosition']
-                rows = self.image_info.at[ii, 'Rows']
-                columns = self.image_info.at[ii, 'Columns']
-                spacing = self.image_info.at[ii, 'PixelSpacing']
-                coordinates = self.image_info.at[ii, 'ImagePositionPatient']
-                orientation = np.asarray(self.image_info.at[ii, 'ImageOrientationPatient'])
+            if self.image_info.at[ii, 'Modality'] in ['US', 'CR', 'DX', 'XA']:
+                self.image_info.at[ii, 'ImageMatrix'] = np.identity(4, dtype=np.float32)
+            else:
+                if self.image_info.at[ii, 'PatientPosition']:
+                    position = self.image_info.at[ii, 'PatientPosition']
+                    rows = self.image_info.at[ii, 'Rows']
+                    columns = self.image_info.at[ii, 'Columns']
+                    spacing = self.image_info.at[ii, 'PixelSpacing']
+                    coordinates = self.image_info.at[ii, 'ImagePositionPatient']
+                    orientation = np.asarray(self.image_info.at[ii, 'ImageOrientationPatient'])
 
-                if position in ['HFDR', 'FFDR']:
-                    self.image_data[ii] = np.rot90(image, 3, (1, 2))
+                    if position in ['HFDR', 'FFDR']:
+                        self.image_data[ii] = np.rot90(image, 3, (1, 2))
 
-                    new_coordinates = np.double(coordinates[0]) - spacing[0] * (columns - 1)
-                    self.image_info.at[ii, 'ImagePositionPatient'][0] = new_coordinates
-                    self.image_info.at[ii, 'ImageOrientationPatient'] = [-orientation[3],
-                                                                         -orientation[4],
-                                                                         -orientation[5],
-                                                                         orientation[0],
-                                                                         orientation[1],
-                                                                         orientation[2]]
+                        new_coordinates = np.double(coordinates[0]) - spacing[0] * (columns - 1)
+                        self.image_info.at[ii, 'ImagePositionPatient'][0] = new_coordinates
+                        self.image_info.at[ii, 'ImageOrientationPatient'] = [-orientation[3],
+                                                                             -orientation[4],
+                                                                             -orientation[5],
+                                                                             orientation[0],
+                                                                             orientation[1],
+                                                                             orientation[2]]
 
-                elif position in ['HFP', 'FFP']:
-                    self.image_data[ii] = np.rot90(image, 2, (1, 2))
+                    elif position in ['HFP', 'FFP']:
+                        self.image_data[ii] = np.rot90(image, 2, (1, 2))
 
-                    new_coordinates = np.double(coordinates[0]) - spacing[0] * (columns - 1)
-                    self.image_info.at[ii, 'ImagePositionPatient'][0] = new_coordinates
+                        new_coordinates = np.double(coordinates[0]) - spacing[0] * (columns - 1)
+                        self.image_info.at[ii, 'ImagePositionPatient'][0] = new_coordinates
 
-                    new_coordinates = np.double(coordinates[1]) - spacing[1] * (rows - 1)
-                    self.image_info.at[ii, 'ImagePositionPatient'][1] = new_coordinates
-                    self.image_info.at[ii, 'ImageOrientationPatient'] = [-orientation[0],
-                                                                         -orientation[1],
-                                                                         -orientation[2],
-                                                                         -orientation[3],
-                                                                         -orientation[4],
-                                                                         -orientation[5]]
-                elif position in ['HFDL', 'FFDL']:
-                    self.image_data[ii] = np.rot90(image, 1, (1, 2))
+                        new_coordinates = np.double(coordinates[1]) - spacing[1] * (rows - 1)
+                        self.image_info.at[ii, 'ImagePositionPatient'][1] = new_coordinates
+                        self.image_info.at[ii, 'ImageOrientationPatient'] = [-orientation[0],
+                                                                             -orientation[1],
+                                                                             -orientation[2],
+                                                                             -orientation[3],
+                                                                             -orientation[4],
+                                                                             -orientation[5]]
+                    elif position in ['HFDL', 'FFDL']:
+                        self.image_data[ii] = np.rot90(image, 1, (1, 2))
 
-                    new_coordinates = np.double(coordinates[1]) - spacing[1] * (rows - 1)
-                    self.image_info.at[ii, 'ImagePositionPatient'][1] = new_coordinates
-                    self.image_info.at[ii, 'ImageOrientationPatient'] = [orientation[3],
-                                                                         orientation[4],
-                                                                         orientation[5],
-                                                                         -orientation[0],
-                                                                         -orientation[1],
-                                                                         -orientation[2]]
+                        new_coordinates = np.double(coordinates[1]) - spacing[1] * (rows - 1)
+                        self.image_info.at[ii, 'ImagePositionPatient'][1] = new_coordinates
+                        self.image_info.at[ii, 'ImageOrientationPatient'] = [orientation[3],
+                                                                             orientation[4],
+                                                                             orientation[5],
+                                                                             -orientation[0],
+                                                                             -orientation[1],
+                                                                             -orientation[2]]
 
-                self.compute_image_matrix(ii)
+                    self.compute_image_matrix(ii)
 
     def compute_image_matrix(self, ii):
         """
@@ -623,6 +633,9 @@ class DicomReader:
         row_direction = np.array(self.image_info.at[ii, 'ImageOrientationPatient'][:3])
         column_direction = np.array(self.image_info.at[ii, 'ImageOrientationPatient'][3:])
         offset = np.asarray(self.image_info.at[ii, 'ImagePositionPatient'])
+
+        row_spacing = self.image_info.at[ii, 'PixelSpacing'][0]
+        column_spacing = self.image_info.at[ii, 'PixelSpacing'][1]
 
         # noinspection PyUnreachableCode
         slice_direction = np.cross(row_direction, column_direction)
