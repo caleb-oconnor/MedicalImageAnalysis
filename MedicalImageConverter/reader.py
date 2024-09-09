@@ -50,6 +50,7 @@ import numpy as np
 import pandas as pd
 import pyvista as pv
 import pydicom as dicom
+from pydicom.uid import generate_uid
 
 
 class ThreeMfReader:
@@ -223,9 +224,9 @@ class DicomReader:
 
         keep_tags = ['FilePath', 'SOPInstanceUID', 'PatientID', 'PatientName', 'Modality',
                      'SeriesDescription', 'SeriesDate', 'SeriesTime', 'SeriesInstanceUID', 'SeriesNumber',
-                     'AcquisitionNumber', 'SliceThickness', 'PixelSpacing', 'Rows', 'Columns', 'PatientPosition',
-                     'ImagePositionPatient', 'ImageOrientationPatient', 'ImageMatrix', 'ImagePlane', 'Slices',
-                     'DefaultWindow', 'FullWindow']
+                     'AcquisitionNumber', 'FrameOfReferenceUID','SliceThickness', 'PixelSpacing', 'Rows', 'Columns',
+                     'PatientPosition', 'ImagePositionPatient', 'ImageOrientationPatient', 'ImageMatrix', 'ImagePlane',
+                     'Slices', 'DefaultWindow', 'FullWindow']
         self.image_info = pd.DataFrame(columns=keep_tags)
         self.image_data = []
 
@@ -396,24 +397,7 @@ class DicomReader:
                     self.image_info.at[ii, t] = [img.SOPInstanceUID for img in image]
 
                 elif t == 'PixelSpacing':
-                    if image[0].Modality == 'US':
-                        if 'PhysicalDeltaX' in image[0]:
-                            self.image_info.at[ii, t] = [
-                                10 * np.round(image[0].SequenceOfUltrasoundRegions[0].PhysicalDeltaX, 4),
-                                10 * np.round(image[0].SequenceOfUltrasoundRegions[0].PhysicalDeltaY, 4)]
-                        else:
-                            self.image_info.at[ii, t] = [1, 1]
-
-                    elif image[0].Modality in ['DX', 'XA']:
-                        self.image_info.at[ii, t] = image[0].ImagerPixelSpacing
-
-                    elif 'PixelSpacing' in image[0]:
-                        self.image_info.at[ii, t] = image[0].PixelSpacing
-
-                    elif 'ContributingSourcesSequence' in image[0]:
-                        sequence = 'ContributingSourcesSequence'
-                        if 'DetectorElementSpacing' in image[0][sequence][0]:
-                            self.image_info.at[ii, t] = image[0][sequence][0]['DetectorElementSpacing'].value
+                    self.find_pixel_spacing(image[0], ii)
 
                 elif t == 'ImagePositionPatient':
                     if image[0].Modality in ['US', 'CR', 'DX', 'MG', 'NM', 'XA']:
@@ -425,6 +409,8 @@ class DicomReader:
                     if len(image) > 1:
                         thickness = (np.asarray(image[1]['ImagePositionPatient'].value[2]).astype(float) -
                                      np.asarray(image[0]['ImagePositionPatient'].value[2]).astype(float))
+                    elif t in image[0]:
+                        thickness = np.asarray(image[0]['SliceThickness'].value).astype(float)
                     else:
                         thickness = 1
 
@@ -493,6 +479,44 @@ class DicomReader:
                         elif t == 'SeriesDescription':
                             self.image_info.at[ii, t] = 'None'
 
+                        elif t == 'FrameOfReferenceUID':
+                            if 'FrameOfReferenceUID' in image[0]:
+                                self.image_info.at[ii, t] = image[0]['FrameOfReferenceUID'].value
+                            else:
+                                self.image_info.at[ii, t] = generate_uid()
+
+    def find_pixel_spacing(self, image, ii):
+        spacing = 'PixelSpacing'
+        if image.Modality == 'US':
+            if 'SequenceOfUltrasoundRegions' in image:
+                if 'PhysicalDeltaX' in image.SequenceOfUltrasoundRegions[0]:
+                    self.image_info.at[ii, spacing] = [
+                        10 * np.round(image.SequenceOfUltrasoundRegions[0].PhysicalDeltaX, 4),
+                        10 * np.round(image.SequenceOfUltrasoundRegions[0].PhysicalDeltaY, 4)]
+                else:
+                    self.image_info.at[ii, spacing] = [1, 1]
+            else:
+                self.image_info.at[ii, spacing] = [1, 1]
+
+        elif image.Modality in ['DX', 'XA']:
+            self.image_info.at[ii, spacing] = image.ImagerPixelSpacing
+
+        elif 'PixelSpacing' in image:
+            self.image_info.at[ii, spacing] = image.PixelSpacing
+
+        elif 'ContributingSourcesSequence' in image:
+            sequence = 'ContributingSourcesSequence'
+            if 'DetectorElementSpacing' in image[sequence][0]:
+                self.image_info.at[ii, spacing] = image[sequence][0]['DetectorElementSpacing'].value
+
+        elif 'PerFrameFunctionalGroupsSequence' in image:
+            sequence = 'PerFrameFunctionalGroupsSequence'
+            if 'PixelMeasuresSequence' in image[sequence][0]:
+                self.image_info.at[ii, spacing] = image[sequence][0]['PixelMeasuresSequence'][0]['PixelSpacing'].value
+
+        else:
+            self.image_info.at[ii, spacing] = [1, 1]
+
     def convert_images(self):
         """
         Gets the 2D slice for each image and combines them into a 3D array per each image. Uses the RescaleIntercept
@@ -549,11 +573,11 @@ class DicomReader:
                         image_slices = (us_binary * us_data[:, :, :, 0]).astype('uint8')
                 else:
                     print('Need to finish')
-                self.image_info.at[ii, 'Slices'] = len(image_slices)
 
             image_hold = np.asarray(image_slices)
             if len(image_hold.shape) > 3:
                 self.image_data.append(image_hold[0])
+                self.image_info.at[ii, 'Slices'] = image_hold[0].shape[0]
             else:
                 self.image_data.append(image_hold)
 
@@ -572,6 +596,30 @@ class DicomReader:
         for ii, image in enumerate(self.image_data):
             if self.image_info.at[ii, 'Modality'] in ['US', 'CR', 'DX', 'XA']:
                 self.image_info.at[ii, 'ImageMatrix'] = np.identity(4, dtype=np.float32)
+                self.image_info.at[ii, 'ImageOrientationPatient'] = [1, 0, 0, 0, 1, 0]
+
+            elif self.image_info.at[ii, 'Modality'] == 'NM':
+                self.image_info.at[ii, 'ImageMatrix'] = np.identity(4, dtype=np.float32)
+                self.image_info.at[ii, 'ImageOrientationPatient'] = [1, 0, 0, 0, 1, 0]
+
+            elif self.image_info.at[ii, 'Modality'] == 'MG':
+                if self.image_info.at[ii, 'Slices'] == 1:
+                    self.image_info.at[ii, 'ImageMatrix'] = np.identity(4, dtype=np.float32)
+                    self.image_info.at[ii, 'ImageOrientationPatient'] = [1, 0, 0, 0, 1, 0]
+
+                else:
+                    if 'SharedFunctionalGroupsSequence' in self.ds_images[ii][0]:
+                        sequence = 'SharedFunctionalGroupsSequence'
+                        if 'PlaneOrientationSequence' in self.ds_images[ii][0][sequence][0]:
+                            self.image_info.at[ii, 'ImageOrientationPatient'] = self.ds_images[ii][0][sequence][0]['PlaneOrientationSequence'][0]['ImageOrientationPatient'].value
+                            self.compute_image_matrix(ii)
+                        else:
+                            self.image_info.at[ii, 'ImageMatrix'] = np.identity(4, dtype=np.float32)
+                            self.image_info.at[ii, 'ImageOrientationPatient'] = [1, 0, 0, 0, 1, 0]
+                    else:
+                        self.image_info.at[ii, 'ImageMatrix'] = np.identity(4, dtype=np.float32)
+                        self.image_info.at[ii, 'ImageOrientationPatient'] = [1, 0, 0, 0, 1, 0]
+
             else:
                 if self.image_info.at[ii, 'PatientPosition']:
                     position = self.image_info.at[ii, 'PatientPosition']
@@ -632,23 +680,21 @@ class DicomReader:
         """
         row_direction = np.array(self.image_info.at[ii, 'ImageOrientationPatient'][:3])
         column_direction = np.array(self.image_info.at[ii, 'ImageOrientationPatient'][3:])
-        offset = np.asarray(self.image_info.at[ii, 'ImagePositionPatient'])
-
-        row_spacing = self.image_info.at[ii, 'PixelSpacing'][0]
-        column_spacing = self.image_info.at[ii, 'PixelSpacing'][1]
+        translation_offset = np.asarray(self.image_info.at[ii, 'ImagePositionPatient'])
 
         # noinspection PyUnreachableCode
         slice_direction = np.cross(row_direction, column_direction)
-        first = np.dot(slice_direction, self.ds_images[ii][0].ImagePositionPatient)
-        last = np.dot(slice_direction, self.ds_images[ii][-1].ImagePositionPatient)
-        slice_spacing = np.asarray((last - first) / (self.image_info.at[ii, 'Slices'] - 1))
-        self.image_info.at[ii, 'SliceThickness'] = slice_spacing
+        if len(self.ds_images) > 1:
+            first = np.dot(slice_direction, self.ds_images[ii][0].ImagePositionPatient)
+            last = np.dot(slice_direction, self.ds_images[ii][-1].ImagePositionPatient)
+            slice_spacing = np.asarray((last - first) / (self.image_info.at[ii, 'Slices'] - 1))
+            self.image_info.at[ii, 'SliceThickness'] = slice_spacing
 
         mat = np.identity(4, dtype=np.float32)
         mat[0, :3] = row_direction
         mat[1, :3] = column_direction
         mat[2, :3] = slice_direction
-        mat[0:3, 3] = -offset
+        mat[0:3, 3] = -translation_offset
 
         self.image_info.at[ii, 'ImageMatrix'] = mat
 
