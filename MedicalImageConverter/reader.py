@@ -38,6 +38,7 @@ Dicom Reader:
 """
 
 import os
+import copy
 import time
 import gdcm
 import threading
@@ -224,9 +225,9 @@ class DicomReader:
 
         keep_tags = ['FilePath', 'SOPInstanceUID', 'PatientID', 'PatientName', 'Modality',
                      'SeriesDescription', 'SeriesDate', 'SeriesTime', 'SeriesInstanceUID', 'SeriesNumber',
-                     'AcquisitionNumber', 'FrameOfReferenceUID','SliceThickness', 'PixelSpacing', 'Rows', 'Columns',
+                     'AcquisitionNumber', 'FrameOfReferenceUID', 'SliceThickness', 'PixelSpacing', 'Rows', 'Columns',
                      'PatientPosition', 'ImagePositionPatient', 'ImageOrientationPatient', 'ImageMatrix', 'ImagePlane',
-                     'Slices', 'DefaultWindow', 'FullWindow']
+                     'Slices', 'SkippedSlice', 'DefaultWindow', 'FullWindow']
         self.image_info = pd.DataFrame(columns=keep_tags)
         self.image_data = []
 
@@ -441,6 +442,9 @@ class DicomReader:
                     self.image_info.at[ii, t] = None
 
                 elif t == 'ImageMatrix':
+                    pass
+
+                elif t == 'SkippedSlice':
                     pass
 
                 elif t == 'ImagePlane':
@@ -684,11 +688,20 @@ class DicomReader:
 
         # noinspection PyUnreachableCode
         slice_direction = np.cross(row_direction, column_direction)
-        if len(self.ds_images) > 1:
+        if len(self.ds_images[ii]) > 1:
             first = np.dot(slice_direction, self.ds_images[ii][0].ImagePositionPatient)
+            second = np.dot(slice_direction, self.ds_images[ii][1].ImagePositionPatient)
             last = np.dot(slice_direction, self.ds_images[ii][-1].ImagePositionPatient)
-            slice_spacing = np.asarray((last - first) / (self.image_info.at[ii, 'Slices'] - 1))
+            first_last_spacing = np.asarray((last - first) / (self.image_info.at[ii, 'Slices'] - 1))
+            if np.abs((second - first) - first_last_spacing) > 0.01:
+                self.find_skipped_slices(slice_direction, ii)
+                slice_spacing = second - first
+            else:
+                slice_spacing = np.asarray((last - first) / (self.image_info.at[ii, 'Slices'] - 1))
+
             self.image_info.at[ii, 'SliceThickness'] = slice_spacing
+            if slice_spacing < 0 and self.image_info.at[ii, 'ImagePlane']:
+                self.image_info.at[ii, 'ImagePositionPatient'] = self.ds_images[ii][-1].ImagePositionPatient
 
         mat = np.identity(4, dtype=np.float32)
         mat[0, :3] = row_direction
@@ -743,6 +756,8 @@ class DicomReader:
                                 roi_names.append(self.rt_df.RoiNames[jj][kk])
 
             if len(roi_names) > 0:
+                if not np.isnan(self.image_info.at[ii, 'SkippedSlice']):
+                    image_contour_list = self.calculate_skipped_contours(ii, image_contour_list)
                 self.roi_contour.append(image_contour_list)
                 self.roi_info.at[ii, 'FilePath'] = roi_filepaths
                 self.roi_info.at[ii, 'RoiNames'] = roi_names
@@ -750,6 +765,44 @@ class DicomReader:
                 self.roi_contour.append([])
                 self.roi_info.at[ii, 'FilePath'] = None
                 self.roi_info.at[ii, 'RoiNames'] = None
+
+    def find_skipped_slices(self, slice_direction, ii):
+        image = self.ds_images[ii]
+        base_spacing = None
+        for jj in range(len(image) - 1):
+            position_1 = np.dot(slice_direction, image[jj].ImagePositionPatient)
+            position_2 = np.dot(slice_direction, image[jj + 1].ImagePositionPatient)
+            if jj == 0:
+                base_spacing = position_2 - position_1
+            if jj > 0 and np.abs(base_spacing - (position_2 - position_1)) > 0.01:
+                self.image_info.at[ii, 'SkippedSlice'] = jj + 1
+                self.image_info.at[ii, 'Slices'] = len(image) + 1
+
+                hold_data = copy.deepcopy(self.image_data[ii])
+                interpolate_slice = np.mean(self.image_data[ii][jj:jj + 2, :, :], axis=0).astype(np.int16)
+                self.image_data[ii] = np.insert(hold_data,
+                                                self.image_info.at[ii, 'SkippedSlice'],
+                                                interpolate_slice,
+                                                axis=0)
+
+    def calculate_skipped_contours(self, ii, image_contours):
+        thickness = self.image_info.at[ii, 'SliceThickness']
+        skipped = self.image_info.at[ii, 'SkippedSlice']
+        z_positions = np.asarray([self.ds_images[ii][skipped - 1].ImagePositionPatient[2],
+                                  self.ds_images[ii][skipped].ImagePositionPatient[2]])
+
+        for jj, roi_contour in enumerate(image_contours):
+            if len(roi_contour) > 1:
+                for kk in range(len(roi_contour) - 1):
+                    position_1 = roi_contour[kk][0][2]
+                    position_2 = roi_contour[kk + 1][0][2]
+                    if position_1 == z_positions[0] and position_2 == z_positions[1]:
+                        roi_copy = copy.deepcopy(roi_contour)
+                        roi_copy.insert(jj + 1, copy.deepcopy(roi_copy[kk]))
+                        roi_copy[jj + 1][:, 2] = position_1 + thickness
+                        image_contours[jj] = roi_copy
+
+        return image_contours
 
     def get_image_info(self):
         return self.image_info
