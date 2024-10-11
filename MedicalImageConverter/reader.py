@@ -800,6 +800,7 @@ class DicomReader:
                         roi_copy = copy.deepcopy(roi_contour)
                         roi_copy.insert(jj + 1, copy.deepcopy(roi_copy[kk]))
                         roi_copy[jj + 1][:, 2] = position_1 + thickness
+                        self.image_info.at[ii, 'SOPInstanceUID'].insert(jj + 1, generate_uid())
                         image_contours[jj] = roi_copy
 
         return image_contours
