@@ -170,12 +170,6 @@ def thread_process_dicom(path):
     return datasets
 
 
-def thread_process_contour(c):
-    contour_hold = np.round(np.array(c['ContourData'].value), 3)
-    contour = contour_hold.reshape(int(len(contour_hold) / 3), 3)
-    return contour
-
-
 class DicomReader:
     """
     Reads in dicom files and creates 2D or 3D image data sets, depending on the modality type. Also, reads in rtstruct
@@ -227,7 +221,7 @@ class DicomReader:
                      'SeriesDescription', 'SeriesDate', 'SeriesTime', 'SeriesInstanceUID', 'SeriesNumber',
                      'AcquisitionNumber', 'FrameOfReferenceUID', 'SliceThickness', 'PixelSpacing', 'Rows', 'Columns',
                      'PatientPosition', 'ImagePositionPatient', 'ImageOrientationPatient', 'ImageMatrix', 'ImagePlane',
-                     'Slices', 'SkippedSlice', 'DefaultWindow', 'FullWindow']
+                     'Slices', 'SkippedSlice', 'DefaultWindow', 'FullWindow', 'Unverified']
         self.image_info = pd.DataFrame(columns=keep_tags)
         self.image_data = []
 
@@ -463,6 +457,9 @@ class DicomReader:
                         else:
                             self.image_info.at[ii, t] = 'Axial'
 
+                elif t == 'Unverified':
+                    pass
+
                 else:
                     if t in image[0]:
                         self.image_info.at[ii, t] = image[0][t].value
@@ -589,7 +586,7 @@ class DicomReader:
             image_max = np.max(self.image_data[-1])
             self.image_info.at[ii, 'FullWindow'] = [image_min, image_max]
 
-    def fix_orientation(self):
+    def fix_orientation(self, convert_axial=True):
         """
         Corrects position for orientation fix. I force everything to be FFS so for non-FFS images the corner position
         is incorrect, below corrects for the position using the Pixel Spacing and Orientation Matrix
@@ -601,12 +598,15 @@ class DicomReader:
             if self.image_info.at[ii, 'Modality'] in ['US', 'CR', 'DX', 'XA']:
                 self.image_info.at[ii, 'ImageMatrix'] = np.identity(4, dtype=np.float32)
                 self.image_info.at[ii, 'ImageOrientationPatient'] = [1, 0, 0, 0, 1, 0]
+                self.image_info.at[ii, 'Unverified'] = True
 
             elif self.image_info.at[ii, 'Modality'] == 'NM':
                 self.image_info.at[ii, 'ImageMatrix'] = np.identity(4, dtype=np.float32)
                 self.image_info.at[ii, 'ImageOrientationPatient'] = [1, 0, 0, 0, 1, 0]
+                self.image_info.at[ii, 'Unverified'] = True
 
             elif self.image_info.at[ii, 'Modality'] == 'MG':
+                self.image_info.at[ii, 'Unverified'] = True
                 if self.image_info.at[ii, 'Slices'] == 1:
                     self.image_info.at[ii, 'ImageMatrix'] = np.identity(4, dtype=np.float32)
                     self.image_info.at[ii, 'ImageOrientationPatient'] = [1, 0, 0, 0, 1, 0]
@@ -633,45 +633,61 @@ class DicomReader:
                     coordinates = self.image_info.at[ii, 'ImagePositionPatient']
                     orientation = np.asarray(self.image_info.at[ii, 'ImageOrientationPatient'])
 
-                    if position in ['HFDR', 'FFDR']:
-                        self.image_data[ii] = np.rot90(image, 3, (1, 2))
+                    if self.image_info.at[ii, 'ImagePlane'] == 'Axial':
+                        self.fix_axial(position, rows, columns, spacing, coordinates, orientation)
 
-                        new_coordinates = np.double(coordinates[0]) - spacing[0] * (columns - 1)
-                        self.image_info.at[ii, 'ImagePositionPatient'][0] = new_coordinates
-                        self.image_info.at[ii, 'ImageOrientationPatient'] = [-orientation[3],
-                                                                             -orientation[4],
-                                                                             -orientation[5],
-                                                                             orientation[0],
-                                                                             orientation[1],
-                                                                             orientation[2]]
-
-                    elif position in ['HFP', 'FFP']:
-                        self.image_data[ii] = np.rot90(image, 2, (1, 2))
-
-                        new_coordinates = np.double(coordinates[0]) - spacing[0] * (columns - 1)
-                        self.image_info.at[ii, 'ImagePositionPatient'][0] = new_coordinates
-
-                        new_coordinates = np.double(coordinates[1]) - spacing[1] * (rows - 1)
-                        self.image_info.at[ii, 'ImagePositionPatient'][1] = new_coordinates
-                        self.image_info.at[ii, 'ImageOrientationPatient'] = [-orientation[0],
-                                                                             -orientation[1],
-                                                                             -orientation[2],
-                                                                             -orientation[3],
-                                                                             -orientation[4],
-                                                                             -orientation[5]]
-                    elif position in ['HFDL', 'FFDL']:
-                        self.image_data[ii] = np.rot90(image, 1, (1, 2))
-
-                        new_coordinates = np.double(coordinates[1]) - spacing[1] * (rows - 1)
-                        self.image_info.at[ii, 'ImagePositionPatient'][1] = new_coordinates
-                        self.image_info.at[ii, 'ImageOrientationPatient'] = [orientation[3],
-                                                                             orientation[4],
-                                                                             orientation[5],
-                                                                             -orientation[0],
-                                                                             -orientation[1],
-                                                                             -orientation[2]]
+                    elif self.image_info.at[ii, 'ImagePlane'] == 'Sagittal':
+                        self.fix_sagittal(position, rows, columns, spacing, coordinates, orientation)
 
                     self.compute_image_matrix(ii)
+
+    def fix_axial(self, position, rows, columns, spacing, coordinates, orientation):
+        if position in ['HFDR', 'FFDR']:
+            self.image_data[ii] = np.rot90(image, 3, (1, 2))
+
+            new_coordinates = np.double(coordinates[0]) - spacing[0] * (columns - 1)
+            self.image_info.at[ii, 'ImagePositionPatient'][0] = new_coordinates
+            self.image_info.at[ii, 'ImageOrientationPatient'] = [-orientation[3],
+                                                                 -orientation[4],
+                                                                 -orientation[5],
+                                                                 orientation[0],
+                                                                 orientation[1],
+                                                                 orientation[2]]
+        elif position in ['HFP', 'FFP']:
+            self.image_data[ii] = np.rot90(image, 2, (1, 2))
+
+            new_coordinates = np.double(coordinates[0]) - spacing[0] * (columns - 1)
+            self.image_info.at[ii, 'ImagePositionPatient'][0] = new_coordinates
+
+            new_coordinates = np.double(coordinates[1]) - spacing[1] * (rows - 1)
+            self.image_info.at[ii, 'ImagePositionPatient'][1] = new_coordinates
+            self.image_info.at[ii, 'ImageOrientationPatient'] = [-orientation[0],
+                                                                 -orientation[1],
+                                                                 -orientation[2],
+                                                                 -orientation[3],
+                                                                 -orientation[4],
+                                                                 -orientation[5]]
+        elif position in ['HFDL', 'FFDL']:
+            self.image_data[ii] = np.rot90(image, 1, (1, 2))
+
+            new_coordinates = np.double(coordinates[1]) - spacing[1] * (rows - 1)
+            self.image_info.at[ii, 'ImagePositionPatient'][1] = new_coordinates
+            self.image_info.at[ii, 'ImageOrientationPatient'] = [orientation[3],
+                                                                 orientation[4],
+                                                                 orientation[5],
+                                                                 -orientation[0],
+                                                                 -orientation[1],
+                                                                 -orientation[2]]
+
+        if self.image_info.at[ii, 'ImageOrientationPatient'][0] < 0 or self.image_info.at[ii, 'ImageOrientationPatient'][5] < 0:
+            self.image_info.at[ii, 'Unverified'] = True
+        self.compute_image_matrix(ii)
+
+    def fix_sagittal(self, position, rows, columns, spacing, coordinates, orientation):
+        b = copy.deepcopy(self.image_data[ii])
+        b = np.swapaxes(b, 0, 1)
+        b = np.swapaxes(b, 1, 2)
+        self.image_data[ii] = np.flip(b, axis=0)
 
     def compute_image_matrix(self, ii):
         """
@@ -804,6 +820,23 @@ class DicomReader:
                         image_contours[jj] = roi_copy
 
         return image_contours
+
+    def convert_to_axial(self):
+        for ii in range(len(self.ds_images)):
+            if self.image_info.at[ii, 'ImagePlane'] == 'Coronal':
+                b = copy.deepcopy(self.image_data[ii])
+                self.image_data[ii] = np.flip(b, axis=0)
+
+            elif self.image_info.at[ii, 'ImagePlane'] == 'Sagittal':
+                b = copy.deepcopy(self.image_data[ii])
+                b = np.swapaxes(b, 0, 1)
+                b = np.swapaxes(b, 1, 2)
+                self.image_data[ii] = np.flip(b, axis=0)
+        #
+        # b = np.swapaxes(self.image_data[2], 0, 1)
+        # b = np.swapaxes(b, 1, 2)
+        # c = np.flip(b, axis=0)
+        print(1)
 
     def get_image_info(self):
         return self.image_info
