@@ -19,6 +19,28 @@ import pyvista as pv
 import SimpleITK as sitk
 
 
+def contour_pixels_to_mask(contour, dimensions, spacing, origin):
+    slice_check = np.zeros(dimensions[2])
+    hold_mask = np.zeros([dimensions[2], dimensions[0], dimensions[1]], dtype=np.uint8)
+    for c in contour:
+        slice_num = int(np.round((c[0][2] - origin[2]) / float(spacing[2])))
+
+        contour_indexing = np.round(np.abs((c - origin) / spacing))
+        contour_stacked = np.vstack((contour_indexing[:, 0:2], contour_indexing[0, 0:2]))
+        new_contour = np.array([contour_stacked], dtype=np.int32)
+        image = np.zeros([dimensions[0], dimensions[1]], dtype=np.uint8)
+        cv2.fillPoly(image, new_contour, 1)
+
+        if slice_check[slice_num] == 0:
+            hold_mask[slice_num, :, :] = image
+            slice_check[slice_num] = 1
+        else:
+            hold_mask[slice_num, :, :] = hold_mask[slice_num, :, :] + image
+    mask = (hold_mask > 0).astype(np.uint8)
+
+    return mask
+
+
 class ModelToMask:
     """
     Converts a 3D model/s into a mask. The mask can either be an empty array (default) or a binary mask of the model/s.
