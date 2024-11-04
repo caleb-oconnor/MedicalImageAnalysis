@@ -97,6 +97,11 @@ class DicomReader:
             ds_modality = [d for d in self.ds if d['Modality'].value == modality]
             self.ds_dictionary[modality] = [ds_mod for ds_mod in ds_modality]
 
+    def separate_modalities(self):
+        for modality in list(self.ds_dictionary.keys()):
+            ds_modality = [d for d in self.ds if d['Modality'].value == modality]
+            self.ds_dictionary[modality] = [ds_mod for ds_mod in ds_modality]
+
     def separate_images(self):
         for modality in list(self.ds_dictionary.keys()):
             if len(self.ds_dictionary[modality]) > 0 and modality not in ['RTSTRUCT', 'US', 'DX']:
@@ -111,21 +116,27 @@ class DicomReader:
                     image_tags = [self.ds_dictionary[modality][idx] for idx in sorted_idx[0]]
 
                     if 'ImageOrientationPatient' in image_tags[0] and 'ImagePositionPatient' in image_tags[0]:
-                        orientation = image_tags[0]['ImageOrientationPatient'].value
+                        orientation_tags = np.asarray([image_tag['ImageOrientationPatient'].value for image_tag in image_tags])
                         position_tags = np.asarray([t['ImagePositionPatient'].value for t in image_tags])
 
-                        x = np.abs(orientation[0]) + np.abs(orientation[3])
-                        y = np.abs(orientation[1]) + np.abs(orientation[4])
-                        z = np.abs(orientation[2]) + np.abs(orientation[5])
+                        if np.sum(np.abs(np.std(orientation_tags, axis=0)) > 0.001) == 0:
+                            orientation = image_tags[0]['ImageOrientationPatient'].value
 
-                        if x < y and x < z:
-                            slice_idx = np.argsort(position_tags[:, 0])
-                        elif y < x and y < z:
-                            slice_idx = np.argsort(position_tags[:, 1])
+                            x = np.abs(orientation[0]) + np.abs(orientation[3])
+                            y = np.abs(orientation[1]) + np.abs(orientation[4])
+                            z = np.abs(orientation[2]) + np.abs(orientation[5])
+
+                            if x < y and x < z:
+                                slice_idx = np.argsort(position_tags[:, 0])
+                            elif y < x and y < z:
+                                slice_idx = np.argsort(position_tags[:, 1])
+                            else:
+                                slice_idx = np.argsort(position_tags[:, 2])
+
+                            self.ds_images.append([image_tags[idx] for idx in slice_idx])
+
                         else:
-                            slice_idx = np.argsort(position_tags[:, 2])
-
-                        self.ds_images.append([image_tags[idx] for idx in slice_idx])
+                            self.scout_filter()
 
                     else:
                         self.ds_images.append(image_tags)
@@ -133,6 +144,32 @@ class DicomReader:
             elif len(self.ds_dictionary[modality]) > 0 and modality in ['US', 'DX']:
                 for image in self.ds_dictionary[modality]:
                     self.ds_images.append([image])
+
+    def scout_filter(self, orientation_tags, position_tags, image_tags):
+        unique_orientation = np.unique(orientation_tags, axis=0)
+        for orient in unique_orientation:
+            orient_idx = np.where((orientation_tags[:, 0] == orient[0]) &
+                                  (orientation_tags[:, 1] == orient[1]) &
+                                  (orientation_tags[:, 2] == orient[2]) &
+                                  (orientation_tags[:, 3] == orient[3]) &
+                                  (orientation_tags[:, 4] == orient[4]) &
+                                  (orientation_tags[:, 5] == orient[5]))
+
+            if len(orient_idx[0]) > 1:
+                new_position = position_tags[orient_idx]
+
+                x = np.abs(orient[0]) + np.abs(orient[3])
+                y = np.abs(orient[1]) + np.abs(orient[4])
+                z = np.abs(orient[2]) + np.abs(orient[5])
+
+                if x < y and x < z:
+                    slice_idx = np.argsort(new_position[:, 0])
+                elif y < x and y < z:
+                    slice_idx = np.argsort(new_position[:, 1])
+                else:
+                    slice_idx = np.argsort(new_position[:, 2])
+
+                self.ds_images.append([image_tags[idx] for idx in slice_idx])
 
     def separate_rt_images(self):
         for ii, rt_ds in enumerate(self.ds_dictionary['RTSTRUCT']):
