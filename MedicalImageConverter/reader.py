@@ -53,6 +53,8 @@ import pyvista as pv
 import pydicom as dicom
 from pydicom.uid import generate_uid
 
+from parsar import file_parsar
+
 
 class ThreeMfReader:
     """
@@ -852,6 +854,45 @@ class DicomReader:
 
     def get_ds_images(self):
         return self.ds_images
+
+
+class Reader:
+    def __init__(self, folder_path=None, file_list=None, exclude_files=None):
+        if folder_path is not None:
+            self.files = file_parsar(folder_path, exclude_files=exclude_files)
+        else:
+            self.files = file_list
+
+        self.images = None
+        self.rigid = None
+        self.deformable = None
+        self.pois = None
+        self.dose = None
+
+    def read_all(self, dcm=None, mhd=None, stl=None, mf3=None):
+        if dcm is not None:
+            print('reader')
+
+    def read_dicoms(self, only_tags=False, only_load_roi_names=None):
+        if only_tags:
+            print('reader')
+        else:
+            print('reader')
+
+    def read_rtstruct_only(self, base_image=None):
+        print('reader')
+
+    def read_mhd(self):
+        print('reader')
+
+    def read_nifti(self):
+        print('reader')
+
+    def read_stl(self, create_image=True):
+        print('reader')
+
+    def read_3mf(self, create_image=True):
+        print('reader')
 
 
 if __name__ == '__main__':
