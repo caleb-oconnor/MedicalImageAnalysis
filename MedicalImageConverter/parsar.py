@@ -10,6 +10,7 @@ def file_parsar(path, exclude_files=None):
     mhd_files = []
     raw_files = []
     stl_files = []
+    mf3_files = []
 
     for root, dirs, files in os.walk(path):
         if files:
@@ -31,6 +32,9 @@ def file_parsar(path, exclude_files=None):
                     elif file_extension == '.stl':
                         stl_files.append(filepath)
 
+                    elif file_extension == '.stl':
+                        stl_files.append(filepath)
+
                     elif file_extension == '':
                         no_file_extension.append(filepath)
 
@@ -38,10 +42,7 @@ def file_parsar(path, exclude_files=None):
                        'MHD': mhd_files,
                        'Raw': raw_files,
                        'Stl': stl_files,
+                       '3mf': mf3_files,
                        'NoExtension': no_file_extension}
 
     return file_dictionary
-
-
-if __name__ == '__main__':
-    pass
