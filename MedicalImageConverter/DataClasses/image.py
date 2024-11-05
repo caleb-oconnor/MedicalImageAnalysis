@@ -17,37 +17,40 @@ import numpy as np
 import vtk
 from vtkmodules.util import numpy_support
 
-from src.DataType.roi import Roi
+# from src.DataType.roi import Roi
 
 
-class Image(object):
-    def __init__(self, array, info, upload=False):
+class Image:
+    def __init__(self):
         self.array = None
         self.rois = {}
 
-        self.info
         self.mrn = None
-        self.name = None
+        self.patient_name = None
         self.description = None
-        self.date = None
-        self.time = None
         self.series_uid = None
-        self.series_number = None
         self.acquisition_number = None
         self.frame_uid = None
-        self.spacing = None
         self.rgb = None
+
+        self.date = None
+        self.time = None
+        self.plane = None
+
         self.rows = None
         self.columns = None
         self.slices = None
         self.origin = None
-        self.matrix = None
+        self.orientation = None
 
         self.dimension = None
         self.spacing = None
+        self.matrix = None
         self.slice_location = None
         self.window = None
         self.camera_position = None
+        self.skipped_slice = None
+        self.unverified = None
 
     def get_current_slice(self, plane):
         if plane == 'Axial':
