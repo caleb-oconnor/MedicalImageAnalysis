@@ -7,24 +7,15 @@ import threading
 
 import numpy as np
 import pandas as pd
-import pydicom
+import pydicom as dicom
 from pydicom.uid import generate_uid
 
-from ..DataClasses.image import Image
+from ..DataClasses import Image
 
 
-def add_dicom_extension(dicom_files):
-    for ii, name in enumerate(dicom_files):
-        a, b = os.path.splitext(name)
-        if not b:
-            dicom_files[ii] = name + '.dcm'
-
-    return dicom_files
-
-
-def thread_process_dicom(path):
+def thread_process_dicom(path, stop_before_pixels=False):
     try:
-        datasets = pydicom.dcmread(str(path))
+        datasets = dicom.dcmread(str(path), stop_before_pixels=stop_before_pixels)
     except:
         datasets = []
 
@@ -32,63 +23,48 @@ def thread_process_dicom(path):
 
 
 class DicomReader:
-    def __init__(self, dicom_files, existing_image_info=None, only_load_roi_names=None):
-        """
-
-        Parameters
-        ----------
-        dicom_files - list of all the dicom paths
-        existing_image_info - dataframe of image_info same as structure below (for when only loading RTSTRUCTS)
-        only_load_roi_names - list of Roi names that will only be uploaded (so total segementator won't load all 100
-                              rois)
-        """
+    def __init__(self, dicom_files, only_tags=False, only_load_roi_names=None):
         self.dicom_files = dicom_files
-        self.existing_image_info = existing_image_info
+        self.only_tags = only_tags
         self.only_load_roi_names = only_load_roi_names
 
         self.ds = []
-        self.ds_images = []
-        self.ds_dictionary = dict.fromkeys(['CT', 'MR', 'PT', 'US', 'DX', 'MG', 'NM', 'XA', 'CR', 'RTSTRUCT'])
+        self.ds_modality = {key: [] for key in ['CT', 'MR', 'PT', 'US', 'DX', 'MG', 'NM', 'XA', 'CR', 'RTSTRUCT', 'REG',
+                                          'RTDose']}
 
-        self.image_info = pd.DataFrame(columns=['FilePath', 'SOPInstanceUID', 'PatientPosition', 'ImageMatrix',
-                                                'PixelSpacing', 'SkippedSlices'])
-        self.image_data = []
+        self.images = None
 
-        self.rt_df = pd.DataFrame(columns=['FilePath', 'SeriesInstanceUID', 'RoiSOP', 'RoiNames'])
-        self.roi_info = pd.DataFrame(columns=['FilePath', 'RoiNames'])
-        self.roi_contour = []
-        self.roi_pixel_position = []
+    def add_dicom_extension(self):
+        for ii, name in enumerate(self.dicom_files):
+            a, b = os.path.splitext(name)
+            if not b:
+                self.dicom_files[ii] = name + '.dcm'
 
-        self.contours = []
-
-        self.image_list = []
-        self.roi_list = []
-        self.poi_list = []
-        self.rigid_list = []
-        self.deformable_list = []
-        self.dose_list = []
-
-    def load_dicom(self, display_time=True):
+    def load_dicoms(self, display_time=True):
         t1 = time.time()
         self.read()
         self.separate_modalities()
-        self.separate_images()
-        self.class_helper()
+        self.image_creation()
 
-        self.separate_rt_images()
-        self.standard_useful_tags()
-        self.convert_images()
-        self.fix_orientation()
-        self.separate_contours()
+        # if not only_tags:
+        #     self.convert_images()
+        #     self.fix_orientation()
+        #     self.separate_contours()
         t2 = time.time()
+
         if display_time:
             print('Dicom Read Time: ', t2 - t1)
 
     def read(self):
+        """
+        Reads in the dicom files using a threading process, and the user input "only_tags" determines if only the tags
+        are loaded or the tags and array.
+
+        """
         threads = []
 
         def read_file_thread(file_path):
-            self.ds.append(thread_process_dicom(file_path))
+            self.ds.append(thread_process_dicom(file_path, stop_before_pixels=self.only_tags))
 
         for file_path in self.dicom_files:
             thread = threading.Thread(target=read_file_thread, args=(file_path,))
@@ -98,34 +74,34 @@ class DicomReader:
         for thread in threads:
             thread.join()
 
-        for modality in list(self.ds_dictionary.keys()):
-            ds_modality = [d for d in self.ds if d['Modality'].value == modality]
-            self.ds_dictionary[modality] = [ds_mod for ds_mod in ds_modality]
-
     def separate_modalities(self):
-        for modality in list(self.ds_dictionary.keys()):
-            ds_modality = [d for d in self.ds if d['Modality'].value == modality]
-            self.ds_dictionary[modality] = [ds_mod for ds_mod in ds_modality]
+        """
+        Separate read in files by their modality and image based on SeriesInstanceUID and AcquisitionNumber.
+        US and DX (X-ray) are considered 2d images, therefore they don't require image separation, because each file
+        is considered to be a unique image, even though US can have multiple "slices" per file each slice will be
+        considered a 2d image.
 
-    def separate_images(self):
-        for modality in list(self.ds_dictionary.keys()):
-            if len(self.ds_dictionary[modality]) > 0 and modality not in ['RTSTRUCT', 'US', 'DX']:
-                sorting_tags = np.asarray([[img['SeriesInstanceUID'].value, img['AcquisitionNumber'].value]
-                                           if 'AcquisitionNumber' in img and img['AcquisitionNumber'].value is not None
-                                           else [img['SeriesInstanceUID'].value, 1]
-                                           for img in self.ds_dictionary[modality]])
+        ds_modality - dictionary of different modalities
+        Returns
+        -------
 
-                unique_tags = np.unique(sorting_tags, axis=0)
-                for tag in unique_tags:
-                    sorted_idx = np.where((sorting_tags[:, 0] == tag[0]) & (sorting_tags[:, 1] == tag[1]))
-                    image_tags = [self.ds_dictionary[modality][idx] for idx in sorted_idx[0]]
+        """
+        for modality in list(self.ds_modality.keys()):
+            modalities = [d for d in self.ds if d['Modality'].value == modality]
+            if len(modalities) > 0:
+                if modality not in ['US', 'DX', 'RTSTRUCT', 'REG', 'RTDose']:
+                    sorting_tags = np.asarray([[img['SeriesInstanceUID'].value, img['AcquisitionNumber'].value] if
+                                               'AcquisitionNumber' in img and img['AcquisitionNumber'].value is not None
+                                               else [img['SeriesInstanceUID'].value, 1] for img in modalities])
 
-                    if 'ImageOrientationPatient' in image_tags[0] and 'ImagePositionPatient' in image_tags[0]:
-                        orientation_tags = np.asarray([image_tag['ImageOrientationPatient'].value for image_tag in image_tags])
-                        position_tags = np.asarray([t['ImagePositionPatient'].value for t in image_tags])
+                    unique_tags = np.unique(sorting_tags, axis=0)
+                    for tag in unique_tags:
+                        sorted_idx = np.where((sorting_tags[:, 0] == tag[0]) & (sorting_tags[:, 1] == tag[1]))
+                        image_tags = [modalities[idx] for idx in sorted_idx[0]]
 
-                        if np.sum(np.abs(np.std(orientation_tags, axis=0)) > 0.001) == 0:
+                        if 'ImageOrientationPatient' in image_tags[0] and 'ImagePositionPatient' in image_tags[0]:
                             orientation = image_tags[0]['ImageOrientationPatient'].value
+                            position_tags = np.asarray([t['ImagePositionPatient'].value for t in image_tags])
 
                             x = np.abs(orientation[0]) + np.abs(orientation[3])
                             y = np.abs(orientation[1]) + np.abs(orientation[4])
@@ -138,51 +114,85 @@ class DicomReader:
                             else:
                                 slice_idx = np.argsort(position_tags[:, 2])
 
-                            self.ds_images.append([image_tags[idx] for idx in slice_idx])
+                            self.ds_modality[modality] += [[image_tags[idx] for idx in slice_idx]]
 
                         else:
-                            self.scout_filter()
+                            self.ds_modality[modality] += [image_tags]
 
-                    else:
-                        self.ds_images.append(image_tags)
+                elif modality in ['US', 'DX', 'RTSTRUCT', 'REG', 'RTDose']:
+                    for image in modalities:
+                        self.ds_modality[modality] += [image]
 
-            elif len(self.ds_dictionary[modality]) > 0 and modality in ['US', 'DX']:
-                for image in self.ds_dictionary[modality]:
-                    self.ds_images.append([image])
+    def image_creation(self):
+        for modality in list(self.ds_modality.keys()):
+            for image_set in self.ds_modality[modality]:
+                if modality not in ['US', 'DX', 'RTSTRUCT', 'REG', 'RTDose']:
+                    image_3d = Image3d(image_set)
+                    image_3d.conversion()
+                print(1)
 
-    def scout_filter(self, orientation_tags, position_tags, image_tags):
-        unique_orientation = np.unique(orientation_tags, axis=0)
-        for orient in unique_orientation:
-            orient_idx = np.where((orientation_tags[:, 0] == orient[0]) &
-                                  (orientation_tags[:, 1] == orient[1]) &
-                                  (orientation_tags[:, 2] == orient[2]) &
-                                  (orientation_tags[:, 3] == orient[3]) &
-                                  (orientation_tags[:, 4] == orient[4]) &
-                                  (orientation_tags[:, 5] == orient[5]))
+    def separate_types(self):
+        for modality in list(self.ds_modality.keys()):
+            if len(self.ds_modality[modality]) > 0:
+                if modality not in ['US', 'DX', 'RTSTRUCT', 'REG', 'RTDose']:
+                    sorting_tags = np.asarray([[img['SeriesInstanceUID'].value, img['AcquisitionNumber'].value] if
+                                               'AcquisitionNumber' in img and img['AcquisitionNumber'].value is not None
+                                               else [img['SeriesInstanceUID'].value, 1] for img in
+                                               self.ds_modality[modality]])
 
-            if len(orient_idx[0]) > 1:
-                new_position = position_tags[orient_idx]
+                    unique_tags = np.unique(sorting_tags, axis=0)
+                    for tag in unique_tags:
+                        sorted_idx = np.where((sorting_tags[:, 0] == tag[0]) & (sorting_tags[:, 1] == tag[1]))
+                        image_tags = [self.ds_modality[modality][idx] for idx in sorted_idx[0]]
 
-                x = np.abs(orient[0]) + np.abs(orient[3])
-                y = np.abs(orient[1]) + np.abs(orient[4])
-                z = np.abs(orient[2]) + np.abs(orient[5])
+                        if 'ImageOrientationPatient' in image_tags[0] and 'ImagePositionPatient' in image_tags[0]:
+                            orientation = image_tags[0]['ImageOrientationPatient'].value
+                            position_tags = np.asarray([t['ImagePositionPatient'].value for t in image_tags])
 
-                if x < y and x < z:
-                    slice_idx = np.argsort(new_position[:, 0])
-                elif y < x and y < z:
-                    slice_idx = np.argsort(new_position[:, 1])
-                else:
-                    slice_idx = np.argsort(new_position[:, 2])
+                            x = np.abs(orientation[0]) + np.abs(orientation[3])
+                            y = np.abs(orientation[1]) + np.abs(orientation[4])
+                            z = np.abs(orientation[2]) + np.abs(orientation[5])
 
-                self.ds_images.append([image_tags[idx] for idx in slice_idx])
+                            if x < y and x < z:
+                                slice_idx = np.argsort(position_tags[:, 0])
+                            elif y < x and y < z:
+                                slice_idx = np.argsort(position_tags[:, 1])
+                            else:
+                                slice_idx = np.argsort(position_tags[:, 2])
 
-    def class_helper(self):
-        for ii, ds_image in enumerate(self.ds_images):
-            if ds_image[0].Modality in ['CT', 'MR', 'PT']:
-                helper = Base3dHelper(ds_image)
+                            self.ds_type['Images'] += [[image_tags[idx] for idx in slice_idx]]
 
-    def separate_rt_images(self):
-        for ii, rt_ds in enumerate(self.ds_dictionary['RTSTRUCT']):
+                        else:
+                            self.ds_type['Images'] += [image_tags]
+
+                elif modality in ['US', 'DX']:
+                    for image in self.ds_modality[modality]:
+                        self.ds_type['Images'] += [image]
+
+                elif modality == 'RTSTRUCT':
+                    for image in self.ds_modality[modality]:
+                        self.ds_type['Rt'] += [image]
+
+                elif modality == 'REG':
+                    for image in self.ds_modality[modality]:
+                        self.ds_type['Reg'] += [image]
+
+                elif modality == 'RTDose':
+                    for image in self.ds_modality[modality]:
+                        self.ds_type['Dose'] += [image]
+
+    def separate_rts(self):
+        """
+        Loops through all RTSTRUCT files found. Some required information that will be used later in making the contours
+        is pulled:
+            SeriesInstanceUID
+            RoiNames
+            RoiSOP - this will be used to determine what slice the contour exist on
+        Returns
+        -------
+
+        """
+        for ii, rt_ds in enumerate(self.ds_modality['RTSTRUCT']):
             ref = rt_ds.ReferencedFrameOfReferenceSequence
             series_uid = ref[0]['RTReferencedStudySequence'][0]['RTReferencedSeriesSequence'][0][
                 'SeriesInstanceUID'].value
@@ -194,15 +204,18 @@ class DicomReader:
                     roi_sop.append(contour_list['ContourSequence'][0]
                                    ['ContourImageSequence'][0]['ReferencedSOPInstanceUID'].value)
 
-                elif np.sum(np.asarray(points)) == 1:
-                    print('pois')
-
             self.rt_df.at[ii, 'FilePath'] = rt_ds.filename
             self.rt_df.at[ii, 'SeriesInstanceUID'] = series_uid
             self.rt_df.at[ii, 'RoiSOP'] = roi_sop
             self.rt_df.at[ii, 'RoiNames'] = [s.ROIName for s in rt_ds.StructureSetROISequence]
 
     def standard_useful_tags(self):
+        """
+        Important tags for each image that I use in DRAGON:
+        Returns
+        -------
+
+        """
         for ii, image in enumerate(self.ds_images):
             for t in list(self.image_info.keys()):
                 if t == 'FilePath':
@@ -213,6 +226,98 @@ class DicomReader:
 
                 elif t == 'PixelSpacing':
                     self.find_pixel_spacing(image[0], ii)
+
+                elif t == 'ImagePositionPatient':
+                    if image[0].Modality in ['US', 'CR', 'DX', 'MG', 'NM', 'XA']:
+                        self.image_info.at[ii, t] = [0, 0, 0]
+                    else:
+                        self.image_info.at[ii, t] = image[0].ImagePositionPatient
+
+                elif t == 'SliceThickness':
+                    if len(image) > 1:
+                        thickness = (np.asarray(image[1]['ImagePositionPatient'].value[2]).astype(float) -
+                                     np.asarray(image[0]['ImagePositionPatient'].value[2]).astype(float))
+                    elif t in image[0]:
+                        thickness = np.asarray(image[0]['SliceThickness'].value).astype(float)
+                    else:
+                        thickness = 1
+
+                    self.image_info.at[ii, t] = thickness
+
+                elif t == 'Slices':
+                    self.image_info.at[ii, t] = len(image)
+
+                elif t == 'DefaultWindow':
+                    if (0x0028, 0x1050) in image[0] and (0x0028, 0x1051) in image[0]:
+                        center = image[0].WindowCenter
+                        width = image[0].WindowWidth
+                        if not isinstance(center, float):
+                            center = center[0]
+
+                        if not isinstance(width, float):
+                            width = width[0]
+
+                        self.image_info.at[ii, t] = [int(center), int(np.round(width/2))]
+
+                    elif image[0].Modality == 'US':
+                        self.image_info.at[ii, t] = [128, 128]
+
+                    else:
+                        self.image_info.at[ii, t] = None
+
+                elif t == 'FullWindow':
+                    self.image_info.at[ii, t] = None
+
+                elif t == 'ImageMatrix':
+                    pass
+
+                elif t == 'SkippedSlice':
+                    pass
+
+                elif t == 'ImagePlane':
+                    if image[0].Modality in ['US', 'CR', 'DX', 'MG', 'NM', 'XA']:
+                        self.image_info.at[ii, t] = 'Axial'
+                    else:
+                        orientation = image[0]['ImageOrientationPatient'].value
+                        x = np.abs(orientation[0]) + np.abs(orientation[3])
+                        y = np.abs(orientation[1]) + np.abs(orientation[4])
+                        z = np.abs(orientation[2]) + np.abs(orientation[5])
+
+                        if x < y and x < z:
+                            self.image_info.at[ii, t] = 'Sagittal'
+                        elif y < x and y < z:
+                            self.image_info.at[ii, t] = 'Coronal'
+                        else:
+                            self.image_info.at[ii, t] = 'Axial'
+
+                elif t == 'Unverified':
+                    pass
+
+                else:
+                    if t in image[0]:
+                        self.image_info.at[ii, t] = image[0][t].value
+
+                    else:
+                        if t == 'SeriesDate':
+                            if 'StudyDate' in image[0]:
+                                self.image_info.at[ii, t] = image[0]['StudyDate'].value
+                            else:
+                                self.image_info.at[ii, t] = '0'
+
+                        elif t == 'SeriesTime':
+                            if 'StudyTime' in image[0]:
+                                self.image_info.at[ii, t] = image[0]['StudyTime'].value
+                            else:
+                                self.image_info.at[ii, t] = '00000'
+
+                        elif t == 'SeriesDescription':
+                            self.image_info.at[ii, t] = 'None'
+
+                        elif t == 'FrameOfReferenceUID':
+                            if 'FrameOfReferenceUID' in image[0]:
+                                self.image_info.at[ii, t] = image[0]['FrameOfReferenceUID'].value
+                            else:
+                                self.image_info.at[ii, t] = generate_uid()
 
     def find_pixel_spacing(self, image, ii):
         spacing = 'PixelSpacing'
@@ -247,6 +352,22 @@ class DicomReader:
             self.image_info.at[ii, spacing] = [1, 1]
 
     def convert_images(self):
+        """
+        Gets the 2D slice for each image and combines them into a 3D array per each image. Uses the RescaleIntercept
+        and RescaleSlope to adjust the HU.
+
+        The US is a different story. The image was saved as an RGB value, which also contained like metadata and
+        patient information embedded in the image itself. Luckily there was a simple way to get the actual US out, and
+        that was using the fact that when all three RGB values are the same thing it corresponds to the image (this
+        pulls some additional none image stuff but not nearly as bad). The quickest way I thought would be to find the
+        standard deviation of all three values and if it is zero then it is a keeper.
+
+        Sometimes the images are in a shape [1, 10, 512, 512] meaning 10 "slices" by 512x512 array. Not sure why the 1
+        is there, so it checks if the shape is 4 and if so it only saves the image as a [10, 512, 512]
+        Returns
+        -------
+
+        """
         for ii, image in enumerate(self.ds_images):
             image_slices = []
             if self.image_info.at[ii, 'Modality'] in ['CT', 'MR', 'PT', 'MG', 'NM', 'XA', 'CR']:
@@ -299,6 +420,13 @@ class DicomReader:
             self.image_info.at[ii, 'FullWindow'] = [image_min, image_max]
 
     def fix_orientation(self, convert_axial=True):
+        """
+        Corrects position for orientation fix. I force everything to be FFS so for non-FFS images the corner position
+        is incorrect, below corrects for the position using the Pixel Spacing and Orientation Matrix
+        Returns
+        -------
+
+        """
         for ii, image in enumerate(self.image_data):
             if self.image_info.at[ii, 'Modality'] in ['US', 'CR', 'DX', 'XA']:
                 self.image_info.at[ii, 'ImageMatrix'] = np.identity(4, dtype=np.float32)
@@ -395,6 +523,14 @@ class DicomReader:
         self.image_data[ii] = np.flip(b, axis=0)
 
     def compute_image_matrix(self, ii):
+        """
+        Computes the image rotation matrix, often seen in MR images where the image is tilted.
+
+
+        Returns
+        -------
+
+        """
         row_direction = np.array(self.image_info.at[ii, 'ImageOrientationPatient'][:3])
         column_direction = np.array(self.image_info.at[ii, 'ImageOrientationPatient'][3:])
         translation_offset = np.asarray(self.image_info.at[ii, 'ImagePositionPatient'])
@@ -425,6 +561,17 @@ class DicomReader:
         self.image_info.at[ii, 'ImageMatrix'] = mat
 
     def separate_contours(self):
+        """
+        existing_image_info is required if the users only loads a RTSTRUCT file, this is needed to match contours with
+        the image they correspond to.
+
+        It is pretty gross after that. For a given ROI each contour is read-in, matched with their image, then combined
+        all the slices of each contour into their own numpy array.
+
+        Returns
+        -------
+
+        """
         info = self.image_info
         if self.existing_image_info is not None:
             if len(list(info.index)) > 0:
@@ -442,7 +589,7 @@ class DicomReader:
             roi_filepaths = []
             for jj in range(len(self.rt_df.index)):
                 if img_series == self.rt_df.at[jj, 'SeriesInstanceUID'] and self.rt_df.at[jj, 'RoiSOP'][0] in img_sop:
-                    roi_sequence = self.ds_dictionary['RTSTRUCT'][jj].ROIContourSequence
+                    roi_sequence = self.ds_modality['RTSTRUCT'][jj].ROIContourSequence
                     for kk, sequence in enumerate(roi_sequence):
                         contour_list = []
                         if not self.only_load_roi_names or self.rt_df.RoiNames[jj][kk] in self.only_load_roi_names:
@@ -524,64 +671,79 @@ class DicomReader:
         # c = np.flip(b, axis=0)
         print(1)
 
-    def get_image_info(self):
-        return self.image_info
 
-    def get_image_data(self):
-        return self.image_data
+class Image3d(object):
+    """
+    All images and their tags are oriented in the x, y, z orientation (Sagittal, Coronal, Axial). Only variable
+    "plane" is left in the original image orientation to illustrate the original main view.
+    """
+    def __init__(self, image_set):
+        self.image_set = image_set
 
-    def get_roi_contour(self):
-        return self.roi_contour
+        self.plane = self.compute_plane()
+        self.spacing = self.compute_spacing()
 
-    def get_roi_info(self):
-        return self.roi_info
+        self.array = None
+        self.pixel_spacing = None
+        self.orientation = None
 
-    def get_ds_images(self):
-        return self.ds_images
+    def compute_plane(self):
+        orientation = self.image_set[0]['ImageOrientationPatient'].value
+        x = np.abs(orientation[0]) + np.abs(orientation[3])
+        y = np.abs(orientation[1]) + np.abs(orientation[4])
+        z = np.abs(orientation[2]) + np.abs(orientation[5])
 
+        if x < y and x < z:
+            return 'Sagittal'
+        elif y < x and y < z:
+            return 'Coronal'
+        else:
+            return 'Axial'
 
-class Base3dHelper:
-    def __init__(self, ds_image):
-        self.ds_image = ds_image
-        self.image = Image()
+    def compute_spacing(self):
+        inplane_spacing = self.compute_inplane_spacing
+        slice_thickness = self.compute_slice_thickness()
 
-    def set_tags(self):
-        print(1)
+        if self.plane == 'Sagittal':
+            return np.asarray([slice_thickness, inplane_spacing[0], inplane_spacing[1]])
+        elif self.plane == 'Coronal':
+            return np.asarray([inplane_spacing[0], slice_thickness, inplane_spacing[1]])
+        else:
+            return np.asarray([inplane_spacing[0], inplane_spacing[1], slice_thickness])
 
-    def load_array(self):
-        print(1)
+    def compute_inplane_spacing(self):
+        inplane_spacing = None
+        if 'PixelSpacing' in self.image_set[0]:
+            inplane_spacing = self.image_set[0].PixelSpacing.value
 
-    def correct_orientation(self):
-        print(1)
+        elif 'ContributingSourcesSequence' in self.image_set[0]:
+            sequence = 'ContributingSourcesSequence'
+            if 'DetectorElementSpacing' in self.image_set[0][sequence][0]:
+                inplane_spacing = self.image_set[0][sequence][0]['DetectorElementSpacing'].value
 
-    def compute_image_matrix(self):
-        print(1)
+        elif 'PerFrameFunctionalGroupsSequence' in self.image_set[0]:
+            sequence = 'PerFrameFunctionalGroupsSequence'
+            if 'PixelMeasuresSequence' in self.image_set[0][sequence][0]:
+                inplane_spacing = self.image_set[0][sequence][0]['PixelMeasuresSequence'][0]['PixelSpacing'].value
 
-    def skipped_slice_check(self):
-        print(1)
+        else:
+            inplane_spacing = [1, 1]
 
-    def skipped_slice_correction(self):
-        print(1)
+        return inplane_spacing
 
-    def conversion_to_axial_plane(self):
-        print(1)
+    def compute_slice_thickness(self):
+        first = self.image_set[0].ImagePositionPatient.value
+        if len(self.image_set[0]) > 1:
+            second = self.image_set[0].ImagePositionPatient.value
 
+            if self.plane == 'Sagittal':
+                slice_thickness = second[0] - first[0]
+            elif self.plane == 'Coronal':
+                slice_thickness = second[1] - first[1]
+            else:
+                slice_thickness = second[2] - first[2]
 
-class UltrasoundHelper:
-    def __init__(self):
-        print(1)
+        else:
+            slice_thickness = self.image_set[0].SliceThickness.value
 
-
-class MammogramHelper:
-    def __init__(self):
-        print(1)
-
-
-class XrayHelper:
-    def __init__(self):
-        print(1)
-
-
-class NucmedHelper:
-    def __init__(self):
-        print(1)
+        return slice_thickness
