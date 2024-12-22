@@ -125,11 +125,11 @@ class DicomReader:
 
     def image_creation(self):
         for modality in list(self.ds_modality.keys()):
+            image_3d = []
             for image_set in self.ds_modality[modality]:
                 if modality not in ['US', 'DX', 'RTSTRUCT', 'REG', 'RTDose']:
-                    image_3d = Image3d(image_set)
-                    image_3d.conversion()
-                print(1)
+                    image_3d += [Image3d(image_set, self.only_tags)]
+            print(1)
 
     def separate_types(self):
         for modality in list(self.ds_modality.keys()):
@@ -665,10 +665,7 @@ class DicomReader:
                 b = np.swapaxes(b, 0, 1)
                 b = np.swapaxes(b, 1, 2)
                 self.image_data[ii] = np.flip(b, axis=0)
-        #
-        # b = np.swapaxes(self.image_data[2], 0, 1)
-        # b = np.swapaxes(b, 1, 2)
-        # c = np.flip(b, axis=0)
+
         print(1)
 
 
@@ -677,15 +674,45 @@ class Image3d(object):
     All images and their tags are oriented in the x, y, z orientation (Sagittal, Coronal, Axial). Only variable
     "plane" is left in the original image orientation to illustrate the original main view.
     """
-    def __init__(self, image_set):
+    def __init__(self, image_set, only_tags):
         self.image_set = image_set
+        self.only_tags = only_tags
 
+        self.unverified = None
+        self.base_position = None
+        self.skipped_slice = None
+
+        if not self.only_tags:
+            self.array = self.compute_array()
         self.plane = self.compute_plane()
         self.spacing = self.compute_spacing()
+        self.orientation = self.compute_orientation()
+        self.origin = self.compute_origin()
+        self.image_matrix = self.compute_image_matrix()
 
-        self.array = None
-        self.pixel_spacing = None
-        self.orientation = None
+        # if self.plane != 'Axial':
+        #     self.axial_correction()
+
+    def compute_array(self):
+        image_slices = []
+        for slice_ in self.image_set:
+            if (0x0028, 0x1052) in slice_:
+                intercept = slice_.RescaleIntercept
+            else:
+                intercept = 0
+
+            if (0x0028, 0x1053) in slice_:
+                slope = slice_.RescaleSlope
+            else:
+                slope = 1
+
+            image_slices.append(((slice_.pixel_array*slope)+intercept).astype('int16'))
+
+        image_hold = np.asarray(image_slices)
+        if len(image_hold.shape) > 3:
+            return image_hold[0]
+        else:
+            return image_hold
 
     def compute_plane(self):
         orientation = self.image_set[0]['ImageOrientationPatient'].value
@@ -701,49 +728,130 @@ class Image3d(object):
             return 'Axial'
 
     def compute_spacing(self):
-        inplane_spacing = self.compute_inplane_spacing
-        slice_thickness = self.compute_slice_thickness()
+        inplane_spacing = [1, 1]
+        slice_thickness = np.double(self.image_set[0].SliceThickness)
 
-        if self.plane == 'Sagittal':
-            return np.asarray([slice_thickness, inplane_spacing[0], inplane_spacing[1]])
-        elif self.plane == 'Coronal':
-            return np.asarray([inplane_spacing[0], slice_thickness, inplane_spacing[1]])
-        else:
-            return np.asarray([inplane_spacing[0], inplane_spacing[1], slice_thickness])
-
-    def compute_inplane_spacing(self):
-        inplane_spacing = None
         if 'PixelSpacing' in self.image_set[0]:
-            inplane_spacing = self.image_set[0].PixelSpacing.value
+            inplane_spacing = self.image_set[0].PixelSpacing
 
         elif 'ContributingSourcesSequence' in self.image_set[0]:
             sequence = 'ContributingSourcesSequence'
             if 'DetectorElementSpacing' in self.image_set[0][sequence][0]:
-                inplane_spacing = self.image_set[0][sequence][0]['DetectorElementSpacing'].value
+                inplane_spacing = self.image_set[0][sequence][0]['DetectorElementSpacing']
 
         elif 'PerFrameFunctionalGroupsSequence' in self.image_set[0]:
             sequence = 'PerFrameFunctionalGroupsSequence'
             if 'PixelMeasuresSequence' in self.image_set[0][sequence][0]:
-                inplane_spacing = self.image_set[0][sequence][0]['PixelMeasuresSequence'][0]['PixelSpacing'].value
+                inplane_spacing = self.image_set[0][sequence][0]['PixelMeasuresSequence'][0]['PixelSpacing']
+
+        return np.asarray([inplane_spacing[0], inplane_spacing[1], slice_thickness])
+
+    def compute_orientation(self):
+        orientation = np.asarray([1, 0, 0, 0, 1, 0])
+        if 'ImageOrientationPatient' in self.image_set[0]:
+            orientation = np.asarray(self.image_set[0]['ImageOrientationPatient'].value)
 
         else:
-            inplane_spacing = [1, 1]
+            if 'SharedFunctionalGroupsSequence' in self.image_set[0]:
+                seq_str = 'SharedFunctionalGroupsSequence'
+                if 'PlaneOrientationSequence' in self.image_set[0][0][seq_str][0]:
+                    plane_str = 'PlaneOrientationSequence'
+                    image_str = 'ImageOrientationPatient'
+                    orientation = np.asarray(self.image_set[0][0][seq_str][0][plane_str][0][image_str].value)
 
-        return inplane_spacing
+                else:
+                    self.unverified = 'Orientation'
 
-    def compute_slice_thickness(self):
-        first = self.image_set[0].ImagePositionPatient.value
-        if len(self.image_set[0]) > 1:
-            second = self.image_set[0].ImagePositionPatient.value
-
-            if self.plane == 'Sagittal':
-                slice_thickness = second[0] - first[0]
-            elif self.plane == 'Coronal':
-                slice_thickness = second[1] - first[1]
             else:
-                slice_thickness = second[2] - first[2]
+                self.unverified = 'Orientation'
 
-        else:
-            slice_thickness = self.image_set[0].SliceThickness.value
+        return orientation
 
-        return slice_thickness
+    def compute_origin(self):
+        origin = np.asarray(self.image_set[0]['ImagePositionPatient'].value)
+        if 'PatientPosition' in self.image_set[0]:
+            self.base_position = self.image_set[0]['PatientPosition'].value
+            if self.base_position in ['HFDR', 'FFDR']:
+                if self.only_tags:
+                    self.array = np.rot90(self.array, 3, (1, 2))
+
+                origin[0] = np.double(origin[0]) - self.spacing[0] * (self.image_set[0]['Columns'] - 1)
+                self.orientation = [-self.orientation[3], -self.orientation[4], -self.orientation[5],
+                                    self.orientation[0], self.orientation[1], self.orientation[2]]
+
+            elif self.base_position in ['HFP', 'FFP']:
+                if self.only_tags:
+                    self.array = np.rot90(self.array, 2, (1, 2))
+
+                origin[0] = np.double(origin[0]) - self.spacing[0] * (self.image_set[0]['Columns'] - 1)
+                origin[1] = np.double(origin[1]) - self.spacing[1] * (self.image_set[0]['Rows'] - 1)
+                self.orientation = -np.asarray(self.orientation)
+
+            elif self.base_position in ['HFDL', 'FFDL']:
+                if self.only_tags:
+                    self.array = np.rot90(self.array, 1, (1, 2))
+
+                origin[1] = np.double(origin[1]) - self.spacing[1] * (self.image_set[0]['Rows'] - 1)
+                self.orientation = [self.orientation[3], self.orientation[4], self.orientation[5],
+                                    -self.orientation[0], -self.orientation[1], -self.orientation[2]]
+
+        return origin
+
+    def compute_image_matrix(self):
+        row_direction = self.orientation[:3]
+        column_direction = self.orientation[3:]
+
+        slice_direction = np.cross(row_direction, column_direction)
+        if len(self.image_set) > 1:
+            first = np.dot(slice_direction, self.image_set[0].ImagePositionPatient)
+            second = np.dot(slice_direction, self.image_set[1].ImagePositionPatient)
+            last = np.dot(slice_direction, self.image_set[-1].ImagePositionPatient)
+            first_last_spacing = np.asarray((last - first) / (len(self.image_set) - 1))
+            if np.abs((second - first) - first_last_spacing) > 0.01:
+                if not self.only_tags:
+                    self.find_skipped_slices(slice_direction)
+                slice_spacing = second - first
+            else:
+                slice_spacing = np.asarray((last - first) / (len(self.image_set) - 1))
+
+            self.spacing[2] = slice_spacing
+
+        mat = np.identity(4, dtype=np.float32)
+        mat[0, :3] = row_direction
+        mat[1, :3] = column_direction
+        mat[2, :3] = slice_direction
+        mat[0:3, 3] = -self.origin
+
+        return mat
+
+    def find_skipped_slices(self, slice_direction):
+        base_spacing = None
+        for ii in range(len(self.image_set) - 1):
+            position_1 = np.dot(slice_direction, self.image_set[ii].ImagePositionPatient)
+            position_2 = np.dot(slice_direction, self.image_set[ii + 1].ImagePositionPatient)
+            if ii == 0:
+                base_spacing = position_2 - position_1
+            if ii > 0 and np.abs(base_spacing - (position_2 - position_1)) > 0.01:
+                self.skipped_slice = ii + 1
+
+                hold_data = copy.deepcopy(self.array)
+                interpolate_slice = np.mean(self.array[ii:ii + 2, :, :], axis=0).astype(np.int16)
+                self.array = np.insert(hold_data, self.skipped_slice, interpolate_slice, axis=0)
+
+    def axial_correction(self):
+        if self.plane == 'Sagittal':
+            array_hold = copy.deepcopy(self.array)
+            array_hold = np.swapaxes(array_hold, 0, 1)
+            array_hold = np.swapaxes(array_hold, 1, 2)
+            self.array = np.flip(array_hold, axis=0)
+
+            self.orientation[0:2] = 1 - self.orientation[0:2]
+            self.orientation[4] = 1 - self.orientation[4]
+            self.orientation[5] = 1 + self.orientation[5]
+
+        elif self.plane == 'Coronal':
+            array_hold = copy.deepcopy(self.array)
+            self.array = np.flip(array_hold, axis=0)
+
+            self.orientation[4] = 1 - self.orientation[4]
+            self.orientation[5] = 1 + self.orientation[5]
