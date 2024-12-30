@@ -142,10 +142,13 @@ class DicomReader:
                     images += [ImageDX(image_set, self.reader.only_tags)]
 
                 elif modality == 'MG':
-                    if 'ImageType' in image_set and 'VOLUME' in image_set['ImageType'].value:
-                        images += [ImageMG(image_set, self.reader.only_tags)]
-                    else:
-                        images += [ImageDX(image_set, self.reader.only_tags)]
+                    if 'ImageType' in image_set:
+                        if 'VOLUME' in image_set['ImageType'].value or 'TOMOSYNTHESIS' in image_set['ImageType'].value:
+                            pass
+                            # images += [ImageMG(image_set, self.reader.only_tags)]
+
+                        else:
+                            images += [ImageDX(image_set, self.reader.only_tags)]
 
                 elif modality == 'RTSTRUCT':
                     rtsruct = RTStruct(image_set)
@@ -369,27 +372,28 @@ class ImageDX(object):
         self.image_set = image_set
         self.only_tags = only_tags
 
-        self.unverified = True
-        self.base_position = None
+        self.unverified = 'Modality'
+        self.base_position = self.image_set.PatientOrientation
         self.skipped_slice = None
         self.sections = None
         self.rgb = False
 
-        if not self.only_tags:
-            self.array = self._compute_array()
-
         self.filepaths = self.image_set.filename
         self.sops = self.image_set.SOPInstanceUID
         self.plane = self.image_set.ViewPosition
-        self.dimensions = np.asarray([self.image_set['Columns'].value, self.image_set['Rows'].value, 1])
-        self.orientation = self.image_set.PatientOrientation
+        self.orientation = [1, 0, 0, 0, 1, 0]
         self.origin = np.asarray([0, 0, 0])
         self.image_matrix = np.identity(4, dtype=np.float32)
+        self.dimensions = np.asarray([self.image_set['Columns'].value, self.image_set['Rows'].value, 1])
 
+        if not self.only_tags:
+            self.array = self._compute_array()
         self.spacing = self._compute_spacing()
 
     def _compute_array(self):
         array = self.image_set.pixel_array.astype('int16')
+        del self.image_set.PixelData
+
         if 'PresentationLUTShape' in self.image_set and self.image_set['PresentationLUTShape'] == 'Inverse':
             array = 16383 - array
 
@@ -413,6 +417,125 @@ class ImageDX(object):
                 inplane_spacing = self.image_set[sequence][0]['PixelMeasuresSequence'][0]['PixelSpacing']
 
         return np.asarray([inplane_spacing[0], inplane_spacing[1], slice_thickness])
+
+
+class ImageMG(object):
+    def __init__(self, image_set, only_tags):
+        self.image_set = image_set
+        self.only_tags = only_tags
+
+        self.unverified = 'Modality'
+        self.base_position = self.image_set.PatientOrientation
+        self.skipped_slice = None
+        self.sections = None
+        self.rgb = False
+
+        self.filepaths = self.image_set.filename
+        self.sops = self.image_set.SOPInstanceUID
+        self.origin = np.asarray([0, 0, 0])
+
+        if not self.only_tags:
+            self.array = self._compute_array()
+        self.spacing = self._compute_spacing()
+        self.dimensions = self._compute_dimensions()
+        self.orientation = self._compute_orientation()
+        self.plane = self._compute_plane
+        # self.image_matrix = self._compute_image_matrix()
+
+    def _compute_array(self):
+        if (0x0028, 0x1052) in self.image_set:
+            intercept = self.image_set.RescaleIntercept
+        else:
+            intercept = 0
+
+        if (0x0028, 0x1053) in self.image_set:
+            slope = self.image_set.RescaleSlope
+        else:
+            slope = 1
+
+        array = ((self.image_set.pixel_array*slope)+intercept).astype('int16')
+
+        del self.image_set.PixelData
+
+        return array
+
+    def _compute_plane(self):
+        x = np.abs(self.orientation[0]) + np.abs(self.orientation[3])
+        y = np.abs(self.orientation[1]) + np.abs(self.orientation[4])
+        z = np.abs(self.orientation[2]) + np.abs(self.orientation[5])
+
+        if x < y and x < z:
+            return 'Sagittal'
+        elif y < x and y < z:
+            return 'Coronal'
+        else:
+            return 'Axial'
+
+    def _compute_spacing(self):
+        inplane_spacing = [1, 1]
+        slice_thickness = 1
+
+        if 'PixelSpacing' in self.image_set:
+            inplane_spacing = self.image_set.PixelSpacing
+
+        elif 'ContributingSourcesSequence' in self.image_set:
+            sequence = 'ContributingSourcesSequence'
+            if 'DetectorElementSpacing' in self.image_set[sequence][0]:
+                inplane_spacing = self.image_set[sequence][0]['DetectorElementSpacing']
+
+        elif 'PerFrameFunctionalGroupsSequence' in self.image_set:
+            sequence = 'PerFrameFunctionalGroupsSequence'
+            if 'PixelMeasuresSequence' in self.image_set[sequence][0]:
+                inplane_spacing = self.image_set[sequence][0]['PixelMeasuresSequence'][0]['PixelSpacing']
+
+        return np.asarray([inplane_spacing[0], inplane_spacing[1], slice_thickness])
+
+    def _compute_dimensions(self):
+        if self.array is not None:
+            slices = self.array.shape[0]
+        else:
+            slices = 1
+        return np.asarray([self.image_set['Columns'].value, self.image_set['Rows'].value, slices])
+
+    def _compute_orientation(self):
+        orientation = np.asarray([1, 0, 0, 0, 1, 0])
+        if 'ImageOrientationPatient' in self.image_set:
+            orientation = np.asarray(self.image_set['ImageOrientationPatient'].value)
+
+        else:
+            if 'SharedFunctionalGroupsSequence' in self.image_set:
+                seq_str = 'SharedFunctionalGroupsSequence'
+                if 'PlaneOrientationSequence' in self.image_set[seq_str][0]:
+                    plane_str = 'PlaneOrientationSequence'
+                    image_str = 'ImageOrientationPatient'
+                    orientation = np.asarray(self.image_set[seq_str][0][plane_str][0][image_str].value)
+
+                else:
+                    self.unverified = 'Orientation'
+
+            else:
+                self.unverified = 'Orientation'
+
+        return orientation
+
+    def _compute_image_matrix(self):
+        row_direction = self.orientation[:3]
+        column_direction = self.orientation[3:]
+
+        slice_direction = np.cross(row_direction, column_direction)
+        if len(self.image_set) > 1:
+            first = np.dot(slice_direction, self.image_set[0].ImagePositionPatient)
+            last = np.dot(slice_direction, self.image_set[-1].ImagePositionPatient)
+
+            self.spacing[2] = np.asarray((last - first) / (len(self.image_set) - 1))
+
+        mat = np.identity(4, dtype=np.float32)
+        mat[0, :3] = row_direction
+        mat[1, :3] = column_direction
+        mat[2, :3] = slice_direction
+        mat[0:3, 3] = -self.origin
+
+        return mat
 
 
 class RTStruct(object):
