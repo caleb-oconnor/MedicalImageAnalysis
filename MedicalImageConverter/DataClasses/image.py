@@ -21,36 +21,34 @@ from vtkmodules.util import numpy_support
 
 
 class Image:
-    def __init__(self):
-        self.array = None
+    def __init__(self, image, tags_only=False):
+        self.tags = get_tags(image)
+        if tags_only:
+            self.array = None
         self.rois = {}
-
-        self.mrn = None
-        self.patient_name = None
-        self.description = None
-        self.series_uid = None
-        self.acquisition_number = None
-        self.frame_uid = None
-        self.rgb = None
+        self.pois = {}
 
         self.date = None
         self.time = None
         self.plane = None
 
-        self.rows = None
-        self.columns = None
-        self.slices = None
-        self.origin = None
-        self.orientation = None
-
+        # self.rows = None
+        # self.columns = None
+        # self.slices = None
+        # self.dimension = [self.rows, self.columns, self.slices]
+        # self.spacing = [float(self.PixelSpacing[0]), float(self.PixelSpacing[1]), float(self.SliceThickness)]
         self.dimension = None
         self.spacing = None
+        self.origin = None
+
+        self.orientation = None
         self.matrix = None
-        self.slice_location = None
-        self.window = None
-        self.camera_position = None
+
         self.skipped_slice = None
         self.unverified = None
+
+    def set_tags(self, image):
+        self.tags = image[0]
 
     def get_current_slice(self, plane):
         if plane == 'Axial':
