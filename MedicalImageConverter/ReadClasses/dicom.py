@@ -27,8 +27,8 @@ class DicomReader:
         self.reader = reader
 
         self.ds = []
-        self.ds_modality = {key: [] for key in ['CT', 'MR', 'PT', 'US', 'DX', 'MG', 'NM', 'XA', 'CR', 'RTSTRUCT', 'REG',
-                                          'RTDose']}
+        self.ds_modality = {key: [] for key in ['CT', 'MR', 'PT', 'US', 'DX', 'MG', 'NM', 'XA', 'CR',
+                                                'RTSTRUCT', 'REG', 'RTDose']}
 
     def add_dicom_extension(self):
         for ii, name in enumerate(self.reader.files['Dicom']):
@@ -41,11 +41,6 @@ class DicomReader:
         self.read()
         self.separate_modalities_and_images()
         self.image_creation()
-
-        # if not only_tags:
-        #     self.convert_images()
-        #     self.fix_orientation()
-        #     self.separate_contours()
         t2 = time.time()
 
         if display_time:
@@ -98,21 +93,21 @@ class DicomReader:
                         if 'ImageOrientationPatient' in image_tags[0] and 'ImagePositionPatient' in image_tags[0]:
                             orientations = np.asarray([img['ImageOrientationPatient'].value for img in image_tags])
                             unique_orientations = np.unique(orientations, axis=0)
-                            for orientation in unique_orientations:
-                                orient_idx = np.where((orientations[:, 0] == orientation[0]) &
-                                                      (orientations[:, 1] == orientation[1]) &
-                                                      (orientations[:, 2] == orientation[2]) &
-                                                      (orientations[:, 3] == orientation[3]) &
-                                                      (orientations[:, 4] == orientation[4]) &
-                                                      (orientations[:, 5] == orientation[5]))
+                            for orient in unique_orientations:
+                                orient_idx = np.where((orientations[:, 0] == orient[0]) &
+                                                      (orientations[:, 1] == orient[1]) &
+                                                      (orientations[:, 2] == orient[2]) &
+                                                      (orientations[:, 3] == orient[3]) &
+                                                      (orientations[:, 4] == orient[4]) &
+                                                      (orientations[:, 5] == orient[5]))
 
                                 orient_tags = [image_tags[idx] for idx in orient_idx[0]]
-                                orientation = orient_tags[0]['ImageOrientationPatient'].value
+                                correct_orientation = orient_tags[0]['ImageOrientationPatient'].value
                                 position_tags = np.asarray([t['ImagePositionPatient'].value for t in orient_tags])
 
-                                x = np.abs(orientation[0]) + np.abs(orientation[3])
-                                y = np.abs(orientation[1]) + np.abs(orientation[4])
-                                z = np.abs(orientation[2]) + np.abs(orientation[5])
+                                x = np.abs(correct_orientation[0]) + np.abs(correct_orientation[3])
+                                y = np.abs(correct_orientation[1]) + np.abs(correct_orientation[4])
+                                z = np.abs(correct_orientation[2]) + np.abs(correct_orientation[5])
 
                                 if x < y and x < z:
                                     slice_idx = np.argsort(position_tags[:, 0])
@@ -129,14 +124,11 @@ class DicomReader:
 
     def image_creation(self):
         images = []
+        rtsructs = []
         for modality in list(self.ds_modality.keys()):
             for image_set in self.ds_modality[modality]:
                 if modality in ['CT', 'MR']:
                     images += [Image3d(image_set, self.reader.only_tags)]
-
-                # elif modality in ['PT', 'NM']:
-                #     reference_tags = [image.image_set[0] for image in images]
-                #     images += [ImageNucMed(image_set, self.only_tags, reference_tags)]
 
                 elif modality == 'DX':
                     images += [ImageDX(image_set, self.reader.only_tags)]
@@ -150,10 +142,11 @@ class DicomReader:
                         else:
                             images += [ImageDX(image_set, self.reader.only_tags)]
 
-                elif modality == 'RTSTRUCT':
-                    rtsruct = RTStruct(image_set)
+                elif modality == 'US':
+                    images += [ImageUS(image_set, self.reader.only_tags)]
 
-        print(1)
+                elif modality == 'RTSTRUCT':
+                    rtsructs += [RTStruct(image_set, images, self.reader.only_tags)]
 
 
 class Image3d(object):
@@ -180,8 +173,9 @@ class Image3d(object):
         self.sections = None
         self.rgb = False
 
+        self.array = None
         if not self.only_tags:
-            self.array = self._compute_array()
+            self._compute_array()
 
         self.filepaths = [image.filename for image in self.image_set]
         self.sops = [image.SOPInstanceUID for image in self.image_set]
@@ -209,11 +203,11 @@ class Image3d(object):
 
             del _slice.PixelData
 
-        image_hold = np.asarray(image_slices)
-        if len(image_hold.shape) > 3:
-            return image_hold[0]
+        self.array = np.asarray(image_slices)
+        if len(self.array.shape) > 3:
+            return self.array[0]
         else:
-            return image_hold
+            return self.array
 
     def _compute_plane(self):
         orientation = self.image_set[0]['ImageOrientationPatient'].value
@@ -337,7 +331,6 @@ class Image3d(object):
             if ii == 0:
                 base_spacing = position_2 - position_1
             if ii > 0 and np.abs(base_spacing - (position_2 - position_1)) > 0.01:
-                print(ii)
                 self.unverified = 'Skipped'
                 self.skipped_slice = ii + 1
                 self.dimensions[2] += 1
@@ -386,18 +379,19 @@ class ImageDX(object):
         self.image_matrix = np.identity(4, dtype=np.float32)
         self.dimensions = np.asarray([self.image_set['Columns'].value, self.image_set['Rows'].value, 1])
 
+        self.array = None
         if not self.only_tags:
-            self.array = self._compute_array()
+            self._compute_array()
         self.spacing = self._compute_spacing()
 
     def _compute_array(self):
-        array = self.image_set.pixel_array.astype('int16')
+        self.array = self.image_set.pixel_array.astype('int16')
         del self.image_set.PixelData
 
         if 'PresentationLUTShape' in self.image_set and self.image_set['PresentationLUTShape'] == 'Inverse':
-            array = 16383 - array
+            self.array = 16383 - self.array
 
-        return array.reshape((1, array.shape[0], array.shape[1]))
+        self.array = self.array.reshape((1, array.shape[0], array.shape[1]))
 
     def _compute_spacing(self):
         inplane_spacing = [1, 1]
@@ -434,8 +428,9 @@ class ImageMG(object):
         self.sops = self.image_set.SOPInstanceUID
         self.origin = np.asarray([0, 0, 0])
 
+        self.array = None
         if not self.only_tags:
-            self.array = self._compute_array()
+            self._compute_array()
         self.spacing = self._compute_spacing()
         self.dimensions = self._compute_dimensions()
         self.orientation = self._compute_orientation()
@@ -453,11 +448,9 @@ class ImageMG(object):
         else:
             slope = 1
 
-        array = ((self.image_set.pixel_array*slope)+intercept).astype('int16')
+        self.array = ((self.image_set.pixel_array*slope)+intercept).astype('int16')
 
         del self.image_set.PixelData
-
-        return array
 
     def _compute_plane(self):
         x = np.abs(self.orientation[0]) + np.abs(self.orientation[3])
@@ -538,7 +531,160 @@ class ImageMG(object):
         return mat
 
 
-class RTStruct(object):
-    def __init__(self, image_set, reference_tags):
+class ImageUS(object):
+    def __init__(self, image_set, only_tags):
         self.image_set = image_set
+        self.only_tags = only_tags
 
+        self.unverified = 'Modality'
+        self.base_position = None
+        self.skipped_slice = None
+        self.sections = None
+        self.rgb = False
+
+        self.filepaths = self.image_set.filename
+        self.sops = self.image_set.SOPInstanceUID
+        self.plane = 'Axial'
+        self.orientation = [1, 0, 0, 0, 1, 0]
+        self.origin = np.asarray([0, 0, 0])
+        self.image_matrix = np.identity(4, dtype=np.float32)
+        self.dimensions = np.asarray([self.image_set['Columns'].value, self.image_set['Rows'].value, 1])
+
+        self.array = None
+        if not self.only_tags:
+            self._compute_array()
+        self.spacing = self._compute_spacing()
+
+    def _compute_array(self):
+        us_data = np.asarray(self.image_set.pixel_array)
+        del self.image_set.PixelData
+
+        if len(us_data.shape) == 2:
+            us_data = us_data.reshape((1, us_data.shape[0], us_data.shape[1]))
+
+        if len(us_data.shape) == 3:
+            us_binary = (1 * (np.std(us_data, axis=2) == 0) == 1)
+            self.array = (us_binary * us_data[:, :, 0]).astype('uint8')
+
+        else:
+            us_binary = (1 * (np.std(us_data, axis=3) == 0) == 1)
+            self.array = (us_binary * us_data[:, :, :, 0]).astype('uint8')
+
+        if len(self.array.shape) > 3:
+            self.dimensions[2] = self.array.shape[0]
+
+    def _compute_spacing(self):
+        inplane_spacing = [1, 1]
+        slice_thickness = 1
+
+        if 'PixelSpacing' in self.image_set:
+            inplane_spacing = self.image_set.PixelSpacing
+
+        elif 'ContributingSourcesSequence' in self.image_set:
+            sequence = 'ContributingSourcesSequence'
+            if 'DetectorElementSpacing' in self.image_set[sequence][0]:
+                inplane_spacing = self.image_set[sequence][0]['DetectorElementSpacing']
+
+        elif 'PerFrameFunctionalGroupsSequence' in self.image_set:
+            sequence = 'PerFrameFunctionalGroupsSequence'
+            if 'PixelMeasuresSequence' in self.image_set[sequence][0]:
+                inplane_spacing = self.image_set[sequence][0]['PixelMeasuresSequence'][0]['PixelSpacing']
+
+        elif 'SequenceOfUltrasoundRegions' in self.image_set:
+            if 'PhysicalDeltaX' in self.image_set.SequenceOfUltrasoundRegions[0]:
+                inplane_spacing = [10 * np.round(self.image_set.SequenceOfUltrasoundRegions[0].PhysicalDeltaX, 4),
+                                   10 * np.round(self.image_set.SequenceOfUltrasoundRegions[0].PhysicalDeltaY, 4)]
+
+        return np.asarray([inplane_spacing[0], inplane_spacing[1], slice_thickness])
+
+
+class RTStruct(object):
+    def __init__(self, image_set, reference_tags, only_tags):
+        self.image_set = image_set
+        self.reference_tags = reference_tags
+        self.only_tags = only_tags
+
+        self.series_uid = self._get_series_uid()
+        self.filepaths = self.image_set.filename
+
+        self._properties = self._get_properties()
+        self.roi_names = [prop[1] for prop in self._properties if prop[3].lower() == 'closed_planar']
+        self.roi_colors = [prop[2] for prop in self._properties if prop[3].lower() == 'closed_planar']
+        self.poi_names = [prop[1] for prop in self._properties if prop[3].lower() == 'point']
+        self.poi_colors = [prop[2] for prop in self._properties if prop[3].lower() == 'point']
+
+        self.match_image_idx = self._match_with_image()
+
+        self.contours = []
+        self.points = []
+        if not self.only_tags:
+            self._structure_positions()
+
+        print(1)
+
+    def _get_series_uid(self):
+        study = 'RTReferencedStudySequence'
+        series = 'RTReferencedSeriesSequence'
+        ref = self.image_set.ReferencedFrameOfReferenceSequence
+
+        return ref[0][study][0][series][0]['SeriesInstanceUID'].value
+
+    def _get_properties(self):
+        names = [s.ROIName for s in self.image_set.StructureSetROISequence]
+        colors = [s.ROIDisplayColor for s in self.image_set.ROIContourSequence]
+        geometric = [s['ContourSequence'][0]['ContourGeometricType'].value for s in self.image_set.ROIContourSequence]
+
+        sop = []
+        for ii, s in enumerate(self.image_set.ROIContourSequence):
+            slice_sop = []
+            if geometric[ii].lower() == 'closed_planar':
+                for seq in s['ContourSequence']:
+                    slice_sop += [seq['ContourImageSequence'][0]['ReferencedSOPInstanceUID'].value]
+            sop += [slice_sop]
+
+        properties = []
+        for ii in range(len(names)):
+            properties += [[ii, names[ii], colors[ii], geometric[ii], sop[ii]]]
+
+        return properties
+
+    def _match_with_image(self):
+        match_image_idx = None
+        for ii, reference in enumerate(self.reference_tags):
+            if len(reference.image_set) > 1:
+                series = reference.image_set[0].SeriesInstanceUID
+            else:
+                series = reference.image_set.SeriesInstanceUID
+
+            sops = reference.sops
+
+            if series == self.image_set.SeriesInstanceUID:
+                if self._properties[0][0] in sops:
+                    match_image_idx = ii
+
+        return match_image_idx
+
+    def _structure_positions(self):
+        sequences = self.image_set.ROIContourSequence
+        for prop in self._properties:
+            if prop[3].lower() == 'closed_planar':
+                seq = sequences[prop[0]]
+
+                contour_list = []
+                for c in seq.ContourSequence:
+                    contour_hold = np.round(np.array(c['ContourData'].value), 3)
+                    contour = contour_hold.reshape(int(len(contour_hold) / 3), 3)
+                    contour_list.append(contour)
+
+                self.contours += [contour_list]
+
+            else:
+                seq = sequences[prop[0]]
+
+                contour_list = []
+                for c in seq.ContourSequence:
+                    contour_hold = np.round(np.array(c['ContourData'].value), 3)
+                    contour = contour_hold.reshape(int(len(contour_hold) / 3), 3)
+                    contour_list.append(contour)
+
+                self.points += contour_list
