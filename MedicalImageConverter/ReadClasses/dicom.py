@@ -123,33 +123,43 @@ class DicomReader:
                         self.ds_modality[modality] += [image]
 
     def image_creation(self):
-        images = []
-        rtsructs = []
         for modality in list(self.ds_modality.keys()):
+            load = False
+            read_image = None
             for image_set in self.ds_modality[modality]:
                 if modality in ['CT', 'MR']:
-                    images += [Image3d(image_set, self.reader.only_tags)]
+                    load = True
+                    read_image = Read3D(image_set, self.reader.only_tags)
 
                 elif modality == 'DX':
-                    images += [ImageDX(image_set, self.reader.only_tags)]
+                    load = True
+                    read_image = ReadDX(image_set, self.reader.only_tags)
 
                 elif modality == 'MG':
                     if 'ImageType' in image_set:
                         if 'VOLUME' in image_set['ImageType'].value or 'TOMOSYNTHESIS' in image_set['ImageType'].value:
                             pass
-                            # images += [ImageMG(image_set, self.reader.only_tags)]
+                            # images += [ReadMG(image_set, self.reader.only_tags)]
 
                         else:
-                            images += [ImageDX(image_set, self.reader.only_tags)]
+                            load = True
+                            read_image = ReadDX(image_set, self.reader.only_tags)
 
                 elif modality == 'US':
-                    images += [ImageUS(image_set, self.reader.only_tags)]
+                    load = True
+                    read_image = ReadUS(image_set, self.reader.only_tags)
 
-                elif modality == 'RTSTRUCT':
-                    rtsructs += [RTStruct(image_set, images, self.reader.only_tags)]
+            if load:
+                image = Image()
+                image.input(read_image)
+                self.reader.images += [image]
+
+            for image_set in self.ds_modality[modality]:
+                if modality == 'RTSTRUCT':
+                    self.reader.rtstructs += [ReadRTStruct(image_set, self.reader.images, self.reader.only_tags)]
 
 
-class Image3d(object):
+class Read3D(object):
     """
     Important tags are extracted for dicom files along with array if only_tags=False.
         Tags:
@@ -164,7 +174,10 @@ class Image3d(object):
                            abdomen and pelvis, this will interpolate a slice that is missing
     """
     def __init__(self, image_set, only_tags):
-        self.image_set = image_set
+        if isinstance(image_set, list):
+            self.image_set = image_set
+        else:
+            self.image_set = [image_set]
         self.only_tags = only_tags
 
         self.unverified = None
@@ -360,24 +373,27 @@ class Image3d(object):
             self.orientation[5] = 1 + self.orientation[5]
 
 
-class ImageDX(object):
+class ReadDX(object):
     def __init__(self, image_set, only_tags):
-        self.image_set = image_set
+        if isinstance(image_set, list):
+            self.image_set = image_set
+        else:
+            self.image_set = [image_set]
         self.only_tags = only_tags
 
         self.unverified = 'Modality'
-        self.base_position = self.image_set.PatientOrientation
+        self.base_position = self.image_set[0].PatientOrientation
         self.skipped_slice = None
         self.sections = None
         self.rgb = False
 
-        self.filepaths = self.image_set.filename
-        self.sops = self.image_set.SOPInstanceUID
-        self.plane = self.image_set.ViewPosition
+        self.filepaths = self.image_set[0].filename
+        self.sops = self.image_set[0].SOPInstanceUID
+        self.plane = self.image_set[0].ViewPosition
         self.orientation = [1, 0, 0, 0, 1, 0]
         self.origin = np.asarray([0, 0, 0])
         self.image_matrix = np.identity(4, dtype=np.float32)
-        self.dimensions = np.asarray([self.image_set['Columns'].value, self.image_set['Rows'].value, 1])
+        self.dimensions = np.asarray([self.image_set[0]['Columns'].value, self.image_set[0]['Rows'].value, 1])
 
         self.array = None
         if not self.only_tags:
@@ -385,10 +401,10 @@ class ImageDX(object):
         self.spacing = self._compute_spacing()
 
     def _compute_array(self):
-        self.array = self.image_set.pixel_array.astype('int16')
-        del self.image_set.PixelData
+        self.array = self.image_set[0].pixel_array.astype('int16')
+        del self.image_set[0].PixelData
 
-        if 'PresentationLUTShape' in self.image_set and self.image_set['PresentationLUTShape'] == 'Inverse':
+        if 'PresentationLUTShape' in self.image_set[0] and self.image_set[0]['PresentationLUTShape'] == 'Inverse':
             self.array = 16383 - self.array
 
         self.array = self.array.reshape((1, array.shape[0], array.shape[1]))
@@ -397,35 +413,38 @@ class ImageDX(object):
         inplane_spacing = [1, 1]
         slice_thickness = 1
 
-        if 'PixelSpacing' in self.image_set:
-            inplane_spacing = self.image_set.PixelSpacing
+        if 'PixelSpacing' in self.image_set[0]:
+            inplane_spacing = self.image_set[0].PixelSpacing
 
-        elif 'ContributingSourcesSequence' in self.image_set:
+        elif 'ContributingSourcesSequence' in self.image_set[0]:
             sequence = 'ContributingSourcesSequence'
-            if 'DetectorElementSpacing' in self.image_set[sequence][0]:
-                inplane_spacing = self.image_set[sequence][0]['DetectorElementSpacing']
+            if 'DetectorElementSpacing' in self.image_set[0][sequence][0]:
+                inplane_spacing = self.image_set[0][sequence][0]['DetectorElementSpacing']
 
-        elif 'PerFrameFunctionalGroupsSequence' in self.image_set:
+        elif 'PerFrameFunctionalGroupsSequence' in self.image_set[0]:
             sequence = 'PerFrameFunctionalGroupsSequence'
-            if 'PixelMeasuresSequence' in self.image_set[sequence][0]:
-                inplane_spacing = self.image_set[sequence][0]['PixelMeasuresSequence'][0]['PixelSpacing']
+            if 'PixelMeasuresSequence' in self.image_set[0][sequence][0]:
+                inplane_spacing = self.image_set[0][sequence][0]['PixelMeasuresSequence'][0]['PixelSpacing']
 
         return np.asarray([inplane_spacing[0], inplane_spacing[1], slice_thickness])
 
 
-class ImageMG(object):
+class ReadMG(object):
     def __init__(self, image_set, only_tags):
-        self.image_set = image_set
+        if isinstance(image_set, list):
+            self.image_set = image_set
+        else:
+            self.image_set = [image_set]
         self.only_tags = only_tags
 
         self.unverified = 'Modality'
-        self.base_position = self.image_set.PatientOrientation
+        self.base_position = self.image_set[0].PatientOrientation
         self.skipped_slice = None
         self.sections = None
         self.rgb = False
 
-        self.filepaths = self.image_set.filename
-        self.sops = self.image_set.SOPInstanceUID
+        self.filepaths = self.image_set[0].filename
+        self.sops = self.image_set[0].SOPInstanceUID
         self.origin = np.asarray([0, 0, 0])
 
         self.array = None
@@ -435,22 +454,23 @@ class ImageMG(object):
         self.dimensions = self._compute_dimensions()
         self.orientation = self._compute_orientation()
         self.plane = self._compute_plane
+        self.image_matrix = None
         # self.image_matrix = self._compute_image_matrix()
 
     def _compute_array(self):
-        if (0x0028, 0x1052) in self.image_set:
-            intercept = self.image_set.RescaleIntercept
+        if (0x0028, 0x1052) in self.image_set[0]:
+            intercept = self.image_set[0].RescaleIntercept
         else:
             intercept = 0
 
-        if (0x0028, 0x1053) in self.image_set:
-            slope = self.image_set.RescaleSlope
+        if (0x0028, 0x1053) in self.image_set[0]:
+            slope = self.image_set[0].RescaleSlope
         else:
             slope = 1
 
-        self.array = ((self.image_set.pixel_array*slope)+intercept).astype('int16')
+        self.array = ((self.image_set[0].pixel_array*slope)+intercept).astype('int16')
 
-        del self.image_set.PixelData
+        del self.image_set[0].PixelData
 
     def _compute_plane(self):
         x = np.abs(self.orientation[0]) + np.abs(self.orientation[3])
@@ -468,18 +488,18 @@ class ImageMG(object):
         inplane_spacing = [1, 1]
         slice_thickness = 1
 
-        if 'PixelSpacing' in self.image_set:
-            inplane_spacing = self.image_set.PixelSpacing
+        if 'PixelSpacing' in self.image_set[0]:
+            inplane_spacing = self.image_set[0].PixelSpacing
 
-        elif 'ContributingSourcesSequence' in self.image_set:
+        elif 'ContributingSourcesSequence' in self.image_set[0]:
             sequence = 'ContributingSourcesSequence'
-            if 'DetectorElementSpacing' in self.image_set[sequence][0]:
-                inplane_spacing = self.image_set[sequence][0]['DetectorElementSpacing']
+            if 'DetectorElementSpacing' in self.image_set[0][sequence][0]:
+                inplane_spacing = self.image_set[0][sequence][0]['DetectorElementSpacing']
 
         elif 'PerFrameFunctionalGroupsSequence' in self.image_set:
             sequence = 'PerFrameFunctionalGroupsSequence'
-            if 'PixelMeasuresSequence' in self.image_set[sequence][0]:
-                inplane_spacing = self.image_set[sequence][0]['PixelMeasuresSequence'][0]['PixelSpacing']
+            if 'PixelMeasuresSequence' in self.image_set[0][sequence][0]:
+                inplane_spacing = self.image_set[0][sequence][0]['PixelMeasuresSequence'][0]['PixelSpacing']
 
         return np.asarray([inplane_spacing[0], inplane_spacing[1], slice_thickness])
 
@@ -488,20 +508,20 @@ class ImageMG(object):
             slices = self.array.shape[0]
         else:
             slices = 1
-        return np.asarray([self.image_set['Columns'].value, self.image_set['Rows'].value, slices])
+        return np.asarray([self.image_set[0]['Columns'].value, self.image_set[0]['Rows'].value, slices])
 
     def _compute_orientation(self):
         orientation = np.asarray([1, 0, 0, 0, 1, 0])
-        if 'ImageOrientationPatient' in self.image_set:
-            orientation = np.asarray(self.image_set['ImageOrientationPatient'].value)
+        if 'ImageOrientationPatient' in self.image_set[0]:
+            orientation = np.asarray(self.image_set[0]['ImageOrientationPatient'].value)
 
         else:
-            if 'SharedFunctionalGroupsSequence' in self.image_set:
+            if 'SharedFunctionalGroupsSequence' in self.image_set[0]:
                 seq_str = 'SharedFunctionalGroupsSequence'
-                if 'PlaneOrientationSequence' in self.image_set[seq_str][0]:
+                if 'PlaneOrientationSequence' in self.image_set[0][seq_str][0]:
                     plane_str = 'PlaneOrientationSequence'
                     image_str = 'ImageOrientationPatient'
-                    orientation = np.asarray(self.image_set[seq_str][0][plane_str][0][image_str].value)
+                    orientation = np.asarray(self.image_set[0][seq_str][0][plane_str][0][image_str].value)
 
                 else:
                     self.unverified = 'Orientation'
@@ -531,9 +551,12 @@ class ImageMG(object):
         return mat
 
 
-class ImageUS(object):
+class ReadUS(object):
     def __init__(self, image_set, only_tags):
-        self.image_set = image_set
+        if isinstance(image_set, list):
+            self.image_set = image_set
+        else:
+            self.image_set = [image_set]
         self.only_tags = only_tags
 
         self.unverified = 'Modality'
@@ -542,13 +565,13 @@ class ImageUS(object):
         self.sections = None
         self.rgb = False
 
-        self.filepaths = self.image_set.filename
-        self.sops = self.image_set.SOPInstanceUID
+        self.filepaths = self.image_set[0].filename
+        self.sops = self.image_set[0].SOPInstanceUID
         self.plane = 'Axial'
         self.orientation = [1, 0, 0, 0, 1, 0]
         self.origin = np.asarray([0, 0, 0])
         self.image_matrix = np.identity(4, dtype=np.float32)
-        self.dimensions = np.asarray([self.image_set['Columns'].value, self.image_set['Rows'].value, 1])
+        self.dimensions = np.asarray([self.image_set[0]['Columns'].value, self.image_set[0]['Rows'].value, 1])
 
         self.array = None
         if not self.only_tags:
@@ -577,28 +600,28 @@ class ImageUS(object):
         inplane_spacing = [1, 1]
         slice_thickness = 1
 
-        if 'PixelSpacing' in self.image_set:
-            inplane_spacing = self.image_set.PixelSpacing
+        if 'PixelSpacing' in self.image_set[0]:
+            inplane_spacing = self.image_set[0].PixelSpacing
 
-        elif 'ContributingSourcesSequence' in self.image_set:
+        elif 'ContributingSourcesSequence' in self.image_set[0]:
             sequence = 'ContributingSourcesSequence'
-            if 'DetectorElementSpacing' in self.image_set[sequence][0]:
-                inplane_spacing = self.image_set[sequence][0]['DetectorElementSpacing']
+            if 'DetectorElementSpacing' in self.image_set[0][sequence][0]:
+                inplane_spacing = self.image_set[0][sequence][0]['DetectorElementSpacing']
 
-        elif 'PerFrameFunctionalGroupsSequence' in self.image_set:
+        elif 'PerFrameFunctionalGroupsSequence' in self.image_set[0]:
             sequence = 'PerFrameFunctionalGroupsSequence'
-            if 'PixelMeasuresSequence' in self.image_set[sequence][0]:
-                inplane_spacing = self.image_set[sequence][0]['PixelMeasuresSequence'][0]['PixelSpacing']
+            if 'PixelMeasuresSequence' in self.image_set[0][sequence][0]:
+                inplane_spacing = self.image_set[0][sequence][0]['PixelMeasuresSequence'][0]['PixelSpacing']
 
-        elif 'SequenceOfUltrasoundRegions' in self.image_set:
-            if 'PhysicalDeltaX' in self.image_set.SequenceOfUltrasoundRegions[0]:
-                inplane_spacing = [10 * np.round(self.image_set.SequenceOfUltrasoundRegions[0].PhysicalDeltaX, 4),
-                                   10 * np.round(self.image_set.SequenceOfUltrasoundRegions[0].PhysicalDeltaY, 4)]
+        elif 'SequenceOfUltrasoundRegions' in self.image_set[0]:
+            if 'PhysicalDeltaX' in self.image_set[0].SequenceOfUltrasoundRegions[0]:
+                inplane_spacing = [10 * np.round(self.image_set[0].SequenceOfUltrasoundRegions[0].PhysicalDeltaX, 4),
+                                   10 * np.round(self.image_set[0].SequenceOfUltrasoundRegions[0].PhysicalDeltaY, 4)]
 
         return np.asarray([inplane_spacing[0], inplane_spacing[1], slice_thickness])
 
 
-class RTStruct(object):
+class ReadRTStruct(object):
     def __init__(self, image_set, reference_tags, only_tags):
         self.image_set = image_set
         self.reference_tags = reference_tags
@@ -619,8 +642,6 @@ class RTStruct(object):
         self.points = []
         if not self.only_tags:
             self._structure_positions()
-
-        print(1)
 
     def _get_series_uid(self):
         study = 'RTReferencedStudySequence'
