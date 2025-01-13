@@ -154,9 +154,10 @@ class DicomReader:
         :rtype:
         """
         for modality in ['CT', 'MR', 'DX', 'MG', 'US']:
-            load = False
             read_image = None
             for image_set in self.ds_modality[modality]:
+                load = False
+
                 if modality in ['CT', 'MR']:
                     load = True
                     read_image = Read3D(image_set, self.reader.only_tags)
@@ -179,10 +180,10 @@ class DicomReader:
                     load = True
                     read_image = ReadUS(image_set, self.reader.only_tags)
 
-            if load:
-                image = Image()
-                image.input(read_image)
-                self.reader.images += [image]
+                if load:
+                    image = Image()
+                    image.input(read_image)
+                    self.reader.images += [image]
 
         for modality in ['RTSTRUCT']:
             for image_set in self.ds_modality[modality]:
