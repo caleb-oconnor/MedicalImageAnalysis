@@ -1,10 +1,37 @@
+"""
+Morfeus lab
+The University of Texas
+MD Anderson Cancer Center
+Author - Caleb O'Connor
+Email - csoconnor@mdanderson.org
+
+
+Description:
+    Primary use is for the Reader class to sort files depending on the file extension.
+
+"""
 
 import os
 
 
 def file_parsar(path, exclude_files=None):
-    if not exclude_files:
-        exclude_files = []
+    """
+    Walks through all the subfolders and checks each file extensions. Sorts them into 6 different options:
+        Dicom
+        MHD
+        Raw
+        STL
+        3mf
+        No extension
+
+    :param path: single folder path
+    :type path: string path
+    :param exclude_files: list of filepaths
+    :type exclude_files: list
+    :return: dictionary of into files sorted by extensions
+    :rtype: dictionary
+    """
+
     no_file_extension = []
     dicom_files = []
     mhd_files = []
@@ -32,8 +59,8 @@ def file_parsar(path, exclude_files=None):
                     elif file_extension == '.stl':
                         stl_files.append(filepath)
 
-                    elif file_extension == '.stl':
-                        stl_files.append(filepath)
+                    elif file_extension == '.3mf':
+                        mf3_files.append(filepath)
 
                     elif file_extension == '':
                         no_file_extension.append(filepath)
