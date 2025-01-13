@@ -55,24 +55,31 @@ class CreateDicomImage(object):
 
         for ii in range(self.data.shape[0]):
             array = self.data[ii, :, :]
-            file_meta = dicom.Dataset()
-            file_meta.MediaStorageSOPClassUID = UID("1.2.840.10008.5.1.4.1.1.2")
-            file_meta.MediaStorageSOPInstanceUID = str(10000 + ii)
-            file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
 
             ds = dicom.Dataset()
-            ds.file_meta = file_meta
+            ds.file_meta = dicom.Dataset()
+            ds.file_meta.ImplementationClassUID = "1.2.3.4"
+            ds.file_meta.MediaStorageSOPClassUID = UID("1.2.840.10008.5.1.4.1.1.2")
+            ds.file_meta.MediaStorageSOPInstanceUID = str(10000 + ii)
+            ds.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+
+            ds.is_little_endian = True
+            ds.is_implicit_VR = False
+
             ds.PatientName = 'ForAI'
             ds.PatientSex = 'M'
             ds.SeriesDescription = 'Fake for AI'
             ds.PatientID = '12345'
             ds.Modality = 'CT'
+            ds.StudyDate = str(datetime.date.today()).replace('-', '')
             ds.ContentDate = str(datetime.date.today()).replace('-', '')
+            ds.StudyTime = str(10)
             ds.ContentTime = str(10)
             ds.StudyInstanceUID = self.study
             ds.SeriesInstanceUID = self.series
             ds.SOPInstanceUID = UID(str(10000 + ii))
             ds.SOPClassUID = UID("1.2.840.10008.5.1.4.1.1.2")
+            ds.StudyID = '100'
 
             ds.FrameOfReferenceUID = self.frame
             ds.AcquisitionNumber = '1'
@@ -96,4 +103,4 @@ class CreateDicomImage(object):
             ds.PixelData = array.tobytes()
 
             export_file = os.path.join(self.output_dir, str(ii) + '.dcm')
-            ds.save_as(export_file)
+            ds.save_as(export_file, write_like_original=False)

@@ -1,29 +1,29 @@
 
 # MedicalImageConverter
 
-*MedicalImageConverter* is a Python package for working with medical image files. It
-lets the user read in images or ROIs (regions of interest), and converts them to 3D
-numpy arrays. It also allows the user to input non-organized datasets (multiple images 
-inside a single folder). Currently, this module only works for Dicom data with the hopes of expanding to 
-other data formats in the future. 
+Version 2.0 and later releases contain a structure than in previous versions.
 
-The module currently imports 9 different modalites and RTSTRUCT files. The accepted
+*MedicalImageConverter* is a Python package for working with medical image files. Currently, it
+is only works with dicom files with future plans to read in .mhd, .stl, .3mf files. An image instance
+is created for each respective image found, a 3D numpy array is created to contain the pixel data and
+various variables exist for the tag information. If there is an associated RTSTRUCT file for an image
+then they are added to the image instance. The user need only to give the top level folder and not read
+in each image folder one by one. Also, the dicom files for multiple images can exist in a single folder,
+it will separate them using the tag information.
+
+The module currently imports 5 different modalities and RTSTRUCT files. The accepted
 modalites are:
 1. CT
 2. MR
 3. US
-4. PT
-5. MG
-6. DX
-7. NM
-8. XA
-9. CR
+4. MG
+5. DX
 
 The CT and MR modalities have been tested extensively, along with their respective
-ROIs. The other 7 modalities have been tested but only on a few datasets a piece.
+ROIs. The other 3 modalities have been tested but only on a few datasets a piece.
 For RTSTRUCTS, only those referencing CT and MR have been tested.
 
-The images will be converted to Head-First-Supine (if not so already), and the 
+The images will be converted to Feet-First-Supine (if not so already), and the 
 image position will be updated to reflect the needed rotations.
 
 Disclaimer: All the files will be loaded into memory so be sure you have enough 
@@ -38,63 +38,93 @@ Using [pip](https://pip.pypa.io/en/stable/):
 pip install MedicalImageConverter
 ```
 
-## Example
-The user sets a path to the folder containing the dicom files. If the user already
-has each file path then they can continue to *DicomReader*, however if the user 
-doesn't then use the *file_parsar* function. *file_parsar* will look through all 
-the files inside the given file path and output a dictionary containing file paths 
-for these types found:
-1. Dicom (.dcm)
-2. MetaHeader (.mhd)
-3. Raw (.raw)
-4. STL (.stl)
-
-In the example below I used *file_parsar*, output the results into 
-*file_dictionary*. Then the Dicom list was selected for the dictionary which was 
-input into *DicomReader* class. Lastly, the data is then loaded in using 
-*load_dicom*.
-
-Note: The *exclude_files* allows the user not to get the file paths for any files
-inside the list, generally the user will use an empty list. The 
-*existing_image_info* is required when the user is trying to load in an RTSTRUCT 
-file only, some tags are needed for the image it references to create a 3D volume
-with the correct spacing.
+## Example 1
+The user sets a path to the folder containing the dicom files or highest level folder with subfolders containing dicom
+files.
 
 ```python
 import MedicalImageConverter as mic
 
 path = r'/path/to/folder'
 
-exclude_files = []
-existing_image_info = None
-file_dictionary = mic.file_parsar(path, exclude_files)
-dicom_reader = mic.DicomReader(file_dictionary['Dicom'], existing_image_info)
-dicom_reader.load_dicom()
+reader = mic.Reader(folder_path=path)
+reader.read_dicoms()
+
 ```
 
-### Retrieve image information:
+## Example 2
+The user has more options if they are specifics requirements.
+1. file_list - if the user already has the files wanted to read in, must be in type list
+2. exclude_files - if the user wants to not read certain files
+3. only_tags - does not read in the pixel array just the tags
+4. only_modality - specify which modalities to read in, if not then all modalities will be read
+5. only_load_roi_names - will only load rois with input name
+
+Note: if *folder_path* and *file_list* are both input, then *folder_path* will be used and not both.
+
 ```python
-image_data = dicom_reader.get_image_data()  # Returns a list of 3D arrays containing each image
-image_info = dicom_reader.get_image_info()  # Returns a pandas dataframe containing important tag information
+import MedicalImageConverter as mic
+
+file_list = ['filepath1.dcm', 'filepath2.dcm', ...]
+exclude_files = ['filepath10.dcm', 'filepath11.dcm', ...]
+
+reader = mic.Reader(file_list=file_list, exclude_files=exclude_files, only_tags=True, only_modality=['CT'],
+                    only_load_roi_names=['Liver', 'Tumor'])
+reader.read_dicoms()
+
 ```
 
-Tags in *image_info*:
-<span style="font-size:.8em;">FilePath, SOPInstanceUID, PatientID,
-PatientName, Modality, SeriesDescription, SeriesDate, SeriesTime, 
-SeriesInstanceUID, SeriesNumber, AcquisitionNumber, SliceThickness,
-PixelSpacing, Rows, Columns, PatientPosition, ImagePositionPatient, 
-ImageOrientationPatient, Slices, DefaultWindow, FullWindow</span>
+## Retrieve image and tags:
+The images are stored in a list. Each image instance contains a 3D array (None if *only_tags=True*), all tag information
+and popular tags have their own respective variable.
 
-### Retrieve ROI information:
+Note: Even 2D images will contain a 3D array, along with a fake slice thickness of 1 mm.
+
 ```python
-roi_data = dicom_reader.get_roi_contour()  # Returns a list of lists containing each ROI contour per image
-roi_info = dicom_reader.get_roi_info()  # Returns a pandas dataframe containing important tag information
+import MedicalImageConverter as mic
+
+path = r'/path/to/folder'
+
+reader = mic.Reader(folder_path=path)
+reader.read_dicoms()
+
+images = reader.images
+
+array = images[0].array
+tags = images[0].tags  # list of all the tags, for 100 slice CT scan the tags list would be 0-99 each containing a dict
+
+name = images[0].patient_name  # or tags[0].PatientName
+spacing = images[0].spacing  # inplane spacing followed by slice thickness
+
 ```
 
-Tags in *roi_info*:
-<span style="font-size:.8em;">FilePath, RoiNames</span>
+Instance variables:
+<span style="font-size:.9em;">base_position, date, dimensions,
+filepaths, frame_ref, image_matrix, mrn, orientation, 
+origin, patient_name, plane, pois,
+rgb, rois, sections, series_uid, skipped_slice, 
+sops, spacing, tags, time, unverified</span>
 
-### Retrieve Sorted Files
+## Retrieve ROI/POIs:
+Each image contains a roi and poi dictionary, if a RTSTRUCT file associates with an image then each ROI/POI is added to
+respective image dictionary.
+
 ```python
-ds_images = dicom_reader.get_ds_images()  # Returns a list of dicom files sorted into each image  
+import MedicalImageConverter as mic
+
+path = r'/path/to/folder'
+
+reader = mic.Reader(folder_path=path)
+reader.read_dicoms()
+
+image = reader.images[0]
+
+roi_names = list(image.rois.keys())
+roi = image.rois[roi_names[0]]
+contour_position = roi.contour_position
+
+poi_names = list(image.pois.keys())
+poi = image.rois[poi_names[0]]
+point_position = poi.point_position
+
 ```
