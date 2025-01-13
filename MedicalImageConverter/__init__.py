@@ -1,2 +1,3 @@
 
-from .reader import DicomReader
+from .parsar import file_parsar
+from .reader import Reader
