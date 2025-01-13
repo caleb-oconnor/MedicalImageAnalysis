@@ -39,6 +39,9 @@ def file_parsar(path, exclude_files=None):
     stl_files = []
     mf3_files = []
 
+    if not exclude_files:
+        exclude_files = []
+
     for root, dirs, files in os.walk(path):
         if files:
             for name in files:
