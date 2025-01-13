@@ -1,3 +1,16 @@
+"""
+Morfeus lab
+The University of Texas
+MD Anderson Cancer Center
+Author - Caleb O'Connor
+Email - csoconnor@mdanderson.org
+
+
+Description:
+
+Functions:
+
+"""
 
 import os
 import copy
@@ -24,19 +37,28 @@ def thread_process_dicom(path, stop_before_pixels=False):
 
 class DicomReader:
     def __init__(self, reader):
+        """
+        Takes in reader parent, which will be used to add to image list variable.
+
+        :param reader:
+        :type reader: object
+        """
         self.reader = reader
 
         self.ds = []
         self.ds_modality = {key: [] for key in ['CT', 'MR', 'PT', 'US', 'DX', 'MG', 'NM', 'XA', 'CR',
                                                 'RTSTRUCT', 'REG', 'RTDose']}
 
-    def add_dicom_extension(self):
-        for ii, name in enumerate(self.reader.files['Dicom']):
-            a, b = os.path.splitext(name)
-            if not b:
-                self.reader.files['Dicom'][ii] = name + '.dcm'
+    def load_dicoms(self, display_time=False):
+        """
+        Reads in the dicom files, separates the images by modality, lasty adds each image to the reader image list
+        variable.
 
-    def load_dicoms(self, display_time=True):
+        :param display_time: prints the total read in time in seconds
+        :type display_time: bool
+        :return:
+        :rtype:
+        """
         t1 = time.time()
         self.read()
         self.separate_modalities_and_images()
@@ -67,12 +89,13 @@ class DicomReader:
 
     def separate_modalities_and_images(self):
         """
-        Separate read in files by their modality and image based on SeriesInstanceUID and AcquisitionNumber.
-        US and DX (X-ray) are considered 2d images, therefore they don't require image separation, because each file
-        is considered to be a unique image, even though US can have multiple "slices" per file each slice will be
-        considered a 2d image.
+        The files are first sorted by Modality with these options:
+            CT, MR, PT, US, DX, MG, NM, XA, CR, RTSTRUCT, REG, RTDose
 
-        ds_modality - dictionary of different modalities
+        Then the files are separated into images using the SeriesInstanceUID and AcquisitionNumber. The image
+        orientation and image position is used to determine how the slices are sorted incase they are read in out of
+        order. However, for 2d images or non image files (US, DX, MG, XA, CR, RTSTRUCT, REG, RTDose), sorting is not
+        required.
         Returns
         -------
 
@@ -123,7 +146,14 @@ class DicomReader:
                         self.ds_modality[modality] += [image]
 
     def image_creation(self):
-        for modality in list(self.ds_modality.keys()):
+        """
+        Currently only reading in 5 modalities (CT, MR, DX, US, RTSTRUCT) and using specific modality class readers.
+        First the image volume modalities are created, then RTSTRUCT is added to the image that it associates with.
+
+        :return:
+        :rtype:
+        """
+        for modality in ['CT', 'MR', 'DX', 'MG', 'US']:
             load = False
             read_image = None
             for image_set in self.ds_modality[modality]:
@@ -154,24 +184,19 @@ class DicomReader:
                 image.input(read_image)
                 self.reader.images += [image]
 
+        for modality in ['RTSTRUCT']:
             for image_set in self.ds_modality[modality]:
                 if modality == 'RTSTRUCT':
-                    self.reader.rtstructs += [ReadRTStruct(image_set, self.reader.images, self.reader.only_tags)]
+                    read_rtstruct = ReadRTStruct(image_set, self.reader.images, self.reader.only_tags)
+                    if read_rtstruct.match_image_idx is not None:
+                        self.reader.images[read_rtstruct.match_image_idx].input_rtstruct(read_rtstruct)
+                    else:
+                        print('dicom: rtstruct has no matching image')
 
 
 class Read3D(object):
     """
-    Important tags are extracted for dicom files along with array if only_tags=False.
-        Tags:
-            plane - main view plane of original image
-            spacing - the inplane spacing and the slice thickness are combined
-                    - Note: the slice thickness is recalculated during compute_image_matrix because sometimes the tag
-                      is incorrectly saved
-            orientation - the direction cosine matrix
-            origin - the origin and array are recomputed to be "Feet-first supine" (FFS) if it is another position
-            image_matrix - this is a 4x4 matrix illustrates the rotation of the image,
-                         - Note: The is a function that will look for skipped slices which sometimes occur between
-                           abdomen and pelvis, this will interpolate a slice that is missing
+    This is currently for CT and MR modalities.
     """
     def __init__(self, image_set, only_tags):
         if isinstance(image_set, list):
@@ -200,6 +225,11 @@ class Read3D(object):
         self.image_matrix = self._compute_image_matrix()
 
     def _compute_array(self):
+        """
+        Combines all the slice arrays into a 3D array.
+        :return:
+        :rtype:
+        """
         image_slices = []
         for _slice in self.image_set:
             if (0x0028, 0x1052) in _slice:
@@ -223,6 +253,11 @@ class Read3D(object):
             return self.array
 
     def _compute_plane(self):
+        """
+        Computes the image plane for the slices
+        :return:
+        :rtype:
+        """
         orientation = self.image_set[0]['ImageOrientationPatient'].value
         x = np.abs(orientation[0]) + np.abs(orientation[3])
         y = np.abs(orientation[1]) + np.abs(orientation[4])
@@ -236,6 +271,11 @@ class Read3D(object):
             return 'Axial'
 
     def _compute_spacing(self):
+        """
+        Creates 3 axis spacing by inplane pixel spacing the slice thickness
+        :return:
+        :rtype:
+        """
         inplane_spacing = [1, 1]
         slice_thickness = np.double(self.image_set[0].SliceThickness)
 
@@ -255,9 +295,19 @@ class Read3D(object):
         return np.asarray([inplane_spacing[0], inplane_spacing[1], slice_thickness])
 
     def _compute_dimensions(self):
+        """
+        Creates dimensions by columns, rows, and number of slices.
+        :return:
+        :rtype:
+        """
         return np.asarray([self.image_set[0]['Columns'].value, self.image_set[0]['Rows'].value, len(self.image_set)])
 
     def _compute_orientation(self):
+        """
+        Looks in the tags for image orientation, typically exist in ImageOrientationPatient.
+        :return:
+        :rtype:
+        """
         orientation = np.asarray([1, 0, 0, 0, 1, 0])
         if 'ImageOrientationPatient' in self.image_set[0]:
             orientation = np.asarray(self.image_set[0]['ImageOrientationPatient'].value)
@@ -279,6 +329,12 @@ class Read3D(object):
         return orientation
 
     def _compute_origin(self):
+        """
+        Patient can exist on stomach, back, or side laying on the bench. This is used to rotate the image to always be
+        feet first supine. It creates the array, the orientation, and the position.
+        :return:
+        :rtype:
+        """
         origin = np.asarray(self.image_set[0]['ImagePositionPatient'].value)
         if 'PatientPosition' in self.image_set[0]:
             self.base_position = self.image_set[0]['PatientPosition'].value
@@ -310,6 +366,15 @@ class Read3D(object):
         return origin
 
     def _compute_image_matrix(self):
+        """
+        Computes the image matrix using the image orientation.
+
+        Sometimes SliceThickness tag isn't correct this looks for position changes over the slices to recalculate the
+        slice thickness as need. Also, rarely when scans transition from abdomen to pelvis protocol there is a skipped
+        slice, this signals when that happens (it could happen in other instances this is just one I am familiar with).
+        :return:
+        :rtype:
+        """
         row_direction = self.orientation[:3]
         column_direction = self.orientation[3:]
 
@@ -346,34 +411,13 @@ class Read3D(object):
             if ii > 0 and np.abs(base_spacing - (position_2 - position_1)) > 0.01:
                 self.unverified = 'Skipped'
                 self.skipped_slice = ii + 1
-                self.dimensions[2] += 1
-                self.filepaths.insert(ii + 1, '')
-                self.sops.insert(ii + 1, '1.123456789')
-
-                hold_data = copy.deepcopy(self.array)
-                interpolate_slice = np.mean(self.array[ii:ii + 2, :, :], axis=0).astype(np.int16)
-                self.array = np.insert(hold_data, self.skipped_slice, interpolate_slice, axis=0)
-
-    def axial_correction(self):
-        if self.plane == 'Sagittal':
-            array_hold = copy.deepcopy(self.array)
-            array_hold = np.swapaxes(array_hold, 0, 1)
-            array_hold = np.swapaxes(array_hold, 1, 2)
-            self.array = np.flip(array_hold, axis=0)
-
-            self.orientation[0:2] = 1 - self.orientation[0:2]
-            self.orientation[4] = 1 - self.orientation[4]
-            self.orientation[5] = 1 + self.orientation[5]
-
-        elif self.plane == 'Coronal':
-            array_hold = copy.deepcopy(self.array)
-            self.array = np.flip(array_hold, axis=0)
-
-            self.orientation[4] = 1 - self.orientation[4]
-            self.orientation[5] = 1 + self.orientation[5]
 
 
 class ReadDX(object):
+    """
+    This is X-ray images, modalities are DX or MG (mammograms). Mammograms can also be tomosynthesis which are not read
+    in this class.
+    """
     def __init__(self, image_set, only_tags):
         if isinstance(image_set, list):
             self.image_set = image_set
@@ -401,15 +445,27 @@ class ReadDX(object):
         self.spacing = self._compute_spacing()
 
     def _compute_array(self):
+        """
+        Creates the image array.
+        :return:
+        :rtype:
+        """
         self.array = self.image_set[0].pixel_array.astype('int16')
         del self.image_set[0].PixelData
 
         if 'PresentationLUTShape' in self.image_set[0] and self.image_set[0]['PresentationLUTShape'] == 'Inverse':
             self.array = 16383 - self.array
 
-        self.array = self.array.reshape((1, array.shape[0], array.shape[1]))
+        self.array = self.array.reshape((1, self.array.shape[0], self.array.shape[1]))
 
     def _compute_spacing(self):
+        """
+        Creates 3 axis spacing by inplane pixel spacing the 1 mm being the slice thickness even though 2D images don't
+        have thickness.
+
+        :return:
+        :rtype:
+        """
         inplane_spacing = [1, 1]
         slice_thickness = 1
 
@@ -552,6 +608,10 @@ class ReadMG(object):
 
 
 class ReadUS(object):
+    """
+    This is Ultrasound images, modality is US. Similar to DX modality, except US can have stacks of "slices". Not slices
+    in the traditional because they don't correlate to one another.
+    """
     def __init__(self, image_set, only_tags):
         if isinstance(image_set, list):
             self.image_set = image_set
@@ -579,8 +639,8 @@ class ReadUS(object):
         self.spacing = self._compute_spacing()
 
     def _compute_array(self):
-        us_data = np.asarray(self.image_set.pixel_array)
-        del self.image_set.PixelData
+        us_data = np.asarray(self.image_set[0].pixel_array)
+        del self.image_set[0].PixelData
 
         if len(us_data.shape) == 2:
             us_data = us_data.reshape((1, us_data.shape[0], us_data.shape[1]))
@@ -622,9 +682,9 @@ class ReadUS(object):
 
 
 class ReadRTStruct(object):
-    def __init__(self, image_set, reference_tags, only_tags):
+    def __init__(self, image_set, reference_images, only_tags):
         self.image_set = image_set
-        self.reference_tags = reference_tags
+        self.reference_images = reference_images
         self.only_tags = only_tags
 
         self.series_uid = self._get_series_uid()
@@ -671,16 +731,9 @@ class ReadRTStruct(object):
 
     def _match_with_image(self):
         match_image_idx = None
-        for ii, reference in enumerate(self.reference_tags):
-            if len(reference.image_set) > 1:
-                series = reference.image_set[0].SeriesInstanceUID
-            else:
-                series = reference.image_set.SeriesInstanceUID
-
-            sops = reference.sops
-
-            if series == self.image_set.SeriesInstanceUID:
-                if self._properties[0][0] in sops:
+        for ii, reference in enumerate(self.reference_images):
+            if self.series_uid == reference.series_uid:
+                if self._properties[0][4][0] in reference.sops:
                     match_image_idx = ii
 
         return match_image_idx
