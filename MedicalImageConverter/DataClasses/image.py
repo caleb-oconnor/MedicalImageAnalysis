@@ -17,139 +17,142 @@ import numpy as np
 import vtk
 from vtkmodules.util import numpy_support
 
-# from src.DataType.roi import Roi
+from .poi import Poi
+from .roi import Roi
 
 
-class Image:
-    def __init__(self, image, tags_only=False):
-        self.tags = get_tags(image)
-        if tags_only:
-            self.array = None
+class Image(object):
+    def __init__(self):
         self.rois = {}
         self.pois = {}
 
+        self.tags = None
+        self.patient_name = None
+        self.mrn = None
         self.date = None
         self.time = None
+        self.series_uid = None
+        self.frame_ref = None
+
+        self.filepaths = None
+        self.sops = None
+
         self.plane = None
-
-        # self.rows = None
-        # self.columns = None
-        # self.slices = None
-        # self.dimension = [self.rows, self.columns, self.slices]
-        # self.spacing = [float(self.PixelSpacing[0]), float(self.PixelSpacing[1]), float(self.SliceThickness)]
-        self.dimension = None
         self.spacing = None
-        self.origin = None
-
+        self.dimensions = None
         self.orientation = None
-        self.matrix = None
+        self.origin = None
+        self.image_matrix = None
 
-        self.skipped_slice = None
+        self.array = None
+
         self.unverified = None
+        self.base_position = None
+        self.skipped_slice = None
+        self.sections = None
+        self.rgb = False
 
-    def set_tags(self, image):
-        self.tags = image[0]
+    def input(self, image):
+        self.tags = image.image_set
 
-    def get_current_slice(self, plane):
-        if plane == 'Axial':
-            current_slice = self.slice_location[2]
+        self.patient_name = self.get_patient_name()
+        self.mrn = self.get_mrn()
+        self.date = self.get_date()
+        self.time = self.get_time()
+        self.series_uid = self.get_series_uid()
+        self.frame_ref = self.get_frame_ref()
 
-        elif plane == 'Sagittal':
-            current_slice = self.slice_location[0]
+        self.filepaths = image.filepaths
+        self.sops = image.sops
 
+        self.plane = image.plane
+        self.spacing = image.spacing
+        self.dimensions = image.spacing
+        self.orientation = image.orientation
+        self.origin = image.origin
+        self.image_matrix = image.image_matrix
+
+        self.array = image.array
+
+        self.unverified = image.unverified
+        self.base_position = image.base_position
+        self.skipped_slice = image.skipped_slice
+        self.sections = image.sections
+        self.rgb = image.rgb
+
+    def input_rtstruct(self, rtstruct):
+        for ii, roi_name in enumerate(rtstruct.roi_names):
+            if roi_name not in list(self.rois.keys()):
+                self.rois[roi_name] = Roi(self, roi_name, rtstruct.roi_colors[ii], False, rtstruct.filepaths)
+                self.rois[roi_name].contour_position = rtstruct.contours[ii]
+
+        for ii, poi_name in enumerate(rtstruct.poi_names):
+            if poi_name not in list(self.pois.keys()):
+                self.pois[poi_name] = Poi(poi_name, rtstruct.poi_colors[ii], False, rtstruct.filepaths)
+                self.pois[poi_name].point_position = rtstruct.points[ii]
+
+    def get_patient_name(self):
+        if 'PatientName' in self.tags[0]:
+            return self.tags[0].PatientName
         else:
-            current_slice = self.slice_location[1]
+            return 'Name tag missing'
 
-        return current_slice
-
-    def get_slice_max(self, plane):
-        if plane == 'Axial':
-            scroll_max = self.slices - 1
-
-        elif plane == 'Sagittal':
-            scroll_max = self.rows - 1
-
+    def get_mrn(self):
+        if 'PatientID' in self.tags[0]:
+            return self.tags[0].PatientID
         else:
-            scroll_max = self.columns - 1
+            return 'MRN tag missing'
 
-        return scroll_max
-
-    def get_xyz_spacing(self):
-        """
-        Returns spacing in xyz list format
-        :return:
-        """
-        return [float(self.PixelSpacing[0]), float(self.PixelSpacing[1]), float(self.SliceThickness)]
-
-    def get_xyz_dimensions(self):
-        return [self.Rows, self.Columns, self.Slices]
-
-    def create_roi(self, name=None, colors=None, visible=False, filepaths=None):
-        self.rois[name] = Roi(self, name, colors, visible, filepaths)
-
-    def create_vtk_slice(self, plane='Axial'):
-        matrix_reshape = self.matrix[0:3, 0:3].reshape(1, 9)[0]
-        vtk_image = vtk.vtkImageData()
-        vtk_image.SetSpacing(self.spacing)
-        vtk_image.SetDirectionMatrix(matrix_reshape)
-
-        origin_slice = copy.deepcopy(self.origin)
-        if plane == 'Axial':
-            array_slice = self.array[:, :, self.slice_location[2]]
-            origin_slice[2] = origin_slice[2] + (self.spacing[2] * self.slice_location[2])
-            array_shape = array_slice.shape
-            dim = [array_shape[0], array_shape[1], 1]
-
-        elif plane == 'Sagittal':
-            array_slice = self.array[self.slice_location[0], :, :]
-            origin_slice[0] = origin_slice[0] + (self.spacing[0] * self.slice_location[0])
-            array_shape = array_slice.shape
-            dim = [1, array_shape[0], array_shape[1]]
-
+    def get_date(self):
+        if 'SeriesDate' in self.tags[0]:
+            return self.tags[0].SeriesDate
+        elif 'ContentDate' in self.tags[0]:
+            return self.tags[0].ContentDate
+        elif 'AcquisitionDate' in self.tags[0]:
+            return self.tags[0].AcquisitionDate
+        elif 'StudyDate' in self.tags[0]:
+            return self.tags[0].StudyDate
         else:
-            array_slice = self.array[:, self.slice_location[1], :]
-            origin_slice[1] = origin_slice[1] + (self.spacing[1] * self.slice_location[1])
-            array_shape = array_slice.shape
-            dim = [array_shape[0], 1, array_shape[1]]
+            return '00000'
 
-        vtk_image.SetDimensions(dim)
-        vtk_image.SetOrigin(origin_slice)
-        vtk_image.GetPointData().SetScalars(numpy_support.numpy_to_vtk(array_slice.flatten(order="F")))
-
-        return vtk_image
-
-    def create_vtk_volume(self):
-        matrix_reshape = self.matrix[0:3, 0:3].reshape(1, 9)[0]
-        vtk_volume = vtk.vtkImageData()
-        vtk_volume.SetSpacing(self.spacing)
-        vtk_volume.SetDirectionMatrix(matrix_reshape)
-        vtk_volume.SetDimensions(self.array.shape)
-        vtk_volume.SetOrigin(self.origin)
-        vtk_volume.GetPointData().SetScalars(numpy_support.numpy_to_vtk(self.array.flatten(order="F")))
-
-        return vtk_volume
-
-    def create_vtk_volume_sliced(self, plane='Axial'):
-        matrix_reshape = self.matrix[0:3, 0:3].reshape(1, 9)[0]
-        vtk_volume = vtk.vtkImageData()
-        vtk_volume.SetSpacing(self.spacing)
-        vtk_volume.SetDirectionMatrix(matrix_reshape)
-
-        origin_slice = copy.deepcopy(self.origin)
-        if plane == 'Axial':
-            array_slices = self.array[:, :, self.slice_location[2]:]
-            origin_slice[2] = origin_slice[2] + (self.spacing[2] * self.slice_location[2])
-
-        elif plane == 'Sagittal':
-            array_slices = self.array[self.slice_location[0]:, :, :]
-            origin_slice[0] = origin_slice[0] + (self.spacing[0] * self.slice_location[0])
-
+    def get_time(self):
+        if 'SeriesTime' in self.tags[0]:
+            return self.tags[0].SeriesTime
+        elif 'ContentTime' in self.tags[0]:
+            return self.tags[0].ContentTime
+        elif 'AcquisitionTime' in self.tags[0]:
+            return self.tags[0].AcquisitionTime
+        elif 'StudyTime' in self.tags[0]:
+            return self.tags[0].StudyTime
         else:
-            array_slices = self.array[:, self.slice_location[1]:, :]
-            origin_slice[1] = origin_slice[1] + (self.spacing[1] * self.slice_location[1])
+            return '00000'
 
-        vtk_volume.SetDimensions(dim)
-        vtk_volume.SetOrigin(array_slices.shape)
-        vtk_volume.GetPointData().SetScalars(numpy_support.numpy_to_vtk(array_slices.flatten(order="F")))
+    def get_study_uid(self):
+        if 'StudyInstanceUID' in self.tags[0]:
+            return self.tags[0].StudyInstanceUID
+        else:
+            return '00000.00000'
 
-        return vtk_volume
+    def get_series_uid(self):
+        if 'SeriesInstanceUID' in self.tags[0]:
+            return self.tags[0].SeriesInstanceUID
+        else:
+            return '00000.00000'
+
+    def get_frame_ref(self):
+        if 'FrameOfReferenceUID' in self.tags[0]:
+            return self.tags[0].FrameOfReferenceUID
+        else:
+            return '00000.00000'
+
+    def get_specific_tag(self, tag):
+        if tag in self.tags[0]:
+            return self.tags[0][tag]
+        else:
+            return None
+
+    def get_specific_tag_on_all_files(self, tag):
+        if tag in self.tags[0]:
+            return [t[tag] for t in self.tags]
+        else:
+            return None
