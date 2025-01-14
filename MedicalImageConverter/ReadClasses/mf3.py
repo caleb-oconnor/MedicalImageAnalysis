@@ -1,4 +1,16 @@
+"""
+Morfeus lab
+The University of Texas
+MD Anderson Cancer Center
+Author - Caleb O'Connor
+Email - csoconnor@mdanderson.org
 
+
+Description:
+
+Functions:
+
+"""
 
 import os
 
@@ -10,18 +22,18 @@ import numpy as np
 import pyvista as pv
 
 
-class ThreeMfReader:
+class ThreeMfReader(object):
     """
     Converts 3mf file to pyvista polydata mesh.
     """
-    def __init__(self, path, load=True):
-        self.path = path
-        self.mesh = None
+    def __init__(self, reader):
+        self.reader = reader
 
-        if load:
-            self.load_3mf()
+    def load(self):
+        for file_path in self.reader.files['3mf']:
+            self.read(file_path)
 
-    def load_3mf(self):
+    def read(self, path):
         """
         Loads in the 3mf file, gets the vertices/vertice colors/triangles and creates a polydata 3D model using pyvista.
 
@@ -32,7 +44,7 @@ class ThreeMfReader:
         namespace = {"3mf": "http://schemas.microsoft.com/3dmanufacturing/core/2015/02",
                      "m": "http://schemas.microsoft.com/3dmanufacturing/material/2015/02"}
 
-        archive = zipfile.ZipFile(self.path, "r")
+        archive = zipfile.ZipFile(path, "r")
         root = ET.parse(archive.open("3D/3dmodel.model"))
         color_list = list()
         colors = root.findall('.//m:color', namespace)
@@ -60,8 +72,8 @@ class ThreeMfReader:
             vertices_color[v3] = rgb_color
             triangle_list[0, ii * 4:(ii + 1) * 4] = [3, v1, v2, v3]
 
-        self.mesh = pv.PolyData(np.float64(np.asarray(vertex_list)), triangle_list[0, :].astype(int))
-        self.mesh['colors'] = np.abs(255-vertices_color)
+        self.reader.meshes += pv.PolyData(np.float64(np.asarray(vertex_list)), triangle_list[0, :].astype(int))
+        self.reader.meshes[-1]['colors'] = np.abs(255-vertices_color)
 
     @staticmethod
     def color_avg(color_list, p1, p2, p3):
@@ -111,7 +123,3 @@ class ThreeMfReader:
         hexAvg = '#%02x%02x%02x' % (rgbAvg[0], rgbAvg[1], rgbAvg[2])
 
         return hexAvg
-
-    def downsample_mesh(self, points):
-        ds_mesh = self.mesh.decimate(1 - (points / len(self.mesh.points)))
-        ds_points = np.asarray(ds_mesh.points)

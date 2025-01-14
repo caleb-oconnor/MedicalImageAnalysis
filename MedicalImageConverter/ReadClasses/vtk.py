@@ -18,7 +18,7 @@ import numpy as np
 import pyvista as pv
 
 
-class StlReader(object):
+class VtkReader(object):
     """
 
     """
@@ -26,7 +26,7 @@ class StlReader(object):
         self.reader = reader
 
     def load(self):
-        for file_path in self.reader.files['Stl']:
+        for file_path in self.reader.files['Vtk']:
             self.read(file_path)
 
     def read(self, path):
