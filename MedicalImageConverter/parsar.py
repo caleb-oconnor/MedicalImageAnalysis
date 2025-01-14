@@ -36,7 +36,9 @@ def file_parsar(path, exclude_files=None):
     dicom_files = []
     mhd_files = []
     raw_files = []
+    nifti_files = []
     stl_files = []
+    vtk_files = []
     mf3_files = []
 
     if not exclude_files:
@@ -59,8 +61,15 @@ def file_parsar(path, exclude_files=None):
                     elif file_extension == '.raw':
                         raw_files.append(filepath)
 
+                    elif file_extension == '.gz':
+                        if filepath[-6:] == 'nii.gz':
+                            nifti_files.append(filepath)
+
                     elif file_extension == '.stl':
                         stl_files.append(filepath)
+
+                    elif file_extension == '.vtk':
+                        vtk_files.append(filepath)
 
                     elif file_extension == '.3mf':
                         mf3_files.append(filepath)
@@ -71,7 +80,9 @@ def file_parsar(path, exclude_files=None):
     file_dictionary = {'Dicom': dicom_files,
                        'MHD': mhd_files,
                        'Raw': raw_files,
+                       'Nifti': nifti_files,
                        'Stl': stl_files,
+                       'Vtk': vtk_files,
                        '3mf': mf3_files,
                        'NoExtension': no_file_extension}
 
