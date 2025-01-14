@@ -25,7 +25,7 @@ Functions:
 """
 
 from .parsar import file_parsar
-from .ReadClasses import DicomReader
+from .ReadClasses import DicomReader, MhdReader, NiftiReader, StlReader, VtkReader, ThreeMfReader
 
 
 class Reader:
@@ -79,11 +79,7 @@ class Reader:
         self.rigid = []
         self.deformable = []
         self.dose = []
-
-    def read_all(self, dcm=False, mhd=False, stl=False, mf3=False):
-        if dcm:
-            dicom_reader = DicomReader(self)
-            dicom_reader.load_dicom()
+        self.meshes = []
 
     def read_dicoms(self):
         """
@@ -92,22 +88,30 @@ class Reader:
         :rtype:
         """
         dicom_reader = DicomReader(self)
-        dicom_reader.load_dicoms()
+        dicom_reader.load()
 
     def read_rtstruct_only(self, base_image=None):
         print('reader')
 
-    def read_mhd(self):
-        print('reader')
+    def read_mhd(self, match_image=None, create_contours=False):
+        mf3_reader = MhdReader(self)
+        mf3_reader.load()
 
-    def read_nifti(self):
-        print('reader')
+    def read_nifti(self, match_image=None, create_contours=False):
+        nifti_reader = NiftiReader(self)
+        nifti_reader.load()
 
-    def read_stl(self, create_image=True):
-        print('reader')
+    def read_stl(self, create_image=False, match_image=None):
+        stl_reader = StlReader(self)
+        stl_reader.load()
 
-    def read_3mf(self, create_image=True):
-        print('reader')
+    def read_vtk(self, create_image=False, match_image=None):
+        vtk_reader = VtkReader(self)
+        vtk_reader.load()
+
+    def read_3mf(self, create_image=False, match_image=None):
+        mf3_reader = ThreeMfReader(self)
+        mf3_reader.load()
 
 
 if __name__ == '_main__':
