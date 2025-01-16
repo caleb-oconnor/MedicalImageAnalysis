@@ -166,7 +166,7 @@ class Image(object):
         else:
             return None
 
-    def save_image(self, path):
+    def save_image(self, path, rois=True, pois=True):
         variable_names = self.__dict__.keys()
         column_names = [name for name in variable_names if name not in ['rois', 'pois', 'tags', 'array']]
 
@@ -178,10 +178,18 @@ class Image(object):
         np.save(os.path.join(path, 'tags.npy'), self.tags, allow_pickle=True)
         np.save(os.path.join(path, 'array.npy'), self.array, allow_pickle=True)
 
-    def save_rois(self, path):
-        os.mkdir(os.path.join(path, 'ROIs'))
+        if rois:
+            self.save_rois(path, create_main_folder=True)
+
+        if pois:
+            self.save_pois(path, create_main_folder=True)
+
+    def save_rois(self, path, create_main_folder=False):
+        if create_main_folder:
+            path = os.path.join(path, 'ROIs')
+
         for name in list(self.rois.keys()):
-            roi_path = os.path.join(os.path.join(path, 'ROIs', name))
+            roi_path = os.path.join(os.path.join(path, name))
             os.mkdir(roi_path)
 
             np.save(os.path.join(roi_path, 'name.npy'), self.rois[name].name, allow_pickle=True)
@@ -193,10 +201,12 @@ class Image(object):
                         np.array(self.rois[name].contour_position, dtype=object),
                         allow_pickle=True)
 
-    def save_pois(self, path):
-        os.mkdir(os.path.join(path, 'POIs'))
+    def save_pois(self, path, create_main_folder=False):
+        if create_main_folder:
+            path = os.path.join(path, 'POIs')
+
         for name in list(self.pois.keys()):
-            poi_path = os.path.join(os.path.join(path, 'POIs', name))
+            poi_path = os.path.join(os.path.join(path, name))
             os.mkdir(poi_path)
 
             np.save(os.path.join(poi_path, 'name.npy'), self.pois[name].name, allow_pickle=True)
@@ -204,3 +214,67 @@ class Image(object):
             np.save(os.path.join(poi_path, 'color.npy'), self.pois[name].color, allow_pickle=True)
             np.save(os.path.join(poi_path, 'filepaths.npy'), self.pois[name].filepaths, allow_pickle=True)
             np.save(os.path.join(poi_path, 'point_position.npy'), self.pois[name].point_position, allow_pickle=True)
+
+    def load_image(self, image_path, rois=True, pois=True):
+
+        self.array = np.load(os.path.join(image_path, 'array.npy'), allow_pickle=True)
+        self.tags = np.load(os.path.join(image_path, 'tags.npy'), allow_pickle=True)
+        info = pd.read_pickle(os.path.join(image_path, 'info.p'),)
+        for column in list(info.columns):
+            setattr(self, column, info.at[0, column])
+
+        if rois:
+            roi_names = os.listdir(image_path, 'ROIs')
+            for name in roi_names:
+                self.load_rois(os.path.join(image_path, 'ROIs', name))
+
+        if pois:
+            roi_names = os.listdir(image_path, 'POIs')
+            for name in roi_names:
+                self.load_pois(os.path.join(image_path, 'POIs', name))
+
+    def load_rois(self, roi_path):
+        name = np.load(os.path.join(roi_path, 'name.npy'), allow_pickle=True)
+
+        existing_rois = list(self.rois.keys())
+        if name in existing_rois:
+            n = 0
+            while n >= 0:
+                n += 1
+                new_name = name + '_' + str(n)
+                if new_name not in existing_rois:
+                    name = new_name
+                    n = -1
+
+        self.rois[name] = Roi()
+        self.rois[name].name = name
+        self.rois[name].visible = np.load(os.path.join(roi_path, 'visible.npy'), allow_pickle=True)
+        self.rois[name].color = np.load(os.path.join(roi_path, 'color.npy'), allow_pickle=True)
+        self.rois[name].filepaths = np.load(os.path.join(roi_path, 'filepaths.npy'), allow_pickle=True)
+
+        if os.path.exists(os.path.join(roi_path, 'contour_position.npy')):
+            self.rois[name].contour_position = np.load(os.path.join(roi_path, 'contour_position.npy'),
+                                                       allow_pickle=True)
+
+    def load_pois(self, poi_path):
+        name = np.load(os.path.join(poi_path, 'name.npy'), allow_pickle=True)
+
+        existing_pois = list(self.pois.keys())
+        if name in existing_pois:
+            n = 0
+            while n >= 0:
+                n += 1
+                new_name = name + '_' + str(n)
+                if new_name not in existing_pois:
+                    name = new_name
+                    n = -1
+
+        self.pois[name] = poi()
+        self.pois[name].name = name
+        self.pois[name].visible = np.load(os.path.join(poi_path, 'visible.npy'), allow_pickle=True)
+        self.pois[name].color = np.load(os.path.join(poi_path, 'color.npy'), allow_pickle=True)
+        self.pois[name].filepaths = np.load(os.path.join(poi_path, 'filepaths.npy'), allow_pickle=True)
+
+        if os.path.exists(os.path.join(poi_path, 'point_position.npy')):
+            self.rois[name].contour_position = np.load(os.path.join(poi_path, 'point_position.npy'),
+                                                       allow_pickle=True)
