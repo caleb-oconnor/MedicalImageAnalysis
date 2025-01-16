@@ -11,8 +11,9 @@ Structure:
 
 """
 
-import copy
+import os
 import numpy as np
+import pandas as pd
 
 import vtk
 from vtkmodules.util import numpy_support
@@ -27,12 +28,14 @@ class Image(object):
         self.pois = {}
 
         self.tags = None
+        self.image_name = None
         self.patient_name = None
         self.mrn = None
         self.date = None
         self.time = None
         self.series_uid = None
         self.frame_ref = None
+        self.modality = None
 
         self.filepaths = None
         self.sops = None
@@ -43,6 +46,8 @@ class Image(object):
         self.orientation = None
         self.origin = None
         self.image_matrix = None
+        self.window = None
+        self.camera_position = None
 
         self.array = None
 
@@ -51,6 +56,8 @@ class Image(object):
         self.skipped_slice = None
         self.sections = None
         self.rgb = False
+
+        self.slice_location = (0, 0, 0)
 
     def input(self, image):
         self.tags = image.image_set
@@ -79,6 +86,8 @@ class Image(object):
         self.skipped_slice = image.skipped_slice
         self.sections = image.sections
         self.rgb = image.rgb
+
+        self.modality = image.modality
 
     def input_rtstruct(self, rtstruct):
         for ii, roi_name in enumerate(rtstruct.roi_names):
@@ -156,3 +165,42 @@ class Image(object):
             return [t[tag] for t in self.tags]
         else:
             return None
+
+    def save_image(self, path):
+        variable_names = self.__dict__.keys()
+        column_names = [name for name in variable_names if name not in ['rois', 'pois', 'tags', 'array']]
+
+        df = pd.DataFrame(index=[0], columns=column_names)
+        for name in column_names:
+            df.at[0, name] = getattr(self, name)
+
+        df.to_pickle(os.path.join(path, 'info.p'))
+        np.save(os.path.join(path, 'tags.npy'), self.tags, allow_pickle=True)
+        np.save(os.path.join(path, 'array.npy'), self.array, allow_pickle=True)
+
+    def save_rois(self, path):
+        os.mkdir(os.path.join(path, 'ROIs'))
+        for name in list(self.rois.keys()):
+            roi_path = os.path.join(os.path.join(path, 'ROIs', name))
+            os.mkdir(roi_path)
+
+            np.save(os.path.join(roi_path, 'name.npy'), self.rois[name].name, allow_pickle=True)
+            np.save(os.path.join(roi_path, 'visible.npy'), self.rois[name].visible, allow_pickle=True)
+            np.save(os.path.join(roi_path, 'color.npy'), self.rois[name].color, allow_pickle=True)
+            np.save(os.path.join(roi_path, 'filepaths.npy'), self.rois[name].filepaths, allow_pickle=True)
+            if self.rois[name].contour_position is not None:
+                np.save(os.path.join(roi_path, 'contour_position.npy'),
+                        np.array(self.rois[name].contour_position, dtype=object),
+                        allow_pickle=True)
+
+    def save_pois(self, path):
+        os.mkdir(os.path.join(path, 'POIs'))
+        for name in list(self.pois.keys()):
+            poi_path = os.path.join(os.path.join(path, 'POIs', name))
+            os.mkdir(poi_path)
+
+            np.save(os.path.join(poi_path, 'name.npy'), self.pois[name].name, allow_pickle=True)
+            np.save(os.path.join(poi_path, 'visible.npy'), self.pois[name].visible, allow_pickle=True)
+            np.save(os.path.join(poi_path, 'color.npy'), self.pois[name].color, allow_pickle=True)
+            np.save(os.path.join(poi_path, 'filepaths.npy'), self.pois[name].filepaths, allow_pickle=True)
+            np.save(os.path.join(poi_path, 'point_position.npy'), self.pois[name].point_position, allow_pickle=True)
