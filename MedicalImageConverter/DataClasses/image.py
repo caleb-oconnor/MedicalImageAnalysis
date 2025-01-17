@@ -100,6 +100,14 @@ class Image(object):
                 self.pois[poi_name] = Poi(poi_name, rtstruct.poi_colors[ii], False, rtstruct.filepaths)
                 self.pois[poi_name].point_position = rtstruct.points[ii]
 
+    def add_roi(self, roi_name=None, color=None, visible=False, path=None, contour=None):
+        self.rois[roi_name] = Roi(self, roi_name, color, visible, path)
+        self.rois[roi_name].contour_position = contour
+
+    def add_poi(self, poi_name=None, color=None, visible=False, path=None, point=None):
+        self.pois[poi_name] = Poi(self, poi_name, color, visible, path)
+        self.pois[poi_name].point_position = point
+
     def get_patient_name(self):
         if 'PatientName' in self.tags[0]:
             return self.tags[0].PatientName
@@ -158,7 +166,14 @@ class Image(object):
         if (0x0028, 0x1050) in self.tags[0] and (0x0028, 0x1051) in self.tags[0]:
             center = self.tags[0].WindowCenter
             width = self.tags[0].WindowWidth
-            return [int(center), int(np.round(width / 2))]
+
+            if not isinstance(center, float):
+                center = center[0]
+
+            if not isinstance(width, float):
+                width = width[0]
+
+            return [int(center) - int(np.round(width / 2)), int(center) + int(np.round(width / 2))]
 
         elif self.array is not None:
             return [np.min(self.array), np.max(self.array)]
