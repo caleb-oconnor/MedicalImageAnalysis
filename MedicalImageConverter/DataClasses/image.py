@@ -28,6 +28,8 @@ class Image(object):
         self.pois = {}
 
         self.tags = None
+        self.array = None
+
         self.image_name = None
         self.patient_name = None
         self.mrn = None
@@ -49,8 +51,6 @@ class Image(object):
         self.window = None
         self.camera_position = None
 
-        self.array = None
-
         self.unverified = None
         self.base_position = None
         self.skipped_slice = None
@@ -61,6 +61,7 @@ class Image(object):
 
     def input(self, image):
         self.tags = image.image_set
+        self.array = image.array
 
         self.patient_name = self.get_patient_name()
         self.mrn = self.get_mrn()
@@ -68,6 +69,7 @@ class Image(object):
         self.time = self.get_time()
         self.series_uid = self.get_series_uid()
         self.frame_ref = self.get_frame_ref()
+        self.window = self.get_window()
 
         self.filepaths = image.filepaths
         self.sops = image.sops
@@ -78,8 +80,6 @@ class Image(object):
         self.orientation = image.orientation
         self.origin = image.origin
         self.image_matrix = image.image_matrix
-
-        self.array = image.array
 
         self.unverified = image.unverified
         self.base_position = image.base_position
@@ -153,6 +153,18 @@ class Image(object):
             return self.tags[0].FrameOfReferenceUID
         else:
             return '00000.00000'
+
+    def get_window(self):
+        if (0x0028, 0x1050) in self.tags[0] and (0x0028, 0x1051) in self.tags[0]:
+            center = self.tags[0].WindowCenter
+            width = self.tags[0].WindowWidth
+            return [int(center), int(np.round(width / 2))]
+
+        elif self.array is not None:
+            return [np.min(self.array), np.max(self.array)]
+
+        else:
+            return [0, 1]
 
     def get_specific_tag(self, tag):
         if tag in self.tags[0]:
