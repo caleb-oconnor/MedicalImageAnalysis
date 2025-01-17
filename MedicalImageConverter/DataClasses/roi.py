@@ -16,7 +16,7 @@ import numpy as np
 
 
 class Roi(object):
-    def __init__(self, image, name, color, visible, filepaths):
+    def __init__(self, image, name=None, color=None, visible=None, filepaths=None):
         self.image = image
 
         self.name = name
