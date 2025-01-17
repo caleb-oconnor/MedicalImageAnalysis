@@ -35,7 +35,7 @@ def thread_process_dicom(path, stop_before_pixels=False):
     return datasets
 
 
-class DicomReader:
+class DicomReader(object):
     def __init__(self, reader):
         """
         Takes in reader parent, which will be used to add to image list variable.
@@ -49,7 +49,7 @@ class DicomReader:
         self.ds_modality = {key: [] for key in ['CT', 'MR', 'PT', 'US', 'DX', 'MG', 'NM', 'XA', 'CR',
                                                 'RTSTRUCT', 'REG', 'RTDose']}
 
-    def load_dicoms(self, display_time=False):
+    def load(self, display_time=False):
         """
         Reads in the dicom files, separates the images by modality, lasty adds each image to the reader image list
         variable.
@@ -211,6 +211,8 @@ class Read3D(object):
         self.skipped_slice = None
         self.sections = None
         self.rgb = False
+
+        self.modality = self.image_set[0].Modality
 
         self.array = None
         if not self.only_tags:
@@ -432,6 +434,8 @@ class ReadDX(object):
         self.sections = None
         self.rgb = False
 
+        self.modality = self.image_set[0].Modality
+
         self.filepaths = self.image_set[0].filename
         self.sops = self.image_set[0].SOPInstanceUID
         self.plane = self.image_set[0].ViewPosition
@@ -499,6 +503,8 @@ class ReadMG(object):
         self.skipped_slice = None
         self.sections = None
         self.rgb = False
+
+        self.modality = self.image_set[0].Modality
 
         self.filepaths = self.image_set[0].filename
         self.sops = self.image_set[0].SOPInstanceUID
@@ -625,6 +631,8 @@ class ReadUS(object):
         self.skipped_slice = None
         self.sections = None
         self.rgb = False
+
+        self.modality = self.image_set[0].Modality
 
         self.filepaths = self.image_set[0].filename
         self.sops = self.image_set[0].SOPInstanceUID
