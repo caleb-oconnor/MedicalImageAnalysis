@@ -132,12 +132,24 @@ class DicomReader(object):
                                 y = np.abs(correct_orientation[1]) + np.abs(correct_orientation[4])
                                 z = np.abs(correct_orientation[2]) + np.abs(correct_orientation[5])
 
+                                row_direction = correct_orientation[:3]
+                                column_direction = correct_orientation[3:]
+                                slice_direction = np.cross(row_direction, column_direction)
                                 if x < y and x < z:
-                                    slice_idx = np.argsort(position_tags[:, 0])
+                                    if slice_direction[0] > 0:
+                                        slice_idx = np.argsort(position_tags[:, 0])
+                                    else:
+                                        slice_idx = np.argsort(position_tags[:, 0])[::-1]
                                 elif y < x and y < z:
-                                    slice_idx = np.argsort(position_tags[:, 1])
-                                else:
-                                    slice_idx = np.argsort(position_tags[:, 2])
+                                    if slice_direction[1] > 0:
+                                        slice_idx = np.argsort(position_tags[:, 1])
+                                    else:
+                                        slice_idx = np.argsort(position_tags[:, 1])[::-1]
+                                else:                                    
+                                    if slice_direction[2] > 0:
+                                        slice_idx = np.argsort(position_tags[:, 2])
+                                    else:
+                                        slice_idx = np.argsort(position_tags[:, 2])[::-1]
 
                                 self.ds_modality[modality] += [[orient_tags[idx] for idx in slice_idx]]
 
@@ -395,7 +407,7 @@ class Read3D(object):
                 slice_spacing = np.asarray((last - first) / (len(self.image_set) - 1))
 
             self.spacing[2] = slice_spacing
-
+            
         mat = np.identity(4, dtype=np.float32)
         mat[0, :3] = row_direction
         mat[1, :3] = column_direction
