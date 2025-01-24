@@ -153,6 +153,11 @@ class DicomReader(object):
 
                                 self.ds_modality[modality] += [[orient_tags[idx] for idx in slice_idx]]
 
+                elif modality == 'RTSTRUCT':
+                    for image in images_in_modality:
+                        if 'StructureSetROISequence' in image and 'ROIContourSequence' in image:
+                            self.ds_modality[modality] += [image]
+
                 elif modality in ['US', 'DX', 'MG', 'XA', 'CR', 'RTSTRUCT', 'REG', 'RTDose']:
                     for image in images_in_modality:
                         self.ds_modality[modality] += [image]
