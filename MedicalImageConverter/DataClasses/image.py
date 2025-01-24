@@ -316,8 +316,8 @@ class Image(object):
         else:
             sitk_image = sitk.GetImageFromArray(self.array)
 
-        matrix_flat = self.image_matrix[0:3, 0:3].flatten()
-        sitk_image.SetDirection([int(mat) for mat in matrix_flat])
+        matrix_flat = self.image_matrix[0:3, 0:3].flatten(order='F')
+        sitk_image.SetDirection([float(mat) for mat in matrix_flat])
         sitk_image.SetOrigin(self.origin)
         sitk_image.SetSpacing(self.spacing)
 
