@@ -16,7 +16,7 @@ import numpy as np
 
 
 class Poi(object):
-    def __init__(self, image, name=None, color=None, visible=None, filepaths=None):
+    def __init__(self, image, position=None, name=None, color=None, visible=None, filepaths=None):
         self.image = image
 
         self.name = name
@@ -24,5 +24,5 @@ class Poi(object):
         self.color = color
         self.filepaths = filepaths
 
-        self.point_position = None
+        self.point_position = position
         self.point_pixel = None
