@@ -18,6 +18,8 @@ import pandas as pd
 import vtk
 from vtkmodules.util import numpy_support
 
+import SimpleITK as sitk
+
 from .poi import Poi
 from .roi import Roi
 
@@ -76,7 +78,7 @@ class Image(object):
 
         self.plane = image.plane
         self.spacing = image.spacing
-        self.dimensions = image.spacing
+        self.dimensions = image.dimensions
         self.orientation = image.orientation
         self.origin = image.origin
         self.image_matrix = image.image_matrix
@@ -92,13 +94,13 @@ class Image(object):
     def input_rtstruct(self, rtstruct):
         for ii, roi_name in enumerate(rtstruct.roi_names):
             if roi_name not in list(self.rois.keys()):
-                self.rois[roi_name] = Roi(self, roi_name, rtstruct.roi_colors[ii], False, rtstruct.filepaths)
-                self.rois[roi_name].contour_position = rtstruct.contours[ii]
+                self.rois[roi_name] = Roi(self, position=rtstruct.contours[ii], name=roi_name,
+                                          color=rtstruct.roi_colors[ii], visible=False, filepaths=rtstruct.filepaths)
 
         for ii, poi_name in enumerate(rtstruct.poi_names):
             if poi_name not in list(self.pois.keys()):
-                self.pois[poi_name] = Poi(poi_name, rtstruct.poi_colors[ii], False, rtstruct.filepaths)
-                self.pois[poi_name].point_position = rtstruct.points[ii]
+                self.pois[poi_name] = Poi(position=rtstruct.points[ii], name=poi_name,
+                                          color=rtstruct.poi_colors[ii], visible=False, filepaths=rtstruct.filepaths)
 
     def add_roi(self, roi_name=None, color=None, visible=False, path=None, contour=None):
         self.rois[roi_name] = Roi(self, roi_name, color, visible, path)
@@ -307,3 +309,17 @@ class Image(object):
         if os.path.exists(os.path.join(poi_path, 'point_position.npy')):
             self.rois[name].contour_position = list(np.load(os.path.join(poi_path, 'point_position.npy'),
                                                             allow_pickle=True))
+
+    def create_sitk_image(self, empty=False):
+        if empty:
+            sitk_image = sitk.Image([int(dim) for dim in self.dimensions], sitk.sitkUInt8)
+        else:
+            sitk_image = sitk.GetImageFromArray(self.array)
+
+        matrix_flat = self.image_matrix[0:3, 0:3].flatten()
+        sitk_image.SetDirection([int(mat) for mat in matrix_flat])
+        sitk_image.SetOrigin(self.origin)
+        sitk_image.SetSpacing(self.spacing)
+
+        return sitk_image
+    
