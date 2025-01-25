@@ -22,7 +22,7 @@ import vtk
 from vtk.util import numpy_support
 
 
-class ContourToMesh(object):
+class ContourToDiscreteMesh(object):
     def __init__(self, contour_position=None, contour_pixel=None, spacing=None, origin=None, dimensions=None, matrix=None):
         self.contour_position = contour_position
         self.contour_pixel = contour_pixel
