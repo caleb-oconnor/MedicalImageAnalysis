@@ -16,6 +16,8 @@ import numpy as np
 
 import SimpleITK as sitk
 
+from ..conversion import ContourToDiscreteMesh
+
 
 class Roi(object):
     def __init__(self, image, position=None, name=None, color=None, visible=None, filepaths=None):
@@ -35,9 +37,9 @@ class Roi(object):
             
         self.mesh = None
         self.display_mesh = None
-        self.decimate_mesh = None
-        self.mesh_volume = None
-        self.mesh_com = None
+
+        self.volume = None
+        self.com = None
         self.bounds = None
 
     def convert_position_to_pixel(self):
@@ -45,6 +47,15 @@ class Roi(object):
 
         pixel = [[]] * len(self.contour_position)
         for ii, contours in enumerate(self.contour_position):
-            pixel[ii] = [sitk_image.TransformPhysicalPointToContinuousIndex(contour) for contour in contours]
-
+            pixel[ii] = np.asarray([sitk_image.TransformPhysicalPointToContinuousIndex(contour) for contour in contours])
+            
         return pixel
+
+    def create_discrete_mesh(self):
+        meshing = ContourToDiscreteMesh(contour_pixel=self.contour_pixel,
+                                     spacing=self.image.spacing,
+                                     origin=self.image.origin,
+                                     dimensions=self.image.dimensions,
+                                     matrix=self.image.image_matrix)
+        meshing.create_mesh()
+        self.mesh = meshing.mesh
