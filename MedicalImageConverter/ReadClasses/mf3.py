@@ -72,7 +72,7 @@ class ThreeMfReader(object):
             vertices_color[v3] = rgb_color
             triangle_list[0, ii * 4:(ii + 1) * 4] = [3, v1, v2, v3]
 
-        self.reader.meshes += pv.PolyData(np.float64(np.asarray(vertex_list)), triangle_list[0, :].astype(int))
+        self.reader.meshes += [pv.PolyData(np.float64(np.asarray(vertex_list)), triangle_list[0, :].astype(int))]
         self.reader.meshes[-1]['colors'] = np.abs(255-vertices_color)
 
     @staticmethod
