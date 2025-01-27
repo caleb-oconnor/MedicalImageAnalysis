@@ -20,7 +20,7 @@ from ..conversion import ContourToDiscreteMesh
 
 
 class Roi(object):
-    def __init__(self, image, position=None, name=None, color=None, visible=None, filepaths=None):
+    def __init__(self, image, position=None, name=None, color=None, visible=False, filepaths=None):
         self.image = image
 
         self.name = name
