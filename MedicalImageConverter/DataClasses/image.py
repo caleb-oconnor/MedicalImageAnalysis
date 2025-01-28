@@ -104,11 +104,13 @@ class Image(object):
 
     def add_roi(self, roi_name=None, color=None, visible=False, path=None, contour=None):
         self.rois[roi_name] = Roi(self, roi_name, color, visible, path)
-        self.rois[roi_name].contour_position = contour
+        if contour:
+            self.rois[roi_name].contour_position = contour
 
     def add_poi(self, poi_name=None, color=None, visible=False, path=None, point=None):
         self.pois[poi_name] = Poi(self, poi_name, color, visible, path)
-        self.pois[poi_name].point_position = point
+        if point:
+            self.pois[poi_name].point_position = point
 
     def get_patient_name(self):
         if 'PatientName' in self.tags[0]:
