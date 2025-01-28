@@ -320,4 +320,50 @@ class Image(object):
         sitk_image.SetSpacing(self.spacing)
 
         return sitk_image
-    
+
+    def array_slice_plane(self, slice_plane='Axial'):
+        """
+        Axial plane:
+        -	Array order [a, c, s]
+        -	Axial flipped on x-axis, Inferior to Superior
+        -	Coronal, Anterior to Posterior
+        -	Sagittal, Left to Right
+        
+        Coronal plane: 
+        -	Array order [c, a, s]
+        -	Coronal flipped on x-axis, Anterior to Posterior
+        -	Axial flipped on x-axis, Inferior to Superior
+        -	Sagittal transposed flipped on y-axis, Left to Right
+        
+        Sagittal plane:
+        -	Array order [s, a, c]
+        -	Sagittal flipped on x-axis, Left to Right
+        -	Axial transpose, flipped on x-axis, flipped on y-axis, Superior to Inferior
+        -	Coronal transpose, flipped on x-axis, flipped on y-axis, Anterior to Posterior
+
+        """
+        if self.plane == 'Axial':
+            if slice_plane == 'Axial':
+                array = np.flip(self.image.array[self.slice_location[0], :, ], 0)
+            elif slice_plane == 'Sagittal':
+                array = self.image.array[:, self.slice_location[1], :]
+            else:
+                array = self.image.array[:, :, self.slice_location[2]]
+
+        elif self.plane == 'Coronal':
+            if slice_plane == 'Coronal':
+                array = np.flip(self.image.array[self.slice_location[0], :, ], 0)
+            elif slice_plane == 'Axial':
+                array = np.flip(self.image.array[:, self.slice_location[1], :], 0)
+            else:
+                array = np.flip(self.image.array[:, :, self.slice_location[2]].T, 0)
+
+        else:
+            if slice_plane == 'Sagittal':
+                array = np.flip(self.image.array[self.slice_location[0], :, ], 0)
+            elif slice_plane == 'Axial':
+                array = np.flip(np.flip(self.image.array[:, self.slice_location[1], :].T, 0), 1)
+            else:
+                array = np.flip(np.flip(self.image.array[:, :, self.slice_location[2]].T, 0), 1)
+
+        return array
