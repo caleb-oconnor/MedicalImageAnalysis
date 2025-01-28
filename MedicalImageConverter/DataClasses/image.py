@@ -99,7 +99,7 @@ class Image(object):
 
         for ii, poi_name in enumerate(rtstruct.poi_names):
             if poi_name not in list(self.pois.keys()):
-                self.pois[poi_name] = Poi(position=rtstruct.points[ii], name=poi_name,
+                self.pois[poi_name] = Poi(self, position=rtstruct.points[ii], name=poi_name,
                                           color=rtstruct.poi_colors[ii], visible=False, filepaths=rtstruct.filepaths)
 
     def add_roi(self, roi_name=None, color=None, visible=False, path=None, contour=None):
