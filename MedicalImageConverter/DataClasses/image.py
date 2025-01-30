@@ -59,7 +59,7 @@ class Image(object):
         self.sections = None
         self.rgb = False
 
-        self.slice_location = (0, 0, 0)
+        self.slice_location = [0, 0, 0]
 
     def input(self, image):
         self.tags = image.image_set
@@ -78,7 +78,7 @@ class Image(object):
 
         self.plane = image.plane
         self.spacing = image.spacing
-        self.dimensions = image.dimensions
+        self.dimensions = list(self.array.shape)
         self.orientation = image.orientation
         self.origin = image.origin
         self.image_matrix = image.image_matrix
@@ -90,6 +90,8 @@ class Image(object):
         self.rgb = image.rgb
 
         self.modality = image.modality
+
+        self.slice_location = [int(self.dimensions[0] / 2), int(self.dimensions[1] / 2), int(self.dimensions[2] / 2)]
 
     def input_rtstruct(self, rtstruct):
         for ii, roi_name in enumerate(rtstruct.roi_names):
@@ -192,6 +194,33 @@ class Image(object):
             return [t[tag] for t in self.tags]
         else:
             return None
+
+    def get_slice_location(self, plane):
+        if self.plane == 'Axial':
+            if plane == self.plane:
+                location = self.slice_location[0]
+            elif plane == 'Coronal':
+                location = self.slice_location[1]
+            else:
+                location = self.slice_location[2]
+
+        elif self.plane == 'Coronal':
+            if plane == self.plane:
+                location = self.slice_location[0]
+            elif plane == 'Axial':
+                location = self.slice_location[1]
+            else:
+                location = self.slice_location[2]
+
+        else:
+            if plane == self.plane:
+                location = self.slice_location[0]
+            elif plane == 'Axial':
+                location = self.slice_location[1]
+            else:
+                location = self.slice_location[2]
+
+        return location
 
     def save_image(self, path, rois=True, pois=True):
         variable_names = self.__dict__.keys()
@@ -310,7 +339,7 @@ class Image(object):
 
     def create_sitk_image(self, empty=False):
         if empty:
-            sitk_image = sitk.Image([int(dim) for dim in self.dimensions], sitk.sitkUInt8)
+            sitk_image = sitk.Image([int(dim) for dim in reversed(self.dimensions)], sitk.sitkUInt8)
         else:
             sitk_image = sitk.GetImageFromArray(self.array)
 
@@ -344,26 +373,107 @@ class Image(object):
         """
         if self.plane == 'Axial':
             if slice_plane == 'Axial':
-                array = np.flip(self.image.array[self.slice_location[0], :, ], 0)
-            elif slice_plane == 'Sagittal':
-                array = self.image.array[:, self.slice_location[1], :]
+                array = np.flip(self.array[self.slice_location[0], :, ], 0)
+            elif slice_plane == 'Coronal':
+                array = self.array[:, self.slice_location[1], :]
             else:
-                array = self.image.array[:, :, self.slice_location[2]]
+                array = self.array[:, :, self.slice_location[2]]
 
         elif self.plane == 'Coronal':
             if slice_plane == 'Coronal':
-                array = np.flip(self.image.array[self.slice_location[0], :, ], 0)
+                array = np.flip(self.array[self.slice_location[0], :, ], 0)
             elif slice_plane == 'Axial':
-                array = np.flip(self.image.array[:, self.slice_location[1], :], 0)
+                array = np.flip(self.array[:, self.slice_location[1], :], 0)
             else:
-                array = np.flip(self.image.array[:, :, self.slice_location[2]].T, 0)
+                array = np.flip(self.array[:, :, self.slice_location[2]].T, 0)
 
         else:
             if slice_plane == 'Sagittal':
-                array = np.flip(self.image.array[self.slice_location[0], :, ], 0)
+                array = np.flip(self.array[self.slice_location[0], :, ], 0)
             elif slice_plane == 'Axial':
-                array = np.flip(np.flip(self.image.array[:, self.slice_location[1], :].T, 0), 1)
+                array = np.flip(np.flip(self.array[:, self.slice_location[1], :].T, 0), 1)
             else:
-                array = np.flip(np.flip(self.image.array[:, :, self.slice_location[2]].T, 0), 1)
+                array = np.flip(np.flip(self.array[:, :, self.slice_location[2]].T, 0), 1)
 
         return array
+
+    def compute_aspect(self, plane):
+        if self.plane == 'Axial':
+            if plane == self.plane:
+                aspect = np.round(self.spacing[0] / self.spacing[1], 2)
+            elif plane == 'Coronal':
+                aspect = np.round(self.spacing[0] / self.spacing[2], 2)
+            else:
+                aspect = np.round(self.spacing[1] / self.spacing[2], 2)
+
+        elif self.plane == 'Coronal':
+            if plane == self.plane:
+                aspect = np.round(self.spacing[0] / self.spacing[1], 2)
+            elif plane == 'Axial':
+                aspect = np.round(self.spacing[0] / self.spacing[2], 2)
+            else:
+                aspect = np.round(self.spacing[2] / self.spacing[1], 2)
+
+        else:
+            if plane == self.plane:
+                aspect = np.round(self.spacing[0] / self.spacing[1], 2)
+            elif plane == 'Axial':
+                aspect = np.round(self.spacing[2] / self.spacing[0], 2)
+            else:
+                aspect = np.round(self.spacing[2] / self.spacing[1], 2)
+
+        return aspect
+
+    def compute_scroll_max(self, plane):
+        if self.plane == 'Axial':
+            if plane == self.plane:
+                scroll_max = self.dimensions[0] - 1
+            elif plane == 'Coronal':
+                scroll_max = self.dimensions[1] - 1
+            else:
+                scroll_max = self.dimensions[2] - 1
+
+        elif self.plane == 'Coronal':
+            if plane == self.plane:
+                scroll_max = self.dimensions[0] - 1
+            elif plane == 'Axial':
+                scroll_max = self.dimensions[1] - 1
+            else:
+                scroll_max = self.dimensions[2] - 1
+
+        else:
+            if plane == self.plane:
+                scroll_max = self.dimensions[0] - 1
+            elif plane == 'Axial':
+                scroll_max = self.dimensions[1] - 1
+            else:
+                scroll_max = self.dimensions[2] - 1
+
+        return scroll_max
+
+    def update_slice_location(self, location, plane):
+        if self.plane == 'Axial':
+            if plane == self.plane:
+                self.slice_location[0] = location
+            elif plane == 'Coronal':
+                self.slice_location[1] = location
+            else:
+                self.slice_location[2] = location
+
+        elif self.plane == 'Coronal':
+            if plane == self.plane:
+                self.slice_location[0] = location
+            elif plane == 'Axial':
+                self.slice_location[1] = location
+            else:
+                self.slice_location[2] = location
+
+        else:
+            if plane == self.plane:
+                self.slice_location[0] = location
+            elif plane == 'Axial':
+                self.slice_location[1] = location
+            else:
+                self.slice_location[2] = location
+
+        return location
