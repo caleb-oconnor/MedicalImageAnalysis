@@ -35,32 +35,36 @@ class ContourToDiscreteMesh(object):
         self.mesh = None
 
     def create_mesh(self):
-        if self.contour_pixel is not None:
+        if self.contour_pixel is None:
             self.convert_to_pixel_spacing()
 
-        if self.mask is not None:
+        if self.mask is None:
             self.compute_mask()
 
         self.compute_mesh()
 
     def convert_to_pixel_spacing(self):
-        sitk_image = sitk.Image([int(dim) for dim in self.dimensions], sitk.sitkUInt8)
-        matrix_flat = self.image_matrix[0:3, 0:3].flatten(order='F')
-        sitk_image.SetDirection([float(mat) for mat in matrix_flat])
-        sitk_image.SetOrigin(self.origin)
-        sitk_image.SetSpacing(self.spacing)
+        matrix = np.identity(3, dtype=np.float32)
+        matrix[0, :] = self.matrix[0, :] / self.spacing[0]
+        matrix[1, :] = self.matrix[1, :] / self.spacing[1]
+        matrix[2, :] = self.matrix[2, :] / self.spacing[2]
 
-        self.contour_pixel = [[]] * len(self.contour_position)
-        for ii, contours in enumerate(self.contour_position):
-            self.contour_pixel[ii] = [sitk_image.TransformPhysicalPointToContinuousIndex(contour) for contour in contours]
+        conversion_matrix = np.identity(4, dtype=np.float32)
+        conversion_matrix[:3, :3] = matrix
+        conversion_matrix[:3, 3] = np.asarray(self.origin).dot(-matrix.T)
+
+        self.contour_pixel = []
+        for ii, pos in enumerate(position):
+            p_concat = np.concatenate((pos, np.ones((pos.shape[0], 1))), axis=1)
+            self.contour_pixel += [p_concat.dot(conversion_matrix.T)[:, :3]]
 
     def compute_mask(self):
-        slice_check = np.zeros(self.dimensions[2])
-        hold_mask = np.zeros([self.dimensions[2], self.dimensions[0], self.dimensions[1]], dtype=np.uint8)
+        slice_check = np.zeros(self.dimensions[0])
+        hold_mask = np.zeros([self.dimensions[0], self.dimensions[1], self.dimensions[2]], dtype=np.uint8)
         for c in self.contour_pixel:
             contour_stacked = np.vstack((c[:, 0:2], c[0, 0:2]))
             new_contour = np.array([contour_stacked], dtype=np.int32)
-            image = np.zeros([self.dimensions[0], self.dimensions[1]], dtype=np.uint8)
+            image = np.zeros([self.dimensions[1], self.dimensions[2]], dtype=np.uint8)
             cv2.fillPoly(image, new_contour, 1)
 
             slice_num = int(c[0, 2])
@@ -73,11 +77,12 @@ class ContourToDiscreteMesh(object):
 
     def compute_mesh(self):
         label = numpy_support.numpy_to_vtk(num_array=np.asarray(self.mask).ravel(), deep=True, array_type=vtk.VTK_FLOAT)
+
         img_vtk = vtk.vtkImageData()
-        img_vtk.SetDimensions([self.dimensions[1], self.dimensions[0], self.dimensions[2]])
-        img_vtk.SetSpacing([self.spacing[1], self.spacing[0], self.spacing[2]])
+        img_vtk.SetDimensions([self.dimensions[2], self.dimensions[1], self.dimensions[0]])
+        img_vtk.SetSpacing(self.spacing)
         img_vtk.SetOrigin(self.origin)
-        img_vtk.SetDirectionMatrix(self.matrix[0:3, 0:3].reshape(9))
+        img_vtk.SetDirectionMatrix(self.matrix.flatten(order='F'))
         img_vtk.GetPointData().SetScalars(label)
 
         vtk_mesh = vtk.vtkDiscreteMarchingCubes()
