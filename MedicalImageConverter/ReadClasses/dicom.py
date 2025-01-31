@@ -413,11 +413,10 @@ class Read3D(object):
 
             self.spacing[2] = slice_spacing
             
-        mat = np.identity(4, dtype=np.float32)
+        mat = np.identity(3, dtype=np.float32)
         mat[0, :3] = row_direction
         mat[1, :3] = column_direction
         mat[2, :3] = slice_direction
-        mat[0:3, 3] = -self.origin
 
         return mat
 
@@ -622,11 +621,10 @@ class ReadMG(object):
 
             self.spacing[2] = np.asarray((last - first) / (len(self.image_set) - 1))
 
-        mat = np.identity(4, dtype=np.float32)
+        mat = np.identity(3, dtype=np.float32)
         mat[0, :3] = row_direction
         mat[1, :3] = column_direction
         mat[2, :3] = slice_direction
-        mat[0:3, 3] = -self.origin
 
         return mat
 

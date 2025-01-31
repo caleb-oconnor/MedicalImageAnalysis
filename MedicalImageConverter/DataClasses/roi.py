@@ -30,7 +30,7 @@ class Roi(object):
 
         if position is not None:
             self.contour_position = position
-            self.contour_pixel = self.convert_position_to_pixel()
+            self.contour_pixel = self.convert_position_to_pixel(position)
         else:
             self.contour_position = None
             self.contour_pixel = None
@@ -42,20 +42,29 @@ class Roi(object):
         self.com = None
         self.bounds = None
 
-    def convert_position_to_pixel(self):
-        sitk_image = self.image.create_sitk_image(empty=True)
+    def convert_position_to_pixel(self, position=None):
+        matrix = np.identity(3, dtype=np.float32)
+        matrix[0, :] = self.image.image_matrix[0, :] / self.image.spacing[0]
+        matrix[1, :] = self.image.image_matrix[1, :] / self.image.spacing[1]
+        matrix[2, :] = self.image.image_matrix[2, :] / self.image.spacing[2]
 
-        pixel = [[]] * len(self.contour_position)
-        for ii, contours in enumerate(self.contour_position):
-            pixel[ii] = np.asarray([sitk_image.TransformPhysicalPointToContinuousIndex(contour) for contour in contours])
-            
+        conversion_matrix = np.identity(4, dtype=np.float32)
+        conversion_matrix[:3, :3] = matrix
+        conversion_matrix[:3, 3] = np.asarray(self.image.origin).dot(-matrix.T)
+
+        pixel = [] 
+        for ii, pos in enumerate(position):
+            p_concat = np.concatenate((pos, np.ones((pos.shape[0], 1))), axis=1)
+            pixel += [p_concat.dot(conversion_matrix.T)[:, :3]]
+
         return pixel
 
     def create_discrete_mesh(self):
         meshing = ContourToDiscreteMesh(contour_pixel=self.contour_pixel,
-                                     spacing=self.image.spacing,
-                                     origin=self.image.origin,
-                                     dimensions=self.image.dimensions,
-                                     matrix=self.image.image_matrix)
+                                        spacing=self.image.spacing,
+                                        origin=self.image.origin,
+                                        dimensions=self.image.dimensions,
+                                        matrix=self.image.image_matrix)
         meshing.create_mesh()
         self.mesh = meshing.mesh
+        self.display_mesh = copy.deepcopy(meshing.mesh)
