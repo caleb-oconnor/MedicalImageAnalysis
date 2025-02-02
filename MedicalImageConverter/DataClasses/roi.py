@@ -68,3 +68,35 @@ class Roi(object):
         meshing.create_mesh()
         self.mesh = meshing.mesh
         self.display_mesh = copy.deepcopy(meshing.mesh)
+
+    def slice_mesh(self, location=None, plane=None, normal=None):
+        if normal is None:
+            matrix = self.image.display_matrix.T
+            if self.image.plane == 'Axial':
+                if plane == 'Axial':
+                    normal = matrix[:, 2]
+                elif plane == 'Coronal':
+                    normal = matrix[:, 1]
+                else:
+                    normal = matrix[:, 0]
+                    
+            elif self.image.plane == 'Coronal':
+                if plane == 'Axial':
+                    normal = matrix[:, 1]
+                elif plane == 'Coronal':
+                    normal = matrix[:, 2]
+                else:
+                    normal = matrix[:, 0]      
+                    
+            else:
+                if plane == 'Axial':
+                    normal = matrix[:, 1]
+                elif plane == 'Coronal':
+                    normal = matrix[:, 0]
+                else:
+                    normal = matrix[:, 2]
+
+        roi_slice = roi.mesh.slice(normal=normal, origin=location)
+
+        return roi_slice
+    
