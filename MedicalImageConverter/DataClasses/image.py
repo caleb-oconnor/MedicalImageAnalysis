@@ -225,6 +225,18 @@ class Image(object):
 
         return location
 
+    def get_slice_position(self):
+        conversion_matrix = np.identity(4, dtype=np.float32)
+        conversion_matrix[:3, 0] = self.image_matrix[0, :] * self.spacing[0]
+        conversion_matrix[:3, 1] = self.image_matrix[1, :] * self.spacing[1]
+        conversion_matrix[:3, 2] = self.image_matrix[2, :] * self.spacing[2]
+        conversion_matrix[:3, 3] = self.origin
+
+        location = np.asarray([self.slice_location[2], self.slice_location[1], self.slice_location[0], 1])
+        position = location.dot(conversion_matrix.T)[:3]
+
+        return position
+
     def save_image(self, path, rois=True, pois=True):
         variable_names = self.__dict__.keys()
         column_names = [name for name in variable_names if name not in ['rois', 'pois', 'tags', 'array']]
