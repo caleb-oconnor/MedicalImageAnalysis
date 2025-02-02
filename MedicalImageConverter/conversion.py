@@ -67,7 +67,7 @@ class ContourToDiscreteMesh(object):
             image = np.zeros([self.dimensions[1], self.dimensions[2]], dtype=np.uint8)
             cv2.fillPoly(image, new_contour, 1)
 
-            slice_num = int(c[0, 2])
+            slice_num = int(np.round(c[0, 2]))
             if slice_check[slice_num] == 0:
                 hold_mask[slice_num, :, :] = image
                 slice_check[slice_num] = 1
