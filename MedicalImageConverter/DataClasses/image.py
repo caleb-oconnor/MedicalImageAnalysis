@@ -12,6 +12,7 @@ Structure:
 """
 
 import os
+import copy
 import numpy as np
 import pandas as pd
 
@@ -50,6 +51,7 @@ class Image(object):
         self.orientation = None
         self.origin = None
         self.image_matrix = None
+        self.display_matrix = np.identity(4, dtype=np.float32)
         self.window = None
         self.camera_position = None
 
@@ -82,6 +84,7 @@ class Image(object):
         self.orientation = image.orientation
         self.origin = image.origin
         self.image_matrix = image.image_matrix
+        self.display_matrix[:3, :3] = copy.deepcopy(self.image_matrix)
 
         self.unverified = image.unverified
         self.base_position = image.base_position
