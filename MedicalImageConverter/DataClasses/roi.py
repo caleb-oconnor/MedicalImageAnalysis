@@ -42,7 +42,7 @@ class Roi(object):
         self.com = None
         self.bounds = None
 
-    def convert_position_to_pixel(self, position=None, exclude_column=None):
+    def convert_position_to_pixel(self, position=None):
         matrix = np.identity(3, dtype=np.float32)
         matrix[0, :] = self.image.image_matrix[0, :] / self.image.spacing[0]
         matrix[1, :] = self.image.image_matrix[1, :] / self.image.spacing[1]
@@ -56,19 +56,7 @@ class Roi(object):
         for ii, pos in enumerate(position):
             p_concat = np.concatenate((pos, np.ones((pos.shape[0], 1))), axis=1)
             pixel_3_axis = p_concat.dot(conversion_matrix.T)[:, :3]
-            pixel_corrected = np.vstack((pixel_3_axis, pixel_3_axis[0, :]))
-
-            if exclude_column == 2:
-                pixel += [pixel_corrected[:, :2]]
-
-            elif exclude_column == 1:
-                pixel += [np.column_stack((pixel_corrected[:, 0], pixel_corrected[:, 2]))]
-
-            elif exclude_column == 0:
-                pixel += [pixel_corrected[:, 1:]]
-
-            else:
-                pixel += [pixel_3_axis]
+            pixel += [np.vstack((pixel_3_axis, pixel_3_axis[0, :]))]
 
         return pixel
 
@@ -132,12 +120,64 @@ class Roi(object):
                 roi_strip = roi_slice.strip()
                 position = [np.asarray(c.points) for c in roi_strip.cell]
 
-                pixel = self.convert_position_to_pixel(position=position, exclude_column=column_idx)
+                pixel = self.convert_position_to_pixel(position=position)
+                pixel_correct = self.pixel_slice_correction(pixel, column_idx)
 
-                return pixel
+                return pixel_correct
 
             else:
                 return []
 
         else:
             return roi_slice
+
+    def pixel_slice_correction(self, pixels, exclude_column):
+        pixel_corrected = []
+        for pixel in pixels:
+            if exclude_column == 2:
+                pixel_reshape = pixel[:, :2]
+
+                if self.image.plane in 'Axial':
+                    pixel_corrected += [np.asarray([pixel_reshape[:, 0],
+                                                    self.image.dimensions[1] - pixel_reshape[:, 1]]).T]
+
+                elif self.image.plane == 'Coronal':
+                    pixel_corrected += [np.asarray([pixel_reshape[:, 0],
+                                                    self.image.dimensions[1] - pixel_reshape[:, 1]]).T]
+
+                else:
+                    pixel_corrected += [np.asarray([pixel_reshape[:, 0],
+                                                    self.image.dimensions[1] - pixel_reshape[:, 1]]).T]
+
+            elif exclude_column == 1:
+                pixel_reshape = np.column_stack((pixel[:, 0], pixel[:, 2]))
+
+                if self.image.plane == 'Axial':
+                    pixel_corrected += [pixel_reshape]
+
+                elif self.image.plane == 'Coronal':
+                    pixel_corrected += [np.asarray([pixel_reshape[:, 0],
+                                                    self.image.dimensions[0] - pixel_reshape[:, 1]]).T]
+
+                else:
+                    pixel_corrected += [np.asarray([self.image.dimensions[0] - pixel_reshape[:, 1],
+                                                    self.image.dimensions[2] - pixel_reshape[:, 0]]).T]
+
+            elif exclude_column == 0:
+                pixel_reshape = pixel[:, 1:]
+
+                if self.image.plane == 'Axial':
+                    pixel_corrected += [pixel_reshape]
+
+                elif self.image.plane == 'Coronal':
+                    pixel_corrected += [np.asarray([pixel_reshape[:, 1],
+                                                    self.image.dimensions[1] - pixel_reshape[:, 0]]).T]
+
+                else:
+                    pixel_corrected += [np.asarray([self.image.dimensions[0] - pixel_reshape[:, 1],
+                                                    self.image.dimensions[1] - pixel_reshape[:, 0]]).T]
+
+            else:
+                pixel += [pixel_3_axis]
+
+        return pixel_corrected
