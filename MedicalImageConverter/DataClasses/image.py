@@ -63,6 +63,8 @@ class Image(object):
 
         self.slice_location = [0, 0, 0]
 
+        self.rotated_array = None
+
     def input(self, image):
         self.tags = image.image_set
         self.array = image.array
@@ -365,6 +367,28 @@ class Image(object):
 
         return sitk_image
 
+    def create_rotated_sitk_image(self, empty=False):
+        sitk_image = sitk.GetImageFromArray(self.array)
+        matrix_flat = self.image_matrix.flatten(order='F')
+        sitk_image.SetDirection([float(mat) for mat in matrix_flat])
+        sitk_image.SetOrigin(self.origin)
+        sitk_image.SetSpacing(self.spacing)
+
+        transform = sitk.Euler3DTransform()
+        transform.SetRotation(0, 0, 10 * np.pi/180)
+        transform.SetCenter(self.rois['Liver'].mesh.center)
+        transform.SetComputeZYX(True)
+
+        resample_image = sitk.ResampleImageFilter()
+        resample_image.SetOutputDirection(sitk_image.GetDirection())
+        resample_image.SetOutputOrigin(sitk_image.GetOrigin())
+        resample_image.SetTransform(transform)
+        resample_image.SetInterpolator(sitk.sitkLinear)
+        resample_image.Execute(sitk_image)
+
+        # resample_image = sitk.Resample(sitk_image, transform, sitk.sitkLinear, 0.0, sitk_image.GetPixelID())
+        self.rotated_array = sitk.GetArrayFromImage(resample_image)
+
     def array_slice_plane(self, slice_plane='Axial'):
         """
         Axial plane:
@@ -409,6 +433,53 @@ class Image(object):
                 array = np.flip(np.flip(self.array[:, self.slice_location[1], :].T, 0), 1)
             else:
                 array = np.flip(np.flip(self.array[:, :, self.slice_location[2]].T, 0), 1)
+
+        return array
+
+    def array_rotated_slice_plane(self, slice_plane='Axial'):
+        """
+        Axial plane:
+        -	Array order [a, c, s]
+        -	Axial flipped on x-axis, Inferior to Superior
+        -	Coronal, Anterior to Posterior
+        -	Sagittal, Left to Right
+
+        Coronal plane: 
+        -	Array order [c, a, s]
+        -	Coronal flipped on x-axis, Anterior to Posterior
+        -	Axial flipped on x-axis, Inferior to Superior
+        -	Sagittal transposed flipped on y-axis, Left to Right
+
+        Sagittal plane:
+        -	Array order [s, a, c]
+        -	Sagittal flipped on x-axis, Left to Right
+        -	Axial transpose, flipped on x-axis, flipped on y-axis, Superior to Inferior
+        -	Coronal transpose, flipped on x-axis, flipped on y-axis, Anterior to Posterior
+
+        """
+        if self.plane == 'Axial':
+            if slice_plane == 'Axial':
+                array = np.flip(self.rotated_array[self.slice_location[0], :, ], 0)
+            elif slice_plane == 'Coronal':
+                array = self.rotated_array[:, self.slice_location[1], :]
+            else:
+                array = self.rotated_array[:, :, self.slice_location[2]]
+
+        elif self.plane == 'Coronal':
+            if slice_plane == 'Coronal':
+                array = np.flip(self.rotated_array[self.slice_location[0], :, ], 0)
+            elif slice_plane == 'Axial':
+                array = np.flip(self.rotated_array[:, self.slice_location[1], :], 0)
+            else:
+                array = np.flip(self.rotated_array[:, :, self.slice_location[2]].T, 0)
+
+        else:
+            if slice_plane == 'Sagittal':
+                array = np.flip(self.rotated_array[self.slice_location[0], :, ], 0)
+            elif slice_plane == 'Axial':
+                array = np.flip(np.flip(self.rotated_array[:, self.slice_location[1], :].T, 0), 1)
+            else:
+                array = np.flip(np.flip(self.rotated_array[:, :, self.slice_location[2]].T, 0), 1)
 
         return array
 

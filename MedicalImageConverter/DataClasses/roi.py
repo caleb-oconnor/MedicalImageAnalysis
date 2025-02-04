@@ -42,6 +42,8 @@ class Roi(object):
         self.com = None
         self.bounds = None
 
+        self.rotated_mesh = None
+
     def convert_position_to_pixel(self, position=None):
         matrix = np.identity(3, dtype=np.float32)
         matrix[0, :] = self.image.image_matrix[0, :] / self.image.spacing[0]
@@ -181,3 +183,6 @@ class Roi(object):
                 pixel += [pixel_3_axis]
 
         return pixel_corrected
+
+    def mesh_rotation(self):
+        print('roi')
