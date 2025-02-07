@@ -20,6 +20,8 @@ def file_parsar(path, exclude_files=None):
         Dicom
         MHD
         Raw
+        Nifti
+        VTK
         STL
         3mf
         No extension
