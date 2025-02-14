@@ -11,7 +11,7 @@ Structure:
 
 """
 
-import copy
+import vtk
 import numpy as np
 
 import SimpleITK as sitk
@@ -84,36 +84,29 @@ class Roi(object):
                                         matrix=self.image.image_matrix)
         meshing.create_mesh()
         self.mesh = meshing.mesh
-        self.display_mesh = copy.deepcopy(meshing.mesh)
 
-    def slice_mesh(self, location=None, plane=None, normal=None, column_idx=2, return_pixel=False):
+    def create_display_mesh(self):
+        smoother = vtk.vtkWindowedSincPolyDataFilter()
+        smoother.SetInputData(self.mesh)
+        smoother.SetNumberOfIterations(20)
+        smoother.BoundarySmoothingOff()
+        smoother.FeatureEdgeSmoothingOff()
+        smoother.SetFeatureAngle(0.001)
+        smoother.SetPassBand(60)
+        smoother.NonManifoldSmoothingOn()
+        smoother.NormalizeCoordinatesOff()
+        smoother.Update()
+        self.display_mesh = pv.PolyData(smoother.GetOutput())
+
+    def slice_mesh(self, location=None, plane=None, normal=None, return_pixel=False):
         if normal is None:
             matrix = self.image.display_matrix.T
-            if self.image.plane == 'Axial':
-                if plane == 'Axial':
-                    column_idx = 2
-                elif plane == 'Coronal':
-                    column_idx = 1
-                else:
-                    column_idx = 0
-
-            elif self.image.plane == 'Coronal':
-                if plane == 'Axial':
-                    column_idx = 1
-                elif plane == 'Coronal':
-                    column_idx = 2
-                else:
-                    column_idx = 0
-
+            if plane == 'Axial':
+                normal = matrix[:3, 2]
+            elif plane == 'Coronal':
+                normal = matrix[:3, 1]
             else:
-                if plane == 'Axial':
-                    column_idx = 1
-                elif plane == 'Coronal':
-                    column_idx = 0
-                else:
-                    column_idx = 2
-
-            normal = matrix[:3, column_idx]
+                normal = matrix[:3, 0]
 
         roi_slice = self.mesh.slice(normal=normal, origin=location)
 
@@ -123,7 +116,7 @@ class Roi(object):
                 position = [np.asarray(c.points) for c in roi_strip.cell]
 
                 pixel = self.convert_position_to_pixel(position=position)
-                pixel_correct = self.pixel_slice_correction(pixel, column_idx)
+                pixel_correct = self.pixel_slice_correction(pixel)
 
                 return pixel_correct
 
@@ -133,56 +126,21 @@ class Roi(object):
         else:
             return roi_slice
 
-    def pixel_slice_correction(self, pixels, exclude_column):
+    def pixel_slice_correction(self, pixels):
         pixel_corrected = []
         for pixel in pixels:
-            if exclude_column == 2:
-                pixel_reshape = pixel[:, :2]
+            pixel_reshape = pixel[:, :2]
 
-                if self.image.plane in 'Axial':
-                    pixel_corrected += [np.asarray([pixel_reshape[:, 0],
-                                                    self.image.dimensions[1] - pixel_reshape[:, 1]]).T]
+            if self.image.plane in 'Axial':
+                pixel_corrected += [np.asarray([pixel_reshape[:, 0],
+                                                self.image.dimensions[1] - pixel_reshape[:, 1]]).T]
 
-                elif self.image.plane == 'Coronal':
-                    pixel_corrected += [np.asarray([pixel_reshape[:, 0],
-                                                    self.image.dimensions[1] - pixel_reshape[:, 1]]).T]
-
-                else:
-                    pixel_corrected += [np.asarray([pixel_reshape[:, 0],
-                                                    self.image.dimensions[1] - pixel_reshape[:, 1]]).T]
-
-            elif exclude_column == 1:
-                pixel_reshape = np.column_stack((pixel[:, 0], pixel[:, 2]))
-
-                if self.image.plane == 'Axial':
-                    pixel_corrected += [pixel_reshape]
-
-                elif self.image.plane == 'Coronal':
-                    pixel_corrected += [np.asarray([pixel_reshape[:, 0],
-                                                    self.image.dimensions[0] - pixel_reshape[:, 1]]).T]
-
-                else:
-                    pixel_corrected += [np.asarray([self.image.dimensions[0] - pixel_reshape[:, 1],
-                                                    self.image.dimensions[2] - pixel_reshape[:, 0]]).T]
-
-            elif exclude_column == 0:
-                pixel_reshape = pixel[:, 1:]
-
-                if self.image.plane == 'Axial':
-                    pixel_corrected += [pixel_reshape]
-
-                elif self.image.plane == 'Coronal':
-                    pixel_corrected += [np.asarray([pixel_reshape[:, 1],
-                                                    self.image.dimensions[1] - pixel_reshape[:, 0]]).T]
-
-                else:
-                    pixel_corrected += [np.asarray([self.image.dimensions[0] - pixel_reshape[:, 1],
-                                                    self.image.dimensions[1] - pixel_reshape[:, 0]]).T]
+            elif self.image.plane == 'Coronal':
+                pixel_corrected += [np.asarray([pixel_reshape[:, 0],
+                                                self.image.dimensions[1] - pixel_reshape[:, 1]]).T]
 
             else:
-                pixel += [pixel_3_axis]
+                pixel_corrected += [np.asarray([pixel_reshape[:, 0],
+                                                self.image.dimensions[1] - pixel_reshape[:, 1]]).T]
 
         return pixel_corrected
-
-    def mesh_rotation(self):
-        print('roi')
