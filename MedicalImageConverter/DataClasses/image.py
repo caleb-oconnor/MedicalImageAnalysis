@@ -391,175 +391,65 @@ class Image(object):
 
     def array_slice_plane(self, slice_plane='Axial'):
         """
-        Axial plane:
         -	Array order [a, c, s]
         -	Axial flipped on x-axis, Inferior to Superior
         -	Coronal, Anterior to Posterior
         -	Sagittal, Left to Right
-        
-        Coronal plane: 
-        -	Array order [c, a, s]
-        -	Coronal flipped on x-axis, Anterior to Posterior
-        -	Axial flipped on x-axis, Inferior to Superior
-        -	Sagittal transposed flipped on y-axis, Left to Right
-        
-        Sagittal plane:
-        -	Array order [s, a, c]
-        -	Sagittal flipped on x-axis, Left to Right
-        -	Axial transpose, flipped on x-axis, flipped on y-axis, Superior to Inferior
-        -	Coronal transpose, flipped on x-axis, flipped on y-axis, Anterior to Posterior
 
         """
-        if self.plane == 'Axial':
-            if slice_plane == 'Axial':
-                array = np.flip(self.array[self.slice_location[0], :, ], 0)
-            elif slice_plane == 'Coronal':
-                array = self.array[:, self.slice_location[1], :]
-            else:
-                array = self.array[:, :, self.slice_location[2]]
 
-        elif self.plane == 'Coronal':
-            if slice_plane == 'Coronal':
-                array = np.flip(self.array[self.slice_location[0], :, ], 0)
-            elif slice_plane == 'Axial':
-                array = np.flip(self.array[:, self.slice_location[1], :], 0)
-            else:
-                array = np.flip(self.array[:, :, self.slice_location[2]].T, 0)
-
+        if slice_plane == 'Axial':
+            array = np.flip(self.array[self.slice_location[0], :, ], 0)
+        elif slice_plane == 'Coronal':
+            array = self.array[:, self.slice_location[1], :]
         else:
-            if slice_plane == 'Sagittal':
-                array = np.flip(self.array[self.slice_location[0], :, ], 0)
-            elif slice_plane == 'Axial':
-                array = np.flip(np.flip(self.array[:, self.slice_location[1], :].T, 0), 1)
-            else:
-                array = np.flip(np.flip(self.array[:, :, self.slice_location[2]].T, 0), 1)
+            array = self.array[:, :, self.slice_location[2]]
 
         return array
 
     def array_rotated_slice_plane(self, slice_plane='Axial'):
         """
-        Axial plane:
         -	Array order [a, c, s]
         -	Axial flipped on x-axis, Inferior to Superior
         -	Coronal, Anterior to Posterior
         -	Sagittal, Left to Right
 
-        Coronal plane: 
-        -	Array order [c, a, s]
-        -	Coronal flipped on x-axis, Anterior to Posterior
-        -	Axial flipped on x-axis, Inferior to Superior
-        -	Sagittal transposed flipped on y-axis, Left to Right
-
-        Sagittal plane:
-        -	Array order [s, a, c]
-        -	Sagittal flipped on x-axis, Left to Right
-        -	Axial transpose, flipped on x-axis, flipped on y-axis, Superior to Inferior
-        -	Coronal transpose, flipped on x-axis, flipped on y-axis, Anterior to Posterior
-
         """
-        if self.plane == 'Axial':
-            if slice_plane == 'Axial':
-                array = np.flip(self.rotated_array[self.slice_location[0], :, ], 0)
-            elif slice_plane == 'Coronal':
-                array = self.rotated_array[:, self.slice_location[1], :]
-            else:
-                array = self.rotated_array[:, :, self.slice_location[2]]
-
-        elif self.plane == 'Coronal':
-            if slice_plane == 'Coronal':
-                array = np.flip(self.rotated_array[self.slice_location[0], :, ], 0)
-            elif slice_plane == 'Axial':
-                array = np.flip(self.rotated_array[:, self.slice_location[1], :], 0)
-            else:
-                array = np.flip(self.rotated_array[:, :, self.slice_location[2]].T, 0)
-
+        if slice_plane == 'Axial':
+            array = np.flip(self.rotated_array[self.slice_location[0], :, ], 0)
+        elif slice_plane == 'Coronal':
+            array = self.rotated_array[:, self.slice_location[1], :]
         else:
-            if slice_plane == 'Sagittal':
-                array = np.flip(self.rotated_array[self.slice_location[0], :, ], 0)
-            elif slice_plane == 'Axial':
-                array = np.flip(np.flip(self.rotated_array[:, self.slice_location[1], :].T, 0), 1)
-            else:
-                array = np.flip(np.flip(self.rotated_array[:, :, self.slice_location[2]].T, 0), 1)
+            array = self.rotated_array[:, :, self.slice_location[2]]
 
         return array
 
     def compute_aspect(self, plane):
-        if self.plane == 'Axial':
-            if plane == self.plane:
-                aspect = np.round(self.spacing[0] / self.spacing[1], 2)
-            elif plane == 'Coronal':
-                aspect = np.round(self.spacing[0] / self.spacing[2], 2)
-            else:
-                aspect = np.round(self.spacing[1] / self.spacing[2], 2)
-
-        elif self.plane == 'Coronal':
-            if plane == self.plane:
-                aspect = np.round(self.spacing[0] / self.spacing[1], 2)
-            elif plane == 'Axial':
-                aspect = np.round(self.spacing[0] / self.spacing[2], 2)
-            else:
-                aspect = np.round(self.spacing[2] / self.spacing[1], 2)
-
+        if plane == self.plane:
+            aspect = np.round(self.spacing[0] / self.spacing[1], 2)
+        elif plane == 'Coronal':
+            aspect = np.round(self.spacing[0] / self.spacing[2], 2)
         else:
-            if plane == self.plane:
-                aspect = np.round(self.spacing[0] / self.spacing[1], 2)
-            elif plane == 'Axial':
-                aspect = np.round(self.spacing[2] / self.spacing[0], 2)
-            else:
-                aspect = np.round(self.spacing[2] / self.spacing[1], 2)
+            aspect = np.round(self.spacing[1] / self.spacing[2], 2)
 
         return aspect
 
     def compute_scroll_max(self, plane):
-        if self.plane == 'Axial':
-            if plane == self.plane:
-                scroll_max = self.dimensions[0] - 1
-            elif plane == 'Coronal':
-                scroll_max = self.dimensions[1] - 1
-            else:
-                scroll_max = self.dimensions[2] - 1
-
-        elif self.plane == 'Coronal':
-            if plane == self.plane:
-                scroll_max = self.dimensions[0] - 1
-            elif plane == 'Axial':
-                scroll_max = self.dimensions[1] - 1
-            else:
-                scroll_max = self.dimensions[2] - 1
-
+        if plane == self.plane:
+            scroll_max = self.dimensions[0] - 1
+        elif plane == 'Coronal':
+            scroll_max = self.dimensions[1] - 1
         else:
-            if plane == self.plane:
-                scroll_max = self.dimensions[0] - 1
-            elif plane == 'Axial':
-                scroll_max = self.dimensions[1] - 1
-            else:
-                scroll_max = self.dimensions[2] - 1
+            scroll_max = self.dimensions[2] - 1
 
         return scroll_max
 
     def update_slice_location(self, location, plane):
-        if self.plane == 'Axial':
-            if plane == self.plane:
-                self.slice_location[0] = location
-            elif plane == 'Coronal':
-                self.slice_location[1] = location
-            else:
-                self.slice_location[2] = location
-
-        elif self.plane == 'Coronal':
-            if plane == self.plane:
-                self.slice_location[0] = location
-            elif plane == 'Axial':
-                self.slice_location[1] = location
-            else:
-                self.slice_location[2] = location
-
+        if plane == self.plane:
+            self.slice_location[0] = location
+        elif plane == 'Coronal':
+            self.slice_location[1] = location
         else:
-            if plane == self.plane:
-                self.slice_location[0] = location
-            elif plane == 'Axial':
-                self.slice_location[1] = location
-            else:
-                self.slice_location[2] = location
+            self.slice_location[2] = location
 
         return location
