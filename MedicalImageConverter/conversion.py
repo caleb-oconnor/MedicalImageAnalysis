@@ -6,8 +6,6 @@ Author - Caleb O'Connor
 Email - csoconnor@mdanderson.org
 
 Description:
-    Converts a 3D model/s into a mask. The mask can either be an empty array (default) or a binary mask of the model/s.
-    The mask is given a spacing buffer of 5 indexes on each side x, y, z.
 """
 
 import os
@@ -105,14 +103,14 @@ class ContourToMask(object):
         self.mask = None
 
     def create_mask(self):
-        if self.contour_pixel is not None:
+        if self.contour_pixel is None:
             self.convert_to_pixel_spacing()
 
         self.compute_mask()
 
     def convert_to_pixel_spacing(self):
         sitk_image = sitk.Image([int(dim) for dim in self.dimensions], sitk.sitkUInt8)
-        matrix_flat = self.image_matrix[0:3, 0:3].flatten(order='F')
+        matrix_flat = self.matrix[0:3, 0:3].flatten(order='F')
         sitk_image.SetDirection([float(mat) for mat in matrix_flat])
         sitk_image.SetOrigin(self.origin)
         sitk_image.SetSpacing(self.spacing)
@@ -122,15 +120,15 @@ class ContourToMask(object):
             self.contour_pixel[ii] = [sitk_image.TransformPhysicalPointToContinuousIndex(contour) for contour in contours]
 
     def compute_mask(self):
-        slice_check = np.zeros(self.dimensions[2])
-        hold_mask = np.zeros([self.dimensions[2], self.dimensions[0], self.dimensions[1]], dtype=np.uint8)
+        slice_check = np.zeros(self.dimensions[0])
+        hold_mask = np.zeros([self.dimensions[0], self.dimensions[1], self.dimensions[2]], dtype=np.uint8)
         for c in self.contour_pixel:
             contour_stacked = np.vstack((c[:, 0:2], c[0, 0:2]))
             new_contour = np.array([contour_stacked], dtype=np.int32)
-            image = np.zeros([self.dimensions[0], self.dimensions[1]], dtype=np.uint8)
+            image = np.zeros([self.dimensions[1], self.dimensions[2]], dtype=np.uint8)
             cv2.fillPoly(image, new_contour, 1)
 
-            slice_num = int(c[0, 2])
+            slice_num = int(np.round(c[0, 2]))
             if slice_check[slice_num] == 0:
                 hold_mask[slice_num, :, :] = image
                 slice_check[slice_num] = 1
