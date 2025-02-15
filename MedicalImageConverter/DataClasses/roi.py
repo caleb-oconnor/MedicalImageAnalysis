@@ -84,7 +84,7 @@ class Roi(object):
                                         origin=self.image.origin,
                                         dimensions=self.image.dimensions,
                                         matrix=self.image.image_matrix)
-        self.mesh = meshing.create_mesh()
+        self.mesh = meshing.compute_mesh()
 
     def create_display_mesh(self, iterations=20, angle=60, passband=0.001):
         refine = mip.Refinement(self.mesh)

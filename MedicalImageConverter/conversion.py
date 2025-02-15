@@ -32,14 +32,11 @@ class ContourToDiscreteMesh(object):
         self.mask = None
         self.mesh = None
 
-    def create_mesh(self):
         if self.contour_pixel is None:
             self.convert_to_pixel_spacing()
 
         if self.mask is None:
             self.compute_mask()
-
-        self.compute_mesh()
 
     def convert_to_pixel_spacing(self):
         matrix = np.identity(3, dtype=np.float32)
