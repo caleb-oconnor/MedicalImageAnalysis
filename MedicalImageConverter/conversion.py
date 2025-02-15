@@ -88,7 +88,7 @@ class ContourToDiscreteMesh(object):
         vtk_mesh.GenerateValues(1, 1, 1)
         vtk_mesh.Update()
 
-        self.mesh = pv.PolyData(vtk_mesh.GetOutput())
+        return pv.PolyData(vtk_mesh.GetOutput())
 
 
 class ContourToMask(object):
