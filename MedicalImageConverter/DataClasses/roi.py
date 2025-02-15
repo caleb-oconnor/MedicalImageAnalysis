@@ -16,6 +16,8 @@ import numpy as np
 
 import SimpleITK as sitk
 
+import MedicalImageProcessing as mip
+
 from ..conversion import ContourToDiscreteMesh
 
 
@@ -82,23 +84,42 @@ class Roi(object):
                                         origin=self.image.origin,
                                         dimensions=self.image.dimensions,
                                         matrix=self.image.image_matrix)
-        meshing.create_mesh()
-        self.mesh = meshing.mesh
+        self.mesh = meshing.create_mesh()
 
-    def create_display_mesh(self):
-        smoother = vtk.vtkWindowedSincPolyDataFilter()
-        smoother.SetInputData(self.mesh)
-        smoother.SetNumberOfIterations(20)
-        smoother.BoundarySmoothingOff()
-        smoother.FeatureEdgeSmoothingOff()
-        smoother.SetFeatureAngle(0.001)
-        smoother.SetPassBand(60)
-        smoother.NonManifoldSmoothingOn()
-        smoother.NormalizeCoordinatesOff()
-        smoother.Update()
-        self.display_mesh = pv.PolyData(smoother.GetOutput())
+    def create_display_mesh(self, iterations=20, angle=60, passband=0.001):
+        refine = mip.Refinement(self.mesh)
+        self.display_mesh = refine.smooth(iterations=iterations, angle=angle, passband=passband)
 
-    def slice_mesh(self, location=None, plane=None, normal=None, return_pixel=False):
+    def create_decimate_mesh(self, percent=None, display=True):
+        if display:
+            refine = mip.Refinement(self.display_mesh)
+        else:
+            refine = mip.Refinement(self.mesh)
+            
+        return refine.decimate(percent=percent)
+
+    def create_cluster_mesh(self, points=None, display=True):
+        if display:
+            refine = mip.Refinement(self.display_mesh)
+        else:
+            refine = mip.Refinement(self.mesh)
+
+        return refine.cluster(points=points)
+
+    def compute_contour(self, slice_location):
+        roi_z = [c[0, 2] for c in self.contour_pixel]
+        keep_idx = np.argwhere(np.asarray(roi_z) == slice_location)
+
+        contour_list = []
+        if len(keep_idx) > 0:
+            for ii, idx in enumerate(keep_idx):
+                contour_corrected = np.vstack((self.contour_pixel[idx[0]][:, 0:2], self.contour_pixel[idx[0]][0, 0:2]))
+                contour_corrected[:, 1] = self.image.spacing[1] - contour_corrected[:, 1]
+                contour_list.append(contour_corrected)
+
+        return contour_list
+
+    def compute_mesh_slice(self, display=True, location=None, plane=None, normal=None, return_pixel=False):
         if normal is None:
             matrix = self.image.display_matrix.T
             if plane == 'Axial':
@@ -108,7 +129,10 @@ class Roi(object):
             else:
                 normal = matrix[:3, 0]
 
-        roi_slice = self.mesh.slice(normal=normal, origin=location)
+        if display:
+            roi_slice = self.display_mesh.slice(normal=normal, origin=location)
+        else:
+            roi_slice = self.mesh.slice(normal=normal, origin=location)
 
         if return_pixel:
             if roi_slice.number_of_points > 0:
