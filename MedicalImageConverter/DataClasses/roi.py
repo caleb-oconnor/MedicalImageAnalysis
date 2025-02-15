@@ -107,14 +107,14 @@ class Roi(object):
         return refine.cluster(points=points)
 
     def compute_contour(self, slice_location):
-        roi_z = [c[0, 2] for c in self.contour_pixel]
+        roi_z = [np.round(c[0, 2]).astype(int) for c in self.contour_pixel]
         keep_idx = np.argwhere(np.asarray(roi_z) == slice_location)
 
         contour_list = []
         if len(keep_idx) > 0:
             for ii, idx in enumerate(keep_idx):
                 contour_corrected = np.vstack((self.contour_pixel[idx[0]][:, 0:2], self.contour_pixel[idx[0]][0, 0:2]))
-                contour_corrected[:, 1] = self.image.spacing[1] - contour_corrected[:, 1]
+                contour_corrected[:, 1] = self.image.dimensions[1] - contour_corrected[:, 1]
                 contour_list.append(contour_corrected)
 
         return contour_list
@@ -160,11 +160,9 @@ class Roi(object):
                                                 self.image.dimensions[1] - pixel_reshape[:, 1]]).T]
 
             elif self.image.plane == 'Coronal':
-                pixel_corrected += [np.asarray([pixel_reshape[:, 0],
-                                                self.image.dimensions[1] - pixel_reshape[:, 1]]).T]
+                pixel_corrected += [pixel_reshape]
 
             else:
-                pixel_corrected += [np.asarray([pixel_reshape[:, 0],
-                                                self.image.dimensions[1] - pixel_reshape[:, 1]]).T]
+                pixel_corrected += [pixel_reshape]
 
         return pixel_corrected
