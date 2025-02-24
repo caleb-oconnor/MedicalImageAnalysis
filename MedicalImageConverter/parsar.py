@@ -14,7 +14,7 @@ Description:
 import os
 
 
-def file_parsar(path, exclude_files=None):
+def file_parsar(path=None, file_list=None, exclude_files=None):
     """
     Walks through all the subfolders and checks each file extensions. Sorts them into 6 different options:
         Dicom
@@ -28,6 +28,8 @@ def file_parsar(path, exclude_files=None):
 
     :param path: single folder path
     :type path: string path
+    :param file_list: list of filepaths
+    :type file_list: list
     :param exclude_files: list of filepaths
     :type exclude_files: list
     :return: dictionary of into files sorted by extensions
@@ -46,38 +48,41 @@ def file_parsar(path, exclude_files=None):
     if not exclude_files:
         exclude_files = []
 
-    for root, dirs, files in os.walk(path):
-        if files:
-            for name in files:
-                filepath = os.path.join(root, name)
+    if file_list is None:
+        file_list = []
+        for root, dirs, files in os.walk(path):
+            if files:
+                for name in files:
+                    file_list += [os.path.join(root, name)]
 
-                if filepath not in exclude_files:
-                    filename, file_extension = os.path.splitext(filepath)
+    for filepath in file_list:
+        if filepath not in exclude_files:
+            filename, file_extension = os.path.splitext(filepath)
 
-                    if file_extension == '.dcm':
-                        dicom_files.append(filepath)
+            if file_extension == '.dcm':
+                dicom_files.append(filepath)
 
-                    elif file_extension == '.mhd':
-                        mhd_files.append(filepath)
+            elif file_extension == '.mhd':
+                mhd_files.append(filepath)
 
-                    elif file_extension == '.raw':
-                        raw_files.append(filepath)
+            elif file_extension == '.raw':
+                raw_files.append(filepath)
 
-                    elif file_extension == '.gz':
-                        if filepath[-6:] == 'nii.gz':
-                            nifti_files.append(filepath)
+            elif file_extension == '.gz':
+                if filepath[-6:] == 'nii.gz':
+                    nifti_files.append(filepath)
 
-                    elif file_extension == '.stl':
-                        stl_files.append(filepath)
+            elif file_extension == '.stl':
+                stl_files.append(filepath)
 
-                    elif file_extension == '.vtk':
-                        vtk_files.append(filepath)
+            elif file_extension == '.vtk':
+                vtk_files.append(filepath)
 
-                    elif file_extension == '.3mf':
-                        mf3_files.append(filepath)
+            elif file_extension == '.3mf':
+                mf3_files.append(filepath)
 
-                    elif file_extension == '':
-                        no_file_extension.append(filepath)
+            elif file_extension == '':
+                no_file_extension.append(filepath)
 
     file_dictionary = {'Dicom': dicom_files,
                        'MHD': mhd_files,
