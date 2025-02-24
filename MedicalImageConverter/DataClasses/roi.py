@@ -48,9 +48,9 @@ class Roi(object):
 
     def convert_position_to_pixel(self, position=None):
         matrix = np.identity(3, dtype=np.float32)
-        matrix[0, :] = self.image.image_matrix[0, :] / self.image.spacing[0]
-        matrix[1, :] = self.image.image_matrix[1, :] / self.image.spacing[1]
-        matrix[2, :] = self.image.image_matrix[2, :] / self.image.spacing[2]
+        matrix[0, :] = self.image.matrix[0, :] / self.image.spacing[0]
+        matrix[1, :] = self.image.matrix[1, :] / self.image.spacing[1]
+        matrix[2, :] = self.image.matrix[2, :] / self.image.spacing[2]
 
         conversion_matrix = np.identity(4, dtype=np.float32)
         conversion_matrix[:3, :3] = matrix
@@ -66,9 +66,9 @@ class Roi(object):
 
     def convert_pixel_to_position(self, pixel=None):
         conversion_matrix = np.identity(4, dtype=np.float32)
-        conversion_matrix[0, :3] = self.image.image_matrix[0, :] * self.image.spacing[0]
-        conversion_matrix[1, :3] = self.image.image_matrix[1, :] * self.image.spacing[1]
-        conversion_matrix[2, :3] = self.image.image_matrix[2, :] * self.image.spacing[2]
+        conversion_matrix[0, :3] = self.image.matrix[0, :] * self.image.spacing[0]
+        conversion_matrix[1, :3] = self.image.matrix[1, :] * self.image.spacing[1]
+        conversion_matrix[2, :3] = self.image.matrix[2, :] * self.image.spacing[2]
         conversion_matrix[:3, 3] = self.image.origin
 
         position = []
@@ -83,8 +83,11 @@ class Roi(object):
                                         spacing=self.image.spacing,
                                         origin=self.image.origin,
                                         dimensions=self.image.dimensions,
-                                        matrix=self.image.image_matrix)
+                                        matrix=self.image.matrix)
         self.mesh = meshing.compute_mesh()
+        self.volume = self.mesh.volume
+        self.com = self.mesh.center
+        self.bounds = self.mesh.bounds
 
     def create_display_mesh(self, iterations=20, angle=60, passband=0.001):
         refine = mip.Refinement(self.mesh)
@@ -107,15 +110,16 @@ class Roi(object):
         return refine.cluster(points=points)
 
     def compute_contour(self, slice_location):
-        roi_z = [np.round(c[0, 2]).astype(int) for c in self.contour_pixel]
-        keep_idx = np.argwhere(np.asarray(roi_z) == slice_location)
-
         contour_list = []
-        if len(keep_idx) > 0:
-            for ii, idx in enumerate(keep_idx):
-                contour_corrected = np.vstack((self.contour_pixel[idx[0]][:, 0:2], self.contour_pixel[idx[0]][0, 0:2]))
-                contour_corrected[:, 1] = self.image.dimensions[1] - contour_corrected[:, 1]
-                contour_list.append(contour_corrected)
+        if self.contour_pixel is not None:
+            roi_z = [np.round(c[0, 2]).astype(int) for c in self.contour_pixel]
+            keep_idx = np.argwhere(np.asarray(roi_z) == slice_location)
+
+            if len(keep_idx) > 0:
+                for ii, idx in enumerate(keep_idx):
+                    contour_corrected = np.vstack((self.contour_pixel[idx[0]][:, 0:2], self.contour_pixel[idx[0]][0, 0:2]))
+                    contour_corrected[:, 1] = self.image.dimensions[1] - contour_corrected[:, 1]
+                    contour_list.append(contour_corrected)
 
         return contour_list
 
@@ -140,7 +144,7 @@ class Roi(object):
                 position = [np.asarray(c.points) for c in roi_strip.cell]
 
                 pixel = self.convert_position_to_pixel(position=position)
-                pixel_correct = self.pixel_slice_correction(pixel)
+                pixel_correct = self.pixel_slice_correction(pixel, plane)
 
                 return pixel_correct
 
@@ -150,19 +154,21 @@ class Roi(object):
         else:
             return roi_slice
 
-    def pixel_slice_correction(self, pixels):
+    def pixel_slice_correction(self, pixels, plane):
         pixel_corrected = []
         for pixel in pixels:
-            pixel_reshape = pixel[:, :2]
 
-            if self.image.plane in 'Axial':
+            if plane in 'Axial':
+                pixel_reshape = pixel[:, :2]
                 pixel_corrected += [np.asarray([pixel_reshape[:, 0],
                                                 self.image.dimensions[1] - pixel_reshape[:, 1]]).T]
 
-            elif self.image.plane == 'Coronal':
+            elif plane == 'Coronal':
+                pixel_reshape = np.column_stack((pixel[:, 0], pixel[:, 2]))
                 pixel_corrected += [pixel_reshape]
 
             else:
+                pixel_reshape = pixel[:, 1:]
                 pixel_corrected += [pixel_reshape]
 
         return pixel_corrected
