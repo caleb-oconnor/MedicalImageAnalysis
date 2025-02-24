@@ -6,6 +6,9 @@ import numpy as np
 import pydicom as dicom
 from pydicom.uid import generate_uid, UID, ExplicitVRLittleEndian
 
+from .DataClasses.image import Image
+from .DataClasses.roi import Roi
+
 
 class CreateDicomImage(object):
     def __init__(self, output_dir, data, study=None, series=None, frame=None, origin=None, spacing=None,
@@ -104,3 +107,59 @@ class CreateDicomImage(object):
 
             export_file = os.path.join(self.output_dir, str(ii) + '.dcm')
             ds.save_as(export_file, write_like_original=False)
+
+
+class CreateImageFromMask(Image):
+    def __init__(self, array, origin, spacing):
+        super(Image, self).__init__()
+        self.rois = {}
+        self.pois = {}
+        
+        self.tags = None
+        self.array = array
+        self.spacing = spacing
+        self.origin = origin
+
+        self.image_name = None
+        self.patient_name = None
+        self.mrn = None
+
+        now = datetime.datetime.now()
+        self.date = str(now.year) + str(now.month) + str(now.day)
+        if len(str(now.second)) == 1:
+            self.time = str(now.hour) + '0' + str(now.second) + '00'
+        else:
+            self.time = str(now.hour) + str(now.second) + '00'
+        self.series_uid = generate_uid()
+        self.frame_ref = generate_uid()
+        self.window = [0, 1]
+        self.modality = 'CT'
+
+        self.filepaths = None
+
+        self.plane = 'Axial'
+        self.dimensions = array.shape
+        self.orientation = [1, 0, 0, 0, 1, 0]
+        self.matrix = np.identity(3, dtype=np.float32)
+        self.display_matrix = np.identity(4, dtype=np.float32)
+
+        self.camera_position = None
+        self.unverified = None
+        self.skipped_slice = None
+        self.sections = None
+        self.rgb = False
+
+        self.sops = self.sops = [generate_uid() for ii in range(self.dimensions[0])]
+        self.slice_location = [int(self.dimensions[0] / 2), int(self.dimensions[1] / 2), int(self.dimensions[2] / 2)]
+
+        self.rotated_array = None
+
+    def add_mesh_roi(self, mesh, roi_name, decimate_points=50000):
+        self.rois[roi_name] = Roi(self, name=roi_name, color=[0, 0, 255])
+        self.rois[roi_name].mesh = mesh
+        self.rois[roi_name].display_mesh = mesh.decimate_pro(1 - (decimate_points / len(mesh.points)))
+        
+        self.rois[roi_name].volume = mesh.volume
+        self.rois[roi_name].com = mesh.center
+        self.rois[roi_name].bounds = mesh.bounds
+        
