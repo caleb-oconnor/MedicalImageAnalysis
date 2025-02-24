@@ -13,13 +13,13 @@ Structure:
 
 import os
 import copy
+
 import numpy as np
 import pandas as pd
+import SimpleITK as sitk
 
 import vtk
 from vtkmodules.util import numpy_support
-
-import SimpleITK as sitk
 
 from .poi import Poi
 from .roi import Roi
@@ -50,13 +50,12 @@ class Image(object):
         self.dimensions = None
         self.orientation = None
         self.origin = None
-        self.image_matrix = None
+        self.matrix = None
         self.display_matrix = np.identity(4, dtype=np.float32)
         self.window = None
         self.camera_position = None
 
         self.unverified = None
-        self.base_position = None
         self.skipped_slice = None
         self.sections = None
         self.rgb = False
@@ -85,11 +84,10 @@ class Image(object):
         self.dimensions = list(self.array.shape)
         self.orientation = image.orientation
         self.origin = image.origin
-        self.image_matrix = image.image_matrix
-        self.display_matrix[:3, :3] = copy.deepcopy(self.image_matrix)
+        self.matrix = image.image_matrix
+        self.display_matrix[:3, :3] = copy.deepcopy(self.matrix)
 
         self.unverified = image.unverified
-        self.base_position = image.base_position
         self.skipped_slice = image.skipped_slice
         self.sections = image.sections
         self.rgb = image.rgb
@@ -229,9 +227,9 @@ class Image(object):
 
     def get_slice_position(self):
         conversion_matrix = np.identity(4, dtype=np.float32)
-        conversion_matrix[:3, 0] = self.image_matrix[0, :] * self.spacing[0]
-        conversion_matrix[:3, 1] = self.image_matrix[1, :] * self.spacing[1]
-        conversion_matrix[:3, 2] = self.image_matrix[2, :] * self.spacing[2]
+        conversion_matrix[:3, 0] = self.matrix[0, :] * self.spacing[0]
+        conversion_matrix[:3, 1] = self.matrix[1, :] * self.spacing[1]
+        conversion_matrix[:3, 2] = self.matrix[2, :] * self.spacing[2]
         conversion_matrix[:3, 3] = self.origin
 
         location = np.asarray([self.slice_location[2], self.slice_location[1], self.slice_location[0], 1])
@@ -360,7 +358,7 @@ class Image(object):
         else:
             sitk_image = sitk.GetImageFromArray(self.array)
 
-        matrix_flat = self.image_matrix.flatten(order='F')
+        matrix_flat = self.matrix.flatten(order='F')
         sitk_image.SetDirection([float(mat) for mat in matrix_flat])
         sitk_image.SetOrigin(self.origin)
         sitk_image.SetSpacing(self.spacing)
@@ -369,7 +367,7 @@ class Image(object):
 
     def create_rotated_sitk_image(self, empty=False):
         sitk_image = sitk.GetImageFromArray(self.array)
-        matrix_flat = self.image_matrix.flatten(order='F')
+        matrix_flat = self.matrix.flatten(order='F')
         sitk_image.SetDirection([float(mat) for mat in matrix_flat])
         sitk_image.SetOrigin(self.origin)
         sitk_image.SetSpacing(self.spacing)
@@ -443,6 +441,71 @@ class Image(object):
             scroll_max = self.dimensions[2] - 1
 
         return scroll_max
+    
+    def compute_off_axis_slice_plane(self, angles, plane, location):
+        conversion_matrix = np.identity(4, dtype=np.float32)
+        conversion_matrix[:3, 0] = self.matrix[0, :] * self.spacing[0]
+        conversion_matrix[:3, 1] = self.matrix[1, :] * self.spacing[1]
+        conversion_matrix[:3, 2] = self.matrix[2, :] * self.spacing[2]
+        conversion_matrix[:3, 3] = self.origin
+
+        rotation_position = np.asarray([150, 100, location, 1]).dot(conversion_matrix.T)[:3]
+        rotation = [40 * np.pi / 180, 25 * np.pi / 180, 30 * np.pi / 180]
+        transform = sitk.Euler3DTransform()
+        transform.SetRotation(rotation[0], rotation[1], rotation[2])
+        transform.SetCenter(rotation_position)
+        transform.SetComputeZYX(True)
+        new_matrix = np.asarray(transform.GetMatrix()).reshape(3, 3)
+
+        rotation_position = np.asarray([115, 165, 50, 1]).dot(conversion_matrix.T)[:3]
+        if plane == 'Axial':
+            square = [np.asarray([-self.dimensions[2], -self.dimensions[1], location, 1]).dot(conversion_matrix.T)[:3],
+                      np.asarray([-self.dimensions[2], self.dimensions[1], location, 1]).dot(conversion_matrix.T)[:3],
+                      np.asarray([self.dimensions[2], -self.dimensions[1], location, 1]).dot(conversion_matrix.T)[:3],
+                      np.asarray([self.dimensions[2], self.dimensions[1], location, 1]).dot(conversion_matrix.T)[:3]]
+
+            square_rotated = [transform.TransformPoint(square[0]),
+                              transform.TransformPoint(square[1]),
+                              transform.TransformPoint(square[2]),
+                              transform.TransformPoint(square[3])]
+
+            edge1 = np.linspace(square_rotated[0], square_rotated[1], 1024)
+            edge2 = np.linspace(square_rotated[1], square_rotated[2], 1024)
+            edge3 = np.linspace(square_rotated[2], square_rotated[3], 1024)
+            edge4 = np.linspace(square_rotated[3], square_rotated[0], 1024)
+
+        if plane == 'Axial':
+            new_spacing = self.spacing * new_matrix[:, 2]
+        elif plane == 'Coronal':
+            new_spacing = self.spacing * new_matrix[:, 1]
+        else:
+            new_spacing = self.spacing * new_matrix[:, 0]
+
+        grid = pv.Cube()
+        grid.points = np.asarray(cube_edges)
+        grid_slice = grid.slice(normal=new_matrix[:, 2], origin=rotation_position)
+        points = np.asarray(grid_slice.points)
+        point_line = np.asarray(grid_slice.lines).reshape(int(len(grid_slice.lines) / 3), 3)[:, 1:]
+        point_line_sort = point_line[np.argsort(point_line[:, 0])]
+
+        angle_assistance = []
+        for p in point_line_sort:
+            p1 = points[p[0]]
+            p2 = points[p[1]]
+            p_idx = point_line_sort[p[1]][1]
+            p3 = points[p_idx]
+
+            v1 = np.array(p1) - np.array(p2)
+            v2 = np.array(p3) - np.array(p2)
+            magnitude_v1 = np.linalg.norm(v1)
+            magnitude_v2 = np.linalg.norm(v2)
+            cos_theta = np.dot(v1, v2) / (magnitude_v1 * magnitude_v2)
+            angle_rad = np.arccos(np.clip(cos_theta, -1.0, 1.0))
+            angle_deg = np.degrees(angle_rad)
+
+            dist_1 = np.linalg.norm(p1 - p2)
+            dist_2 = np.linalg.norm(p3 - p2)
+            angle_assistance += [[np.round(dist_1, 2), np.round(dist_2, 2), np.abs(90 - angle_deg)]]
 
     def update_slice_location(self, location, plane):
         if plane == self.plane:
