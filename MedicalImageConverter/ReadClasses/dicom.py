@@ -115,14 +115,15 @@ class DicomReader(object):
 
                         if 'ImageOrientationPatient' in image_tags[0] and 'ImagePositionPatient' in image_tags[0]:
                             orientations = np.asarray([img['ImageOrientationPatient'].value for img in image_tags])
-                            unique_orientations = np.unique(orientations, axis=0)
+                            _, indices = np.unique(np.round(orientations, 4), axis=0, return_index=True)
+                            unique_orientations = [orientations[ind] for ind in indices]
                             for orient in unique_orientations:
-                                orient_idx = np.where((orientations[:, 0] == orient[0]) &
-                                                      (orientations[:, 1] == orient[1]) &
-                                                      (orientations[:, 2] == orient[2]) &
-                                                      (orientations[:, 3] == orient[3]) &
-                                                      (orientations[:, 4] == orient[4]) &
-                                                      (orientations[:, 5] == orient[5]))
+                                orient_idx = np.where((np.round(orientations[:, 0]) == np.round(orient[0])) &
+                                                      (np.round(orientations[:, 1]) == np.round(orient[1])) &
+                                                      (np.round(orientations[:, 2]) == np.round(orient[2])) &
+                                                      (np.round(orientations[:, 3]) == np.round(orient[3])) &
+                                                      (np.round(orientations[:, 4]) == np.round(orient[4])) &
+                                                      (np.round(orientations[:, 5]) == np.round(orient[5])))
 
                                 orient_tags = [image_tags[idx] for idx in orient_idx[0]]
                                 correct_orientation = orient_tags[0]['ImageOrientationPatient'].value
@@ -250,6 +251,7 @@ class Read3D(object):
         :return:
         :rtype:
         """
+
         image_slices = []
         for _slice in self.image_set:
             if (0x0028, 0x1052) in _slice:
@@ -267,10 +269,6 @@ class Read3D(object):
             del _slice.PixelData
 
         self.array = np.asarray(image_slices)
-        if len(self.array.shape) > 3:
-            return self.array[0]
-        else:
-            return self.array
 
     def _compute_plane(self):
         """
