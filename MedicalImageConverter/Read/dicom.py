@@ -23,7 +23,7 @@ import pandas as pd
 import pydicom as dicom
 from pydicom.uid import generate_uid
 
-from ..DataClasses import Image
+from ..Data import Image
 
 
 def thread_process_dicom(path, stop_before_pixels=False):

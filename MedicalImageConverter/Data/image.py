@@ -374,20 +374,12 @@ class Image(object):
         self.rotated_array = sitk.GetArrayFromImage(resample_image)
 
     def array_slice_plane(self, slice_plane='Axial'):
-        """
-        -	Array order [a, c, s]
-        -	Axial flipped on x-axis, Inferior to Superior
-        -	Coronal, Anterior to Posterior
-        -	Sagittal, Left to Right
-
-        """
-
         if slice_plane == 'Axial':
-            array = np.flip(self.array[self.slice_location[0], :, ], 0)
+            array = np.flip(self.array[:, :, self.slice_location[2]], 0)
         elif slice_plane == 'Coronal':
             array = self.array[:, self.slice_location[1], :]
         else:
-            array = self.array[:, :, self.slice_location[2]]
+            array = self.array[self.slice_location[0], :, :]
 
         return array
 
