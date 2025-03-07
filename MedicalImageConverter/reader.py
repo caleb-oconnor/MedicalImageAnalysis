@@ -72,7 +72,8 @@ class Reader:
             self.only_modality = ['CT', 'MR', 'PT', 'US', 'DX', 'MG', 'NM', 'XA', 'CR', 'RTSTRUCT', 'REG', 'RTDose']
 
         self.files = None
-        self.file_parsar(folder_path=folder_path, file_list=file_list, exclude_files=self.exclude_files)
+        if folder_path is not None or file_list is not N0ne:
+            self.file_parsar(folder_path=folder_path, file_list=file_list, exclude_files=self.exclude_files)
 
         self.images = []
         self.rigid = []
@@ -179,16 +180,22 @@ class Reader:
         nifti_reader = NiftiReader(self)
         nifti_reader.load()
 
-    def read_stl(self, create_image=False, match_image=None):
+    def read_stl(self, files=None, create_image=False, match_image=None):
         stl_reader = StlReader(self)
+        if files is not None:
+            stl_reader.input_files(files)
         stl_reader.load()
 
-    def read_vtk(self, create_image=False, match_image=None):
+    def read_vtk(self, files=None, create_image=False, match_image=None):
         vtk_reader = VtkReader(self)
+        if files is not None:
+            vtk_reader.input_files(files)
         vtk_reader.load()
 
-    def read_3mf(self, create_image=False, match_image=None):
+    def read_3mf(self, files=None, create_image=False, match_image=None):
         mf3_reader = ThreeMfReader(self)
+        if files is not None:
+            mf3_reader.input_files(files)
         mf3_reader.load()
 
 
