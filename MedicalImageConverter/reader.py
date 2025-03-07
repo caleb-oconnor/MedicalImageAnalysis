@@ -26,7 +26,7 @@ Functions:
 
 import os
 
-from .ReadClasses import DicomReader, MhdReader, NiftiReader, StlReader, VtkReader, ThreeMfReader
+from .Read import DicomReader, MhdReader, NiftiReader, StlReader, VtkReader, ThreeMfReader
 
 
 class Reader:
