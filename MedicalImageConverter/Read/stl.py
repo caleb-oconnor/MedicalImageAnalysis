@@ -25,6 +25,9 @@ class StlReader(object):
     def __init__(self, reader):
         self.reader = reader
 
+    def input_files(self, files):
+        self.reader.files['Stl'] = files
+
     def load(self):
         for file_path in self.reader.files['Stl']:
             self.read(file_path)
