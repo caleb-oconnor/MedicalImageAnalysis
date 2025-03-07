@@ -358,7 +358,7 @@ class Read3D(object):
             self.base_position = self.image_set[0]['PatientPosition'].value
 
             if self.base_position in ['HFDR', 'FFDR']:
-                if self.only_tags:
+                if not self.only_tags:
                     self.array = np.rot90(self.array, 3, (1, 2))
 
                 origin[0] = np.double(origin[0]) - self.spacing[0] * (self.dimensions[0] - 1)
@@ -366,7 +366,7 @@ class Read3D(object):
                                     self.orientation[0], self.orientation[1], self.orientation[2]]
 
             elif self.base_position in ['HFP', 'FFP']:
-                if self.only_tags:
+                if not self.only_tags:
                     self.array = np.rot90(self.array, 2, (1, 2))
 
                 origin[0] = np.double(origin[0]) - self.spacing[0] * (self.dimensions[0] - 1)
@@ -374,7 +374,7 @@ class Read3D(object):
                 self.orientation = -np.asarray(self.orientation)
 
             elif self.base_position in ['HFDL', 'FFDL']:
-                if self.only_tags:
+                if not self.only_tags:
                     self.array = np.rot90(self.array, 1, (1, 2))
 
                 origin[1] = np.double(origin[1]) - self.spacing[1] * (self.dimensions[1] - 1)
