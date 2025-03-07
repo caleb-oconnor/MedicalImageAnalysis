@@ -54,27 +54,29 @@ class ContourToDiscreteMesh(object):
             self.contour_pixel += [p_concat.dot(conversion_matrix.T)[:, :3]]
 
     def compute_mask(self):
-        slice_check = np.zeros(self.dimensions[0])
+        slice_check = np.zeros(self.dimensions[2])
         hold_mask = np.zeros([self.dimensions[0], self.dimensions[1], self.dimensions[2]], dtype=np.uint8)
         for c in self.contour_pixel:
             contour_stacked = np.vstack((c[:, 0:2], c[0, 0:2]))
             new_contour = np.array([contour_stacked], dtype=np.int32)
-            image = np.zeros([self.dimensions[1], self.dimensions[2]], dtype=np.uint8)
+            image = np.zeros([self.dimensions[0], self.dimensions[1]], dtype=np.uint8)
             cv2.fillPoly(image, new_contour, 1)
 
             slice_num = int(np.round(c[0, 2]))
             if slice_check[slice_num] == 0:
-                hold_mask[slice_num, :, :] = image
+                hold_mask[:, :, slice_num] = image
                 slice_check[slice_num] = 1
             else:
-                hold_mask[slice_num, :, :] = hold_mask[slice_num, :, :] + image
+                hold_mask[:, :, slice_num] = hold_mask[:, :, slice_num] + image
         self.mask = (hold_mask > 0).astype(np.uint8)
 
     def compute_mesh(self):
-        label = numpy_support.numpy_to_vtk(num_array=np.asarray(self.mask).ravel(), deep=True, array_type=vtk.VTK_FLOAT)
+        label = numpy_support.numpy_to_vtk(num_array=np.transpose(self.mask, (2, 0, 1)).ravel(),
+                                           deep=True, 
+                                           array_type=vtk.VTK_FLOAT)
 
         img_vtk = vtk.vtkImageData()
-        img_vtk.SetDimensions([self.dimensions[2], self.dimensions[1], self.dimensions[0]])
+        img_vtk.SetDimensions(self.dimensions[1], self.dimensions[0], self.dimensions[2])
         img_vtk.SetSpacing(self.spacing)
         img_vtk.SetOrigin(self.origin)
         img_vtk.SetDirectionMatrix(self.matrix.flatten(order='F'))
@@ -233,14 +235,14 @@ class ModelToMask:
         -------
 
         """
-        self.mask = np.zeros((self.dims[0], self.dims[2], self.dims[1]))
+        self.mask = np.zeros((self.dims[0], self.dims[1], self.dims[2]))
         if not self.empty_array:
             for ii, model in enumerate(self.models):
 
                 model_contours = self.contours[ii]
                 for jj, s in enumerate(self.slice_locations):
                     if len(model_contours[jj]) > 0:
-                        frame = np.zeros((self.dims[2], self.dims[1]))
+                        frame = np.zeros((self.dims[1], self.dims[2]))
                         # noinspection PyTypeChecker
                         cv2.fillPoly(frame, np.array([model_contours[jj]], dtype=np.int32), 1)
                         self.mask[jj, :, :] = self.mask[jj, :, :] + frame
