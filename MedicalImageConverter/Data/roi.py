@@ -18,7 +18,7 @@ import SimpleITK as sitk
 
 import MedicalImageProcessing as mip
 
-from ..conversion import ContourToDiscreteMesh
+from ..Utils.conversion import ContourToDiscreteMesh
 
 
 class Roi(object):
