@@ -45,36 +45,26 @@ class Roi(object):
         self.bounds = None
 
         self.rotated_mesh = None
+        self.multi_color = None
 
     def convert_position_to_pixel(self, position=None):
-        matrix = np.identity(3, dtype=np.float32)
-        matrix[0, :] = self.image.matrix[0, :] / self.image.spacing[0]
-        matrix[1, :] = self.image.matrix[1, :] / self.image.spacing[1]
-        matrix[2, :] = self.image.matrix[2, :] / self.image.spacing[2]
-
-        conversion_matrix = np.identity(4, dtype=np.float32)
-        conversion_matrix[:3, :3] = matrix
-        conversion_matrix[:3, 3] = np.asarray(self.image.origin).dot(-matrix.T)
+        position_to_pixel_matrix = self.image.compute_matrix_position_to_pixel()
 
         pixel = []
         for ii, pos in enumerate(position):
             p_concat = np.concatenate((pos, np.ones((pos.shape[0], 1))), axis=1)
-            pixel_3_axis = p_concat.dot(conversion_matrix.T)[:, :3]
+            pixel_3_axis = p_concat.dot(position_to_pixel_matrix.T)[:, :3]
             pixel += [np.vstack((pixel_3_axis, pixel_3_axis[0, :]))]
 
         return pixel
 
     def convert_pixel_to_position(self, pixel=None):
-        conversion_matrix = np.identity(4, dtype=np.float32)
-        conversion_matrix[0, :3] = self.image.matrix[0, :] * self.image.spacing[0]
-        conversion_matrix[1, :3] = self.image.matrix[1, :] * self.image.spacing[1]
-        conversion_matrix[2, :3] = self.image.matrix[2, :] * self.image.spacing[2]
-        conversion_matrix[:3, 3] = self.image.origin
+        pixel_to_position_matrix = self.image.compute_matrix_pixel_to_position()
 
         position = []
         for ii, pix in enumerate(pixel):
             p_concat = np.concatenate((pix, np.ones((pix.shape[0], 1))), axis=1)
-            position += [p_concat.dot(conversion_matrix.T)[:, :3]]
+            position += [p_concat.dot(pixel_to_position_matrix.T)[:, :3]]
 
         return position
 
