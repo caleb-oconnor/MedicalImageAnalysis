@@ -205,10 +205,10 @@ class Image(object):
         else:
             return None
 
-    def get_slice_location(self, plane):
-        if plane == self.plane:
+    def get_slice_location(self, slice_plane):
+        if slice_plane == 'Axial':
             location = self.slice_location[2]
-        elif plane == 'Coronal':
+        elif slice_plane == 'Coronal':
             location = self.slice_location[1]
         else:
             location = self.slice_location[0]
@@ -342,7 +342,7 @@ class Image(object):
         if empty:
             sitk_image = sitk.Image([int(dim) for dim in reversed(self.dimensions)], sitk.sitkUInt8)
         else:
-            sitk_image = sitk.GetImageFromArray(self.array)
+            sitk_image = sitk.GetImageFromArray(self.array.T)
 
         matrix_flat = self.matrix.flatten(order='F')
         sitk_image.SetDirection([float(mat) for mat in matrix_flat])
@@ -375,11 +375,11 @@ class Image(object):
 
     def array_slice_plane(self, slice_plane='Axial'):
         if slice_plane == 'Axial':
-            array = np.flip(self.array[:, :, self.slice_location[2]], 0)
+            array = np.flip(self.array[:, :, self.slice_location[2]].T, 0)
         elif slice_plane == 'Coronal':
-            array = self.array[:, self.slice_location[1], :]
+            array = self.array[:, self.slice_location[1], :].T
         else:
-            array = self.array[self.slice_location[0], :, :]
+            array = self.array[self.slice_location[0], :, :].T
 
         return array
 
@@ -392,31 +392,31 @@ class Image(object):
 
         """
         if slice_plane == 'Axial':
-            array = np.flip(self.rotated_array[self.slice_location[0], :, ], 0)
+            array = np.flip(self.rotated_array[:, :, self.slice_location[2]], 0)
         elif slice_plane == 'Coronal':
             array = self.rotated_array[:, self.slice_location[1], :]
         else:
-            array = self.rotated_array[:, :, self.slice_location[2]]
+            array = self.rotated_array[self.slice_location[0], :, :]
 
         return array
 
-    def compute_aspect(self, plane):
-        if plane == self.plane:
+    def compute_aspect(self, slice_plane):
+        if slice_plane == 'Axial':
             aspect = np.round(self.spacing[0] / self.spacing[1], 2)
-        elif plane == 'Coronal':
+        elif slice_plane == 'Coronal':
             aspect = np.round(self.spacing[0] / self.spacing[2], 2)
         else:
             aspect = np.round(self.spacing[1] / self.spacing[2], 2)
 
         return aspect
 
-    def compute_scroll_max(self, plane):
-        if plane == self.plane:
-            scroll_max = self.dimensions[0] - 1
-        elif plane == 'Coronal':
+    def compute_scroll_max(self, slice_plane):
+        if slice_plane == 'Axial':
+            scroll_max = self.dimensions[2] - 1
+        elif slice_plane == 'Coronal':
             scroll_max = self.dimensions[1] - 1
         else:
-            scroll_max = self.dimensions[2] - 1
+            scroll_max = self.dimensions[0] - 1
 
         return scroll_max
 
@@ -441,20 +441,20 @@ class Image(object):
 
         return pixel_to_position_matrix
 
-    def compute_off_axis_slice_plane(self, angles, plane, location):
+    def compute_off_axis_slice_plane(self, angles, slice_plane, location):
         pixel_to_position_matrix = self.compute_matrix_pixel_to_position()
 
         rotation_position = np.asarray([location[0], location[1], location[2], 1]).dot(pixel_to_position_matrix.T)[:3]
         transform = self.euler_transform(angles=angles, translation=None, rotation_position=rotation_position)
 
         center = np.round(np.asarray(self.dimensions) / 2).astype(np.int64)
-        if plane == 'Axial':
+        if slice_plane == 'Axial':
             square = [np.asarray([-center[0], -center[1], location[2], 1]).dot(pixel_to_position_matrix.T)[:3],
                       np.asarray([-center[0], 3*center[1], location[2], 1]).dot(pixel_to_position_matrix.T)[:3],
                       np.asarray([3*center[0], -center[1], location[2], 1]).dot(pixel_to_position_matrix.T)[:3],
                       np.asarray([3*center[0], 3*center[1], location[2], 1]).dot(pixel_to_position_matrix.T)[:3]]
 
-        elif plane == 'Coronal':
+        elif slice_plane == 'Coronal':
             square = [np.asarray([-center[0], location[1], -center[2], 1]).dot(pixel_to_position_matrix.T)[:3],
                       np.asarray([-center[0], location[1], 3*center[2], 1]).dot(pixel_to_position_matrix.T)[:3],
                       np.asarray([3*center[0], location[1], -center[2], 1]).dot(pixel_to_position_matrix.T)[:3],
@@ -471,13 +471,13 @@ class Image(object):
         square_rotated_concat = np.concatenate((square_rotated, np.ones((len(square_rotated), 1))), axis=1)
         square_rotated_voxels = square_rotated_concat.dot(position_to_pixel_matrix.T)[:, :3]
 
-        if plane == 'Axial':
+        if slice_plane == 'Axial':
             first_row = np.linspace(square_rotated_voxels[0], square_rotated_voxels[1], self.dimensions[0])
             last_row = np.linspace(square_rotated_voxels[2], square_rotated_voxels[3], self.dimensions[0])
             base_grid = np.linspace(first_row, last_row, self.dimensions[1])
             slice_array = np.full((self.dimensions[0], self.dimensions[1]), np.nan)
             
-        elif plane == 'Coronal':
+        elif slice_plane == 'Coronal':
             first_row = np.linspace(square_rotated_voxels[0], square_rotated_voxels[1], self.dimensions[0])
             last_row = np.linspace(square_rotated_voxels[2], square_rotated_voxels[3], self.dimensions[0])
             base_grid = np.linspace(first_row, last_row, self.dimensions[2])
@@ -517,12 +517,12 @@ class Image(object):
 
         return transform
 
-    def update_slice_location(self, location, plane):
-        if plane == 'Axial':
-            self.slice_location[0] = location
-        elif plane == 'Coronal':
+    def update_slice_location(self, location, slice_plane):
+        if slice_plane == 'Axial':
+            self.slice_location[2] = location
+        elif slice_plane == 'Coronal':
             self.slice_location[1] = location
         else:
-            self.slice_location[2] = location
+            self.slice_location[0] = location
 
         return location
