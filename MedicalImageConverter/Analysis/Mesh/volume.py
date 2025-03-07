@@ -14,13 +14,16 @@ Structure:
 
 import pytetwild
 
+import numpy as np
+import pyvista as pv
+
 
 class Volume(object):
     def __init__(self, surface_mesh):
         self.surface_mesh = surface_mesh
         self.mesh = None
 
-    def create(self, edge_length=.35):
+    def create(self, edge_length=.02):
         base_mesh = pytetwild.tetrahedralize_pv(self.surface_mesh, edge_length_fac=edge_length, optimize=True)
         tetra_connect = base_mesh.cell_connectivity.reshape(int(len(base_mesh.cell_connectivity) / 4), 4)
         tetra_reshape = np.asarray([4 * np.ones((tetra_connect.shape[0])),
@@ -35,4 +38,3 @@ class Volume(object):
 
     def write(self, path):
         self.mesh.save(path, binary=False)
-        
