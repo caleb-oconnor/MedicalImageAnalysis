@@ -1,9 +1,9 @@
 
-# MedicalImageConverter
+# MedicalImageAnalysis
 
 Version 2.0 and later releases contain a structure than in previous versions.
 
-*MedicalImageConverter* is a Python package for working with medical image files. Currently, it
+*MedicalImageAnalysis* is a Python package for working with medical image files. Currently, it
 is only works with dicom files with future plans to read in .mhd, .stl, .3mf files. An image instance
 is created for each respective image found, a 3D numpy array is created to contain the pixel data and
 various variables exist for the tag information. If there is an associated RTSTRUCT file for an image
@@ -35,7 +35,7 @@ not distinguish between patient IDs or patient names.
 ## Installation
 Using [pip](https://pip.pypa.io/en/stable/):
 ```
-pip install MedicalImageConverter
+pip install MedicalImageAnalysis
 ```
 
 ## Example 1
@@ -43,11 +43,11 @@ The user sets a path to the folder containing the dicom files or highest level f
 files.
 
 ```python
-import MedicalImageConverter as mic
+import MedicalImageAnalysis as mia
 
 path = r'/path/to/folder'
 
-reader = mic.Reader(folder_path=path)
+reader = mia.Reader(folder_path=path)
 reader.read_dicoms()
 
 ```
@@ -63,12 +63,12 @@ The user has more options if they are specifics requirements.
 Note: if *folder_path* and *file_list* are both input, then *folder_path* will be used and not both.
 
 ```python
-import MedicalImageConverter as mic
+import MedicalImageAnalysis as mia
 
 file_list = ['filepath1.dcm', 'filepath2.dcm', ...]
 exclude_files = ['filepath10.dcm', 'filepath11.dcm', ...]
 
-reader = mic.Reader(file_list=file_list, exclude_files=exclude_files, only_tags=True, only_modality=['CT'],
+reader = mia.Reader(file_list=file_list, exclude_files=exclude_files, only_tags=True, only_modality=['CT'],
                     only_load_roi_names=['Liver', 'Tumor'])
 reader.read_dicoms()
 
@@ -81,11 +81,11 @@ and popular tags have their own respective variable.
 Note: Even 2D images will contain a 3D array, along with a fake slice thickness of 1 mm.
 
 ```python
-import MedicalImageConverter as mic
+import MedicalImageAnalysis as mia
 
 path = r'/path/to/folder'
 
-reader = mic.Reader(folder_path=path)
+reader = mia.Reader(folder_path=path)
 reader.read_dicoms()
 
 images = reader.images
@@ -110,11 +110,11 @@ Each image contains a roi and poi dictionary, if a RTSTRUCT file associates with
 respective image dictionary.
 
 ```python
-import MedicalImageConverter as mic
+import MedicalImageAnalysis as mia
 
 path = r'/path/to/folder'
 
-reader = mic.Reader(folder_path=path)
+reader = mia.Reader(folder_path=path)
 reader.read_dicoms()
 
 image = reader.images[0]
