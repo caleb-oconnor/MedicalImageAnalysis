@@ -6,9 +6,8 @@ with open("README.md", "r") as fh:
     long_description = fh.read()
 
 
-def get_requirements(file):
-    with open(file, 'r') as f:
-        return f.read().splitlines()
+with open('requirements.txt') as f:
+    required = f.read().splitlines()
 
 
 setup(
@@ -26,5 +25,5 @@ setup(
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: GNU Affero General Public License v3",
     ],
-    install_requires=get_requirements('./requirements.txt'),
+    install_requires=required,
 )
