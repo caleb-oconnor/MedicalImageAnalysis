@@ -12,10 +12,10 @@ with open('requirements.txt') as f:
 
 
 setup(
-    name='medicalimageconverter',
+    name='medicalimageanalysis',
     author='Caleb OConnor',
     author_email='csoconnor@mdanderson.org',
-    version='2.1.73',
+    version='2.1.74',
     description='Reads in medical images and structures them into 3D arrays with associated ROI/POIs if they exist.',
     long_description=long_description,
     long_description_content_type="text/markdown",
