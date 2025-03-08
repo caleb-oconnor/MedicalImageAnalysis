@@ -18,7 +18,7 @@ setup(
     description='Reads in medical images and structures them into 3D arrays with associated ROI/POIs if they exist.',
     long_description=long_description,
     long_description_content_type="text/markdown",
-    packages=find_packages(),
+    packages=['MedicalImageConverter'],
     include_package_data=True,
     url='https://github.com/caleb-oconnor/MedicalImageConverter',
     classifiers=[
