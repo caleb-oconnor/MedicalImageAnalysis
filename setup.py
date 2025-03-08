@@ -26,5 +26,5 @@ setup(
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: GNU Affero General Public License v3",
     ],
-    install_requires=get_requirements('requirements.txt'),
+    # install_requires=get_requirements('requirements.txt'),
 )
