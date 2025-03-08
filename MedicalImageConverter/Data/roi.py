@@ -16,8 +16,7 @@ import numpy as np
 
 import SimpleITK as sitk
 
-import MedicalImageProcessing as mip
-
+from ..Utils.Mesh.surface import Refinement
 from ..Utils.conversion import ContourToDiscreteMesh
 
 
@@ -80,22 +79,22 @@ class Roi(object):
         self.bounds = self.mesh.bounds
 
     def create_display_mesh(self, iterations=20, angle=60, passband=0.001):
-        refine = mip.Refinement(self.mesh)
+        refine = Refinement(self.mesh)
         self.display_mesh = refine.smooth(iterations=iterations, angle=angle, passband=passband)
 
     def create_decimate_mesh(self, percent=None, display=True):
         if display:
-            refine = mip.Refinement(self.display_mesh)
+            refine = Refinement(self.display_mesh)
         else:
-            refine = mip.Refinement(self.mesh)
+            refine = Refinement(self.mesh)
             
         return refine.decimate(percent=percent)
 
     def create_cluster_mesh(self, points=None, display=True):
         if display:
-            refine = mip.Refinement(self.display_mesh)
+            refine = Refinement(self.display_mesh)
         else:
-            refine = mip.Refinement(self.mesh)
+            refine = Refinement(self.mesh)
 
         return refine.cluster(points=points)
 
