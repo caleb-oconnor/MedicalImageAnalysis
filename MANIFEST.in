@@ -1,2 +1,2 @@
-recursive-include MedicalImageConverter *.py
+recursive-include src *.py
 include requirements.txt
