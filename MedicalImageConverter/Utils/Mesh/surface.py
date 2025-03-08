@@ -13,6 +13,7 @@ Structure:
 """
 
 import cv2
+import vtk
 import pyacvd
 import numpy as np
 import pyvista as pv
@@ -32,9 +33,50 @@ class Refinement(object):
         self.face_lines_sort = np.sort(np.vstack([[[ff[0], ff[1]], [ff[0], ff[2]], [ff[1], ff[2]]] for ff in self.face]), axis=1)
         self.face_lines = np.unique(self.face_lines_sort, axis=0)
 
-        self.find_face_correction()
+    def smooth(self, iterations=20, angle=60, passband=0.001):
+        smoother = vtk.vtkWindowedSincPolyDataFilter()
+        smoother.SetInputData(self.mesh)
+        smoother.SetNumberOfIterations(iterations)
+        smoother.BoundarySmoothingOff()
+        smoother.FeatureEdgeSmoothingOff()
+        smoother.SetFeatureAngle(angle)
+        smoother.SetPassBand(passband)
+        smoother.NonManifoldSmoothingOn()
+        smoother.NormalizeCoordinatesOff()
+        # smoother.SetRelaxationFactor(0.1)
+        smoother.Update()
+        self.mesh = pv.PolyData(smoother.GetOutput())
+
+        return self.mesh
+
+    def cluster(self, points=None):
+        if points is None:
+            points = self.compute_points()
+        clus = pyacvd.Clustering(self.mesh)
+        clus.cluster(points)
+        self.mesh = clus.create_mesh()
+
+        return self.mesh
+
+    def decimate(self, percent=None):
+        if percent is None:
+            percent = self.compute_point_percentage()
+
+        self.mesh.decimate(percent)
+
+        return self.mesh
+
+    def compute_points(self):
+        return np.round(10 * np.sqrt(self.mesh.number_of_points))
+
+    def compute_point_percentage(self):
+        points = self.compute_points()
+
+        return 1 - (points / self.mesh.number_of_points)
 
     def tri_split(self):
+        self.find_face_correction()
+
         base_faces = [f for ii, f in enumerate(self.face) if ii not in self.correct_faces]
         base_length = len(self.points)
         new_points = [self.face_centers[ii] for ii in self.correct_faces]
@@ -53,6 +95,8 @@ class Refinement(object):
         return pv.PolyData(total_points, face_syntax)
 
     def advanced_split(self):
+        self.find_face_correction()
+
         midpoint, midline = self.compute_midpoints()
         all_points = np.concatenate(self.points, midpoint)
 
