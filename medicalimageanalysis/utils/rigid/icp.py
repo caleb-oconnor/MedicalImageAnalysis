@@ -24,11 +24,11 @@ from open3d.pipelines.registration import registration_icp, TransformationEstima
 
 
 class IcpVtk(object):
-    def __init__(self, ref, mov):
-        self.source = mov
-        self.target = ref
+    def __init__(self, source, target):
+        self.source = source
+        self.target = target
 
-        self.landmarks = int(np.round(len(mov.points)/10))
+        self.landmarks = int(np.round(len(source.points)/10))
         self.distance = 1e-5
         self.iterations = 1000
 
@@ -60,27 +60,27 @@ class IcpVtk(object):
         self.icp.Update()
 
         matrix = pv.array_from_vtkmatrix(self.icp.GetMatrix())
-        if self.reverse_transform:
-            matrix = np.linalg.inv(matrix)
+        matrix = np.linalg.inv(matrix)
 
         return matrix
 
     def compute_error(self):
         matrix = pv.array_from_vtkmatrix(self.icp.GetMatrix())
-        new_source = self.source.transform(matrix, inplace=False)
+        matrix = np.linalg.inv(matrix)
+        new_source = self.target.transform(matrix, inplace=False)
 
-        closest_cells, closest_points = self.target.find_closest_cell(new_source.points, return_closest_point=True)
+        closest_cells, closest_points = self.source.find_closest_cell(new_source.points, return_closest_point=True)
         d_exact = np.linalg.norm(new_source.points - closest_points, axis=1)
         new_source["distances"] = d_exact
         return {'Min': np.min(d_exact), 'Mean': np.mean(d_exact), 'Max': np.max(d_exact)}
 
 
 class IcpOpen3d(object):
-    def __init__(self, ref_pv=None, mov_pv=None):
-        self.ref_pcd = PointCloud()
-        self.ref_pcd.points = Vector3dVector(ref_pv.points)
-        self.mov_pcd = PointCloud()
-        self.mov_pcd.points = Vector3dVector(mov_pv.points)
+    def __init__(self, source=None, target=None):
+        self.source = PointCloud()
+        self.source.points = Vector3dVector(source.points)
+        self.target = PointCloud()
+        self.target.points = Vector3dVector(target.points)
 
         self.distance = 1
         self.iterations = 1000
@@ -114,12 +114,12 @@ class IcpOpen3d(object):
 
     def compute(self, com_matching=True):
         if com_matching:
-            c = self.mov_pcd.get_center() - self.ref_pcd.get_center()
+            c = self.target.get_center() - self.source.get_center()
             self.initial_transform = np.asarray([[1, 0, 0, c[0]], [0, 1, 0, c[1]], [0, 0, 1, c[2]], [0, 0, 0, 1]])
         else:
             self.initial_transform = np.identity(4, dtye=np.float32)
 
-        self.registration = registration_icp(self.ref_pcd, self.mov_pcd, self.distance, self.initial_transform,
+        self.registration = registration_icp(self.source, self.target, self.distance, self.initial_transform,
                                              TransformationEstimationPointToPoint(),
                                              ICPConvergenceCriteria(max_iteration=self.iterations,
                                                                     relative_rmse=self.rmse,
@@ -146,17 +146,17 @@ class IcpOpen3d(object):
 
 
 class MeshCenterOfMass(object):
-    def __init__(self, ref, mov):
-        self.ref = ref
-        self.mov = mov
+    def __init__(self, source, target):
+        self.source = source
+        self.target = target
 
         self.matrix = None
 
     def com_transfer(self):
-        ref_com = self.ref.center
-        mov_com = self.mov.center
+        source_com = self.source.center
+        target_com = self.target.center
 
-        translation = mov_com - ref_com
+        translation = target_com - source_com
 
         self.matrix = np.identity(4)
         self.matrix[0, 3] = -translation[0]
