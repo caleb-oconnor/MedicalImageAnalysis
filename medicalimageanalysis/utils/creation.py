@@ -6,8 +6,8 @@ import numpy as np
 import pydicom as dicom
 from pydicom.uid import generate_uid, UID, ExplicitVRLittleEndian
 
-from ..Data.image import Image
-from ..Data.roi import Roi
+from ..data.image import Image
+from ..data.roi import Roi
 
 
 class CreateDicomImage(object):

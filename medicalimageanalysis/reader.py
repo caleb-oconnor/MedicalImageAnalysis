@@ -26,7 +26,13 @@ Functions:
 
 import os
 
-from .Read import DicomReader, MhdReader, NiftiReader, StlReader, VtkReader, ThreeMfReader
+# from .read import DicomReader, MhdReader, NiftiReader, StlReader, VtkReader, ThreeMfReader
+from .read.dicom import DicomReader
+from .read.mf3 import ThreeMfReader
+from .read.mhd import MhdReader
+from .read.nifti import NiftiReader
+from .read.stl import StlReader
+from .read.vtk import VtkReader
 
 
 class Reader:
