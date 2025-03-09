@@ -16,8 +16,8 @@ import numpy as np
 
 import SimpleITK as sitk
 
-from ..Utils.Mesh.surface import Refinement
-from ..Utils.conversion import ContourToDiscreteMesh
+from ..utils.mesh.surface import Refinement
+from ..utils.conversion import ContourToDiscreteMesh
 
 
 class Roi(object):
