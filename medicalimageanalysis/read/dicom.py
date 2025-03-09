@@ -23,7 +23,9 @@ import pandas as pd
 import pydicom as dicom
 from pydicom.uid import generate_uid
 
-from ..data.image import Image
+from ..structure.image import Image
+
+from ..data import Data
 
 
 def thread_process_dicom(path, stop_before_pixels=False):
@@ -201,14 +203,14 @@ class DicomReader(object):
                 if load:
                     image = Image()
                     image.input(read_image)
-                    self.reader.images += [image]
+                    Data.images += [image]
 
         for modality in ['RTSTRUCT']:
             for image_set in self.ds_modality[modality]:
                 if modality == 'RTSTRUCT':
-                    read_rtstruct = ReadRTStruct(image_set, self.reader.images, self.reader.only_tags)
+                    read_rtstruct = ReadRTStruct(image_set, Data.images, self.reader.only_tags)
                     if read_rtstruct.match_image_idx is not None:
-                        self.reader.images[read_rtstruct.match_image_idx].input_rtstruct(read_rtstruct)
+                        Data.images[read_rtstruct.match_image_idx].input_rtstruct(read_rtstruct)
                     else:
                         print('dicom: rtstruct has no matching image')
 
