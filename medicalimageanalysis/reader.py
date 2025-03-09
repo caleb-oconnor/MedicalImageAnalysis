@@ -25,11 +25,14 @@ Functions:
 """
 
 import os
+import psutil
 
 from .read import DicomReader, MhdReader, NiftiReader, StlReader, VtkReader, ThreeMfReader
 
+from .data import Data
 
-class Reader:
+
+class Reader(Data):
     """
     Currently, reads in dicom files for modalities: CT, MR, DX, MG, US, RTSTRUCTS.
 
@@ -43,6 +46,7 @@ class Reader:
         only_modality - specify which modalities to read in, if not then all modalities will be read
         only_load_roi_names - will only load rois with input name, list format
     """
+
     def __init__(self, folder_path=None, file_list=None, exclude_files=None, only_tags=False, only_modality=None,
                  only_load_roi_names=None):
         """
@@ -74,12 +78,6 @@ class Reader:
         self.files = None
         if folder_path is not None or file_list is not N0ne:
             self.file_parsar(folder_path=folder_path, file_list=file_list, exclude_files=self.exclude_files)
-
-        self.images = []
-        self.rigid = []
-        self.deformable = []
-        self.dose = []
-        self.meshes = []
 
     def file_parsar(self, folder_path=None, file_list=None, exclude_files=None):
         """
@@ -159,7 +157,36 @@ class Reader:
                       'Vtk': vtk_files,
                       '3mf': mf3_files,
                       'NoExtension': no_file_extension}
-        
+
+    def check_memory(self, file_dictionary):
+        dicom_size = 0
+        for file in self.files['Dicom']:
+            dicom_size = dicom_size + os.path.getsize(file)
+
+        nifti_size = 0
+        for file in self.files['Nifti']:
+            nifti_size = nifti_size + os.path.getsize(file)
+
+        raw_size = 0
+        for file in self.files['Raw']:
+            raw_size = raw_size + os.path.getsize(file)
+
+        stl_size = 0
+        for file in self.files['Stl']:
+            stl_size = stl_size + os.path.getsize(file)
+
+        vtk_size = 0
+        for file in self.files['Vtk']:
+            vtk_size = vtk_size + os.path.getsize(file)
+
+        mf3_size = 0
+        for file in self.files['3mf']:
+            mf3_size = mf3_size + os.path.getsize(file)
+
+        total_size = dicom_size + raw_size + nifti_size + stl_size + vtk_size + mf3_size
+        available_memory = psutil.virtual_memory()[1]
+        memory_left = (available_memory - total_size) / 1000000000
+
     def read_dicoms(self):
         """
         Reads in all dicom files and separates them into the image list variable.
