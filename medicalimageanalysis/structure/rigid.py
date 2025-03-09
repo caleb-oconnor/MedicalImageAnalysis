@@ -17,7 +17,7 @@ from ..utils.rigid.icp import IcpOpen3d
 from ..data import Data
 
 
-class Rigid(Data):
+class Rigid(object):
     def __init__(self, source_name=None, target_name=None, roi_names=None):
 
         self.source_name = None
@@ -34,3 +34,6 @@ class Rigid(Data):
     def compute_icp(self, algorithm='vtk'):
         if algorithm == 'vtk':
             icp = IcpOpen3d()
+
+    def add_rigid(self):
+        Data.rigid += [self]
