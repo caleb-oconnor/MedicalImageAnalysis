@@ -20,6 +20,8 @@ import pyvista as pv
 
 from scipy.spatial import distance
 
+import pymeshfix
+
 
 class Refinement(object):
     def __init__(self, mesh):
@@ -162,6 +164,42 @@ class Refinement(object):
         return midpoint_unique, midline_unique
 
 
-# class Surface(object):
-#     def __init__(self):
-        
+def expansion(mesh, dist):
+    mesh = mesh.copy()
+    mesh.points += mesh.point_normals * dist
+
+    meshfix = pymeshfix.PyTMesh()
+    meshfix.load_array(expanded_mesh.points, expanded_mesh.faces.reshape((-1, 4))[:, 1:])
+    meshfix.clean()
+
+    verts, faces = meshfix.return_arrays()
+    new_faces = np.insert(faces, 0, 3, axis=1)
+    corrected_mesh = pv.PolyData(verts, new_faces)
+
+    return corrected_mesh
+
+
+def surface_boundary(source_meshes, target_meshes, points, matrix=None):
+    if matrix is None:
+        matrix = np.identity(4)
+
+    new_sources = []
+    new_targets = []
+    for ii, s in enumerate(source_meshes):
+        n = -1
+        while n >= -1:
+            n += 1
+
+            refine = Refinement(s)
+            hold_s = refine.cluster(points=points[ii] + n)
+
+            refine = Refinement(target_meshes[ii])
+            hold_t = refine.cluster(points=points[ii] + n)
+
+            if len(hold_s.points) == len(hold_t.points):
+                n = -100
+
+                new_sources += [hold_s]
+                new_targets += [hold_t.transform(matrix, inplace=True)]
+
+    return new_sources, new_targets
