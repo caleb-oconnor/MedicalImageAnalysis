@@ -52,6 +52,7 @@ pyacvd==0.3.1
 pydicom==3.0.1
 Pygments==2.19.1
 pykdtree==1.4.1
+pymeshfix==0.17.0
 pyparsing==3.2.1
 pytetwild==0.1.dev1
 python-dateutil==2.9.0.post0
@@ -63,6 +64,7 @@ pyzmq==26.2.1
 referencing==0.36.2
 requests==2.32.3
 rpds-py==0.23.1
+scikit-image==0.25.0
 scipy==1.15.2
 scooby==0.10.0
 SimpleITK==2.4.1
