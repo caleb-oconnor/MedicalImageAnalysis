@@ -88,7 +88,6 @@ class IcpOpen3d(object):
         self.fitness = 1e-7
 
         self.initial_transform = None
-        self.compute_com()
 
         self.registration = None
         self.parameter_results = {'transform': None, 'fitness': None, 'rmse': None}
@@ -100,10 +99,10 @@ class IcpOpen3d(object):
         self.initial_transform = transform
 
     def set_icp_settings(self, distance=None, iterations=None, rmse=None, fitness=None):
-        if max_distancee:
+        if distance:
             self.distance = distance
 
-        if max_iteration:
+        if iterations:
             self.iterations = iterations
 
         if rmse:
@@ -137,9 +136,9 @@ class IcpOpen3d(object):
         angle_y = np.arctan(-r31 * np.cos(angle_z) / r11)
         angle_x = np.arctan(r32 / r33)
 
-        self.new_mesh = self.ref_pcd.transform(self.parameter_results['transform'])
+        self.new_mesh = self.source.transform(self.parameter_results['transform'])
         self.angles = [angle_x * 180 / np.pi, angle_y * 180 / np.pi, angle_z * 180 / np.pi]
-        self.translation = self.new_mesh.get_center() - self.ref_com
+        self.translation = self.new_mesh.get_center() - self.source.get_center()
 
     def correspondence_array(self):
         return self.registration.correspondence_set
