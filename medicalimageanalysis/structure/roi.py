@@ -131,8 +131,51 @@ class Roi(object):
             if roi_slice.number_of_points > 0:
                 roi_strip = roi_slice.strip()
                 position = [np.asarray(c.points) for c in roi_strip.cell]
+                lines = roi_strip.lines
 
-                pixel = self.convert_position_to_pixel(position=position)
+                if len(position) > 1:
+                    n = 0
+                    line_splits = []
+                    for ii, p in enumerate(position):
+                        if ii == 0:
+                            line_splits += [[1, len(p)]]
+                            n = len(p)
+                        else:
+                            line_idx = n + 2
+                            line_splits += [[line_idx, line_idx + len(p) - 1]]
+                            n = line_idx + len(p) - 1
+
+                    n_help = None
+                    n_idx = []
+                    position_correction = []
+                    for ii in range(len(position)):
+                        if lines[line_splits[ii][0]] == lines[line_splits[ii][1]]:
+                            position_correction += [position[ii]]
+                        elif n_help is None:
+                            n_help = lines[line_splits[ii][0]]
+                            n_idx = ii
+                        elif lines[line_splits[ii][1]] == lines[line_splits[n_idx][1]]:
+                            position_stack = [np.flip(position[0], axis=0) for jj, p in enumerate(position) if n_idx <= jj < ii]
+                            position_stack += [position[ii]]
+                            position_correction += [np.vstack(position_stack)]
+                            n_help = None
+
+                else:
+                    position_correction = [position]
+
+                # if len(position) > 1:
+                #     first_points = np.asarray([p[0] for p in position])
+                #     unique_points = np.unique(first_points, axis=0)
+                #
+                #     non_duplicates_positions = []
+                #     for u in unique_points:
+                #         idx = np.where((first_points[:, 0] == u[0]) & (first_points[:, 1] == u[1]) & (first_points[:, 2] == u[2]))[0][0]
+                #         non_duplicates_positions += [position[idx]]
+                #
+                # else:
+                #     non_duplicates_positions = position
+
+                pixel = self.convert_position_to_pixel(position=position_correction)
                 pixel_correct = self.pixel_slice_correction(pixel, plane)
 
                 return pixel_correct
