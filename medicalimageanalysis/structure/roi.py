@@ -135,48 +135,62 @@ class Roi(object):
 
                 if len(position) > 1:
                     n = 0
-                    line_splits = []
+                    line_values = []
                     for ii, p in enumerate(position):
                         if ii == 0:
-                            line_splits += [[1, len(p)]]
                             n = len(p)
+                            line_splits = [1, len(p)]
                         else:
                             line_idx = n + 2
-                            line_splits += [[line_idx, line_idx + len(p) - 1]]
                             n = line_idx + len(p) - 1
+                            line_splits = [line_idx, line_idx + len(p) - 1]
+                        line_values += [[lines[line_splits[0]], lines[line_splits[1]]]]
 
-                    n_help = None
-                    n_idx = []
+                    n = 0
                     position_correction = []
-                    for ii in range(len(position)):
-                        if lines[line_splits[ii][0]] == lines[line_splits[ii][1]]:
-                            position_correction += [position[ii]]
-                        elif n_help is None:
-                            n_help = lines[line_splits[ii][0]]
-                            n_idx = ii
-                        elif lines[line_splits[ii][1]] == lines[line_splits[n_idx][1]]:
-                            position_stack = [np.flip(position[0], axis=0) for jj, p in enumerate(position) if n_idx <= jj < ii]
-                            position_stack += [position[ii]]
-                            position_correction += [np.vstack(position_stack)]
-                            n_help = None
+                    while n >= 0:
+                        if line_values[n][0] == line_values[n][1]:
+                            position_correction += [position[n]]
+                            n += 1
+                            idx = n
+
+                        else:
+                            values = np.asarray(line_values).reshape(2 * (len(line_values) - n))
+                            first = np.where(values[1:] == values[0])[0][0] + 1
+                            last = np.where(values[2:] == values[1])[0][0] + 2
+
+                            position_hold = []
+                            if first > last:
+                                idx = n + int(first / 2) + 1
+                                line_test = np.asarray(line_values)[n:n + idx, :]
+                                position_hold += [position[n]]
+
+                            else:
+                                idx = n + int(last / 2) + 1
+                                line_test = np.asarray(line_values)[n:n + idx, :]
+                                line_test[0, :] = np.flip(line_test[0, :])
+                                position_hold += [np.flip(position[n], axis=0)]
+
+                            for ii in range(len(line_test)):
+                                if ii > 0:
+                                    if line_test[ii - 1, 1] == line_test[ii, 0]:
+                                        position_hold += [position[n + ii]]
+                                    else:
+                                        line_test[ii, :] = np.flip(line_test[ii, :])
+                                        position_hold += [np.flip(position[n + ii], axis=0)]
+
+                            position_correction += [np.vstack(position_hold)]
+
+                            n = idx
+
+                        if idx >= len(line_values):
+                            n = -1
 
                 else:
-                    position_correction = [position]
+                    position_correction = position
 
-                # if len(position) > 1:
-                #     first_points = np.asarray([p[0] for p in position])
-                #     unique_points = np.unique(first_points, axis=0)
-                #
-                #     non_duplicates_positions = []
-                #     for u in unique_points:
-                #         idx = np.where((first_points[:, 0] == u[0]) & (first_points[:, 1] == u[1]) & (first_points[:, 2] == u[2]))[0][0]
-                #         non_duplicates_positions += [position[idx]]
-                #
-                # else:
-                #     non_duplicates_positions = position
-
-                pixel = self.convert_position_to_pixel(position=position_correction)
-                pixel_correct = self.pixel_slice_correction(pixel, plane)
+                pixels = self.convert_position_to_pixel(position=position_correction)
+                pixel_correct = self.pixel_slice_correction(pixels, plane)
 
                 return pixel_correct
 
