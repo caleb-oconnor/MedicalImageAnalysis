@@ -11,8 +11,6 @@ Structure:
 
 """
 
-import copy
-
 import vtk
 import numpy as np
 import pyvista as pv
@@ -59,10 +57,10 @@ class ICP(object):
 
     def compute_o3d(self, distance=10, iterations=1000, rmse=1e-7, fitness=1e-7, method='point', com_matching=True):
         ref_pcd = PointCloud()
-        ref_pcd.points = Vector3dVector(self.source.points)
+        ref_pcd.points = Vector3dVector(np.asarray(self.source.points))
 
         mov_pcd = PointCloud()
-        mov_pcd.points = Vector3dVector(self.target.points)
+        mov_pcd.points = Vector3dVector(np.asarray(self.target.points))
         mov_pcd.normals = Vector3dVector(np.asarray(self.target.point_normals))
 
         initial_transform = np.identity(4)
@@ -86,7 +84,7 @@ class ICP(object):
 
     def get_correspondence_set(self):
         if hasattr(self.icp, 'correspondence_set'):
-            return self.icp.correspondence_set
+            return np.asarray(self.icp.correspondence_set)
 
         else:
             return None
