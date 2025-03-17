@@ -13,7 +13,7 @@ Structure:
 
 import numpy as np
 
-from ..utils.rigid.icp import IcpVtk, IcpOpen3d
+from ..utils.rigid.icp import ICP
 from ..data import Data
 
 
@@ -45,12 +45,13 @@ class Rigid(object):
             self.combo_matrix = combo_matrix
 
     def compute_icp_vtk(self, source_mesh, target_mesh, landmarks=None, distance=None, iterations=None):
-        icp_vtk = IcpVtk(source_mesh, target_mesh)
-        icp_vtk.update_parameters(landmarks=landmarks, distance=distance, iterations=iterations)
+        icp = ICP(source_mesh, target_mesh)
         if self.combo_name:
-            self.matrix = icp_vtk.compute_icp(com_matching=False)
+            icp.compute_vtk(self, distance=distance, iterations=iterations, landmarks=landmarks, com_matching=False)
         else:
-            self.matrix = icp_vtk.compute_icp(com_matching=True)
+            icp.compute_vtk(self, distance=distance, iterations=iterations, landmarks=landmarks, com_matching=True)
+
+        self.matrix = icp.get_matrix()
 
     def add_rigid(self):
         Data.rigid = [self]
