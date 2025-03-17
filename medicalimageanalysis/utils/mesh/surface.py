@@ -203,3 +203,17 @@ def surface_boundary(source_meshes, target_meshes, points, matrix=None):
                 new_targets += [hold_t.transform(matrix, inplace=True)]
 
     return new_sources, new_targets
+
+
+def only_main_component(mesh):
+    multi_block = mesh.split_bodies()
+
+    if len(multi_block) == 1:
+        return mesh
+
+    else:
+        total_points = [len(m.points) for m in multi_block]
+        idx = np.argmax(total_points)
+        new_mesh = multi_block[int(idx)]
+
+        return new_mesh.extract_surface()
