@@ -500,6 +500,8 @@ class Image(object):
 
         slice_array[idx[:, 0], idx[:, 1]] = keep_values
 
+        return slice_array
+
     def euler_transform(self, angles=None, translation=None, rotation_position=None):
         rotation = [angles[0] * np.pi / 180, angles[1] * np.pi / 180, angles[2] * np.pi / 180]
         transform = sitk.Euler3DTransform()
