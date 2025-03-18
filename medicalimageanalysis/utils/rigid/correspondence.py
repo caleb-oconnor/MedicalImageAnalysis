@@ -86,3 +86,28 @@ class SurfaceMatching(object):
         connection = [extract.cell_connectivity for extract in extracted_cells]
 
         print(1)
+
+    def face_check(self):
+        faces = self.source_mesh.faces.reshape((-1, 4))[:, 1:]
+        good_face_idx = np.where(np.sum(self.source_mesh.point_data['good'][faces], axis=1) == 3)[0]
+        good_faces = faces[good_face_idx]
+
+        good_face_points = np.asarray(self.source_mesh.points)[good_faces]
+
+        a = np.linalg.norm(good_face_points[:, 0] - good_face_points[:, 1], axis=1)
+        b = np.linalg.norm(good_face_points[:, 1] - good_face_points[:, 2], axis=1)
+        c = np.linalg.norm(good_face_points[:, 2] - good_face_points[:, 0], axis=1)
+        s = (a + b + c) / 2
+        area = np.sqrt(s * (s - a) * (s - b) * (s - c))
+        base_quality = (4 * np.sqrt(3) * area) / (a ** 2 + b ** 2 + c ** 2)
+        base_min = np.min(base_quality)
+
+        deformed_quality = []
+        for idx in range(len(good_faces)):
+            new_face = np.asarray(self.source_mesh.points)[good_faces[idx]] - self.boundary_condition[good_faces[idx]]
+            a = np.linalg.norm(new_face[0, :] - new_face[1, :])
+            b = np.linalg.norm(new_face[1, :] - new_face[2, :])
+            c = np.linalg.norm(new_face[2, :] - new_face[0, :])
+            s = (a + b + c) / 2
+            area = np.sqrt(s * (s - a) * (s - b) * (s - c))
+            deformed_quality += [(4 * np.sqrt(3) * area) / (a ** 2 + b ** 2 + c ** 2)]
