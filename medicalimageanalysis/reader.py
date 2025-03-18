@@ -48,7 +48,7 @@ class Reader(Data):
     """
 
     def __init__(self, folder_path=None, file_list=None, exclude_files=None, only_tags=False, only_modality=None,
-                 only_load_roi_names=None):
+                 only_load_roi_names=None, clear=True):
         """
         User must input either folder_path or file_list, this will be used to determine which files to read in.
         If folder_path is input the "file_parsar" function runs to sort all the files into a dictionary of:
@@ -67,6 +67,9 @@ class Reader(Data):
         :param only_load_roi_names: will only load rois with input name, list format
         :type only_load_roi_names: list
         """
+        if clear:
+            Data.clear()
+
         self.exclude_files = exclude_files
         self.only_tags = only_tags
         self.only_load_roi_names = only_load_roi_names
