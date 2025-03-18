@@ -44,12 +44,12 @@ class Rigid(object):
         else:
             self.combo_matrix = combo_matrix
 
-    def compute_icp_vtk(self, source_mesh, target_mesh, landmarks=None, distance=None, iterations=None):
+    def compute_icp_vtk(self, source_mesh, target_mesh, distance=10, iterations=1000, landmarks=None):
         icp = ICP(source_mesh, target_mesh)
         if self.combo_name:
-            icp.compute_vtk(self, distance=distance, iterations=iterations, landmarks=landmarks, com_matching=False)
+            icp.compute_vtk(distance=distance, iterations=iterations, landmarks=landmarks, com_matching=False)
         else:
-            icp.compute_vtk(self, distance=distance, iterations=iterations, landmarks=landmarks, com_matching=True)
+            icp.compute_vtk(distance=distance, iterations=iterations, landmarks=landmarks, com_matching=True)
 
         self.matrix = icp.get_matrix()
 
