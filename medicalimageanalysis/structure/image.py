@@ -22,8 +22,48 @@ import SimpleITK as sitk
 import vtk
 from vtkmodules.util import numpy_support
 
+from ..utils.image.transform import euler_transform
+
 from .poi import Poi
 from .roi import Roi
+
+
+class Display(object):
+    def __init__(self, image):
+        self.image = image
+        self.display_matrix = copy.deepcopy(self.image.matrix)
+
+        if self.image.dimensions[2] > 0:
+            self.slice_location = [int(self.image.dimensions[0] / 2),
+                                   int(self.image.dimensions[1] / 2),
+                                   int(self.image.dimensions[2] / 2)]
+        else:
+            self.slice_location = [int(self.image.dimensions[0] / 2), int(self.image.dimensions[1] / 2), 0]
+
+    def compute_matrix_position_to_pixel(self):
+        matrix = np.identity(3, dtype=np.float32)
+        matrix[0, :] = self.display_matrix[0, :] / self.spacing[0]
+        matrix[1, :] = self.display_matrix[1, :] / self.spacing[1]
+        matrix[2, :] = self.display_matrix[2, :] / self.spacing[2]
+
+        position_to_pixel_matrix = np.identity(4, dtype=np.float32)
+        position_to_pixel_matrix[:3, :3] = matrix
+        position_to_pixel_matrix[:3, 3] = np.asarray(self.origin).dot(-matrix.T)
+
+        return position_to_pixel_matrix
+
+    def compute_matrix_pixel_to_position(self):
+        pixel_to_position_matrix = np.identity(4, dtype=np.float32)
+        pixel_to_position_matrix[:3, 0] = self.display_matrix[0, :] * self.spacing[0]
+        pixel_to_position_matrix[:3, 1] = self.display_matrix[1, :] * self.spacing[1]
+        pixel_to_position_matrix[:3, 2] = self.display_matrix[2, :] * self.spacing[2]
+        pixel_to_position_matrix[:3, 3] = self.origin
+
+        return pixel_to_position_matrix
+
+    def update_rotation(self, rotation_matrix=None):
+        self.display_matrix = rotation_matrix @ self.image.matrix
+        print(1)
 
 
 class Image(object):
@@ -52,7 +92,6 @@ class Image(object):
         self.orientation = None
         self.origin = None
         self.matrix = None
-        self.display_matrix = np.identity(4, dtype=np.float32)
         self.window = None
         self.camera_position = None
 
@@ -61,14 +100,12 @@ class Image(object):
         self.sections = None
         self.rgb = False
 
-        self.slice_location = [0, 0, 0]
-
-        self.rotated_array = None
+        self.display = None
+        self.slice_location = None
 
     def input(self, image):
         self.tags = image.image_set
         self.array = np.transpose(image.array, (2, 1, 0))
-        # self.array = image.array
 
         self.patient_name = self.get_patient_name()
         self.mrn = self.get_mrn()
@@ -87,7 +124,6 @@ class Image(object):
         self.orientation = image.orientation
         self.origin = image.origin
         self.matrix = image.image_matrix
-        self.display_matrix[:3, :3] = copy.deepcopy(self.matrix)
 
         self.unverified = image.unverified
         self.skipped_slice = image.skipped_slice
@@ -95,13 +131,7 @@ class Image(object):
         self.rgb = image.rgb
 
         self.modality = image.modality
-
-        if self.dimensions[2] > 0:
-            self.slice_location = [int(self.dimensions[0] / 2),
-                                   int(self.dimensions[1] / 2),
-                                   int(self.dimensions[2] / 2)]
-        else:
-            self.slice_location = [int(self.dimensions[0] / 2), int(self.dimensions[1] / 2), 0]
+        self.display = Display(self)
 
     def input_rtstruct(self, rtstruct):
         for ii, roi_name in enumerate(rtstruct.roi_names):
@@ -371,7 +401,7 @@ class Image(object):
         resample_image.Execute(sitk_image)
 
         # resample_image = sitk.Resample(sitk_image, transform, sitk.sitkLinear, 0.0, sitk_image.GetPixelID())
-        self.rotated_array = sitk.GetArrayFromImage(resample_image)
+        return sitk.GetArrayFromImage(resample_image)
 
     def array_slice_plane(self, slice_plane='Axial'):
         if slice_plane == 'Axial':
@@ -445,7 +475,7 @@ class Image(object):
         pixel_to_position_matrix = self.compute_matrix_pixel_to_position()
 
         rotation_position = np.asarray([location[0], location[1], location[2], 1]).dot(pixel_to_position_matrix.T)[:3]
-        transform = self.euler_transform(angles=angles, translation=None, rotation_position=rotation_position)
+        transform = euler_transform(angles=angles, translation=None, rotation_position=rotation_position)
 
         center = np.round(np.asarray(self.dimensions) / 2).astype(np.int64)
         if slice_plane == 'Axial':
@@ -488,10 +518,10 @@ class Image(object):
             last_row = np.linspace(square_rotated_voxels[2], square_rotated_voxels[3], self.dimensions[1])
             base_grid = np.linspace(first_row, last_row, self.dimensions[2])
             slice_array = np.full((self.dimensions[1], self.dimensions[2]), np.nan)
-            
-        grid_x = (base_grid[:, :, 0] >= 0) & (base_grid[:, :, 0] <= self.dimensions[0] - .51)
-        grid_y = (base_grid[:, :, 1] >= 0) & (base_grid[:, :, 1] <= self.dimensions[1] - .51)
-        grid_z = (base_grid[:, :, 2] >= 0) & (base_grid[:, :, 2] <= self.dimensions[2] - .51)
+
+        grid_x = (base_grid[:, :, 0] >= -0.001) & (base_grid[:, :, 0] <= self.dimensions[0] - .51)
+        grid_y = (base_grid[:, :, 1] >= -0.001) & (base_grid[:, :, 1] <= self.dimensions[1] - .51)
+        grid_z = (base_grid[:, :, 2] >= -0.001) & (base_grid[:, :, 2] <= self.dimensions[2] - .51)
         combine_grid = 1 * ((1 * grid_x + 1 * grid_y + 1 * grid_z) == 3)
         idx = np.transpose(np.where(combine_grid > 0))
         grid_keep = np.round(base_grid[idx[:, 0], idx[:, 1], :]).astype(np.int64)
@@ -502,23 +532,6 @@ class Image(object):
 
         return slice_array
 
-    def euler_transform(self, angles=None, translation=None, rotation_position=None):
-        rotation = [angles[0] * np.pi / 180, angles[1] * np.pi / 180, angles[2] * np.pi / 180]
-        transform = sitk.Euler3DTransform()
-
-        if angles is not None:
-            transform.SetRotation(rotation[0], rotation[1], rotation[2])
-
-        if translation is not None:
-            transform.SetTranslation(translation)
-
-        if rotation_position is not None:
-            transform.SetCenter(rotation_position)
-
-        transform.SetComputeZYX(True)
-
-        return transform
-
     def update_slice_location(self, location, slice_plane):
         if slice_plane == 'Axial':
             self.slice_location[2] = location
@@ -528,3 +541,16 @@ class Image(object):
             self.slice_location[0] = location
 
         return location
+
+    def update_display_rotation(self, rotation_matrix=None, angles=None, translation=None, rotation_pixel=None):
+        if rotation_matrix is not None:
+            self.display.update_rotation(rotation_matrix=rotation_matrix)
+
+        else:
+            pixel_to_position_matrix = self.display.compute_matrix_pixel_to_position()
+
+            rotation_pixel_array = np.asarray([rotation_pixel[0], rotation_pixel[1], rotation_pixel[2], 1])
+            rotation_position = rotation_pixel_array.dot(pixel_to_position_matrix.T)[:3]
+            rotation_matrix = euler_transform(angles=angles, translation=translation, rotation_center=rotation_position)
+            self.display.update_rotation(rotation_matrix=rotation_matrix)
+
