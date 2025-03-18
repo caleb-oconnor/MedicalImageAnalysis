@@ -41,6 +41,7 @@ class ICP(object):
         if landmarks is None:
             landmarks = int(np.round(len(self.target.points) / 10))
 
+        self.icp = vtk.vtkIterativeClosestPointTransform()
         self.icp.SetSource(self.source)
         self.icp.SetTarget(self.target)
         self.icp.GetLandmarkTransform().SetModeToRigidBody()
@@ -53,7 +54,7 @@ class ICP(object):
         self.icp.Modified()
         self.icp.Update()
 
-        self.matrix = pv.array_from_vtkmatrix(self.icp.GetMatrix())
+        self.matrix = np.linalg.inv(pv.array_from_vtkmatrix(self.icp.GetMatrix()))
 
     def compute_o3d(self, distance=10, iterations=1000, rmse=1e-7, fitness=1e-7, method='point', com_matching=True):
         ref_pcd = PointCloud()
