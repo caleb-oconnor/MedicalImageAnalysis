@@ -13,6 +13,7 @@ Structure:
 
 import os
 import copy
+import math
 import time
 
 import numpy as np
@@ -101,10 +102,10 @@ class Display(object):
         square_rotated_voxels = self.square_help(slice_plane)
 
         if slice_plane == 'Axial':
-            first_row = np.linspace(square_rotated_voxels[0], square_rotated_voxels[1], self.image.dimensions[0])
-            last_row = np.linspace(square_rotated_voxels[2], square_rotated_voxels[3], self.image.dimensions[0])
-            base_grid = np.linspace(first_row, last_row, self.image.dimensions[1])
-            slice_array = np.full((self.image.dimensions[0], self.image.dimensions[1]), np.nan)
+            first_row = np.linspace(square_rotated_voxels[0], square_rotated_voxels[1], 2 * self.image.dimensions[0])
+            last_row = np.linspace(square_rotated_voxels[2], square_rotated_voxels[3], 2 * self.image.dimensions[0])
+            base_grid = np.linspace(first_row, last_row, 2 * self.image.dimensions[1])
+            slice_array = np.full((2 * self.image.dimensions[0], 2 * self.image.dimensions[1]), np.nan)
 
         elif slice_plane == 'Coronal':
             first_row = np.linspace(square_rotated_voxels[0], square_rotated_voxels[1], 2 * self.image.dimensions[2])
@@ -131,8 +132,6 @@ class Display(object):
 
         return slice_array
 
-    # def compute_slice_position(self):
-
     def compute_scroll_max(self):
         if np.array_equal(self.matrix, self.image.matrix):
             self.scroll_max = [self.image.dimensions[0] - 1,
@@ -144,6 +143,16 @@ class Display(object):
             self.scroll_max[2] = int(slices[2] - 1)
             self.scroll_max[1] = int(slices[1] - 1)
             self.scroll_max[0] = int(slices[0] - 1)
+
+    def get_scroll_max(self, slice_plane):
+        if slice_plane == 'Axial':
+            return self.scroll_max[2]
+
+        elif slice_plane == 'Coronal':
+            return self.scroll_max[1]
+
+        else:
+            return self.scroll_max[0]
 
     def square_help(self, slice_plane):
         pixel_to_position_matrix = self.compute_matrix_pixel_to_position()
@@ -179,6 +188,29 @@ class Display(object):
 
         return square_rotated_voxels
 
+    def update_matrix(self, roll, pitch, yaw, reset=False):
+        roll_rad = math.radians(roll)
+        pitch_rad = math.radians(pitch)
+        yaw_rad = math.radians(yaw)
+
+        R_z = np.array([[math.cos(roll_rad), -math.sin(roll_rad), 0],
+                        [math.sin(roll_rad), math.cos(roll_rad), 0],
+                        [0, 0, 1]])
+
+        R_y = np.array([[math.cos(pitch_rad), 0, math.sin(pitch_rad)],
+                        [0, 1, 0],
+                        [-math.sin(pitch_rad), 0, math.cos(pitch_rad)]])
+
+        R_x = np.array([[1, 0, 0],
+                        [0, math.cos(yaw_rad), -math.sin(yaw_rad)],
+                        [0, math.sin(yaw_rad), math.cos(yaw_rad)]])
+
+        if reset:
+            self.matrix = copy.deepcopy(self.image.matrix)
+        else:
+            rotation_matrix = np.dot(R_z, np.dot(R_y, R_x))
+            self.update_rotation(rotation_matrix=rotation_matrix)
+
     def update_rotation(self, rotation_matrix=None):
         self.matrix = rotation_matrix @ self.image.matrix
 
@@ -194,11 +226,11 @@ class Display(object):
 
     def update_slice_location(self, scroll, slice_plane):
         if slice_plane == 'Axial':
-            self.slice_location[2] = self.slice_location[2] + scroll
+            self.slice_location[2] = scroll
         elif slice_plane == 'Coronal':
-            self.slice_location[1] = self.slice_location[1] + scroll
+            self.slice_location[1] = scroll
         else:
-            self.slice_location[0] = self.slice_location[0] + scroll
+            self.slice_location[0] = scroll
 
 
 class Image(object):
@@ -539,23 +571,6 @@ class Image(object):
         # resample_image = sitk.Resample(sitk_image, transform, sitk.sitkLinear, 0.0, sitk_image.GetPixelID())
         return sitk.GetArrayFromImage(resample_image)
 
-    def array_rotated_slice_plane(self, slice_plane='Axial'):
-        """
-        -	Array order [a, c, s]
-        -	Axial flipped on x-axis, Inferior to Superior
-        -	Coronal, Anterior to Posterior
-        -	Sagittal, Left to Right
-
-        """
-        if slice_plane == 'Axial':
-            array = np.flip(self.rotated_array[:, :, self.slice_location[2]], 0)
-        elif slice_plane == 'Coronal':
-            array = self.rotated_array[:, self.slice_location[1], :]
-        else:
-            array = self.rotated_array[self.slice_location[0], :, :]
-
-        return array
-
     def compute_aspect(self, slice_plane):
         if slice_plane == 'Axial':
             aspect = np.round(self.spacing[0] / self.spacing[1], 2)
@@ -591,7 +606,14 @@ class Image(object):
         return self.display.compute_array(slice_plane=slice_plane)
 
     def retrieve_slice_location(self, slice_plane):
-        return self.display.update_slice_location(slice_plane)
+        if slice_plane == 'Axial':
+            return self.display.slice_location[2]
+
+        elif slice_plane == 'Coronal':
+            return self.display.slice_location[1]
+
+        else:
+            return self.display.slice_location[0]
 
     def retrieve_scroll_max(self, slice_plane):
         return self.display.compute_scroll_max(slice_plane)
