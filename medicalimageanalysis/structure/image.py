@@ -32,8 +32,11 @@ from .roi import Roi
 class Display(object):
     def __init__(self, image):
         self.image = image
-        self.matrix = copy.deepcopy(self.image.matrix)
-        self.spacing = copy.deepcopy(self.image.spacing)
+
+        self.matrix = None
+        self.spacing = None
+        self.transform = None
+        self.center = np.round(np.asarray(self.image.dimensions) / 2).astype(np.int64)
 
         if self.image.dimensions[2] > 0:
             self.slice_location = [int(self.image.dimensions[0] / 2),
@@ -45,6 +48,8 @@ class Display(object):
         self.scroll_max = [self.image.dimensions[0] - 1,
                            self.image.dimensions[1] - 1,
                            self.image.dimensions[2] - 1]
+
+        self.update_rotation()
 
     def compute_matrix_position_to_pixel(self, base=True):
         if base:
@@ -98,8 +103,37 @@ class Display(object):
 
         return array
 
+    def compute_vtk_array(self, slice_plane):
+        if np.array_equal(self.matrix, self.image.matrix):
+            if slice_plane == 'Axial':
+                array = self.image.array[:, :, self.slice_location[2]]
+                dims = [array.shape[0], array.shape[1], 1]
+                location = np.asarray([0, 0, self.slice_location[2], 1])
+            elif slice_plane == 'Coronal':
+                array = self.image.array[:, self.slice_location[1], :]
+                dims = [array.shape[0], 1, array.shape[1]]
+                location = np.asarray([0, self.slice_location[1], 0, 1])
+            else:
+                array = self.image.array[self.slice_location[0], :, :]
+                dims = [1, array.shape[0], array.shape[1]]
+                location = np.asarray([self.slice_location[0], 0, 0, 1])
+
+            pixel_to_position_matrix = self.compute_matrix_pixel_to_position()
+            origin = location.dot(pixel_to_position_matrix.T)[:3]
+
+            vtk_array = vtk.vtkImageData()
+            vtk_array.SetSpacing(self.spacing)
+            vtk_array.SetOrigin(origin)
+            vtk_array.SetDimensions(dims)
+            vtk_array.GetPointData().SetScalars(numpy_support.numpy_to_vtk(array.flatten(order="F")))
+
+        else:
+            vtk_array = self.compute_off_axis_slice_plane(slice_plane)
+
+        return vtk_array
+
     def compute_off_axis_slice_plane(self, slice_plane):
-        square_rotated_voxels = self.square_help(slice_plane)
+        square_rotated_voxels, _ = self.square_help(slice_plane)
 
         if slice_plane == 'Axial':
             first_row = np.linspace(square_rotated_voxels[0], square_rotated_voxels[1], 2 * self.image.dimensions[0])
@@ -155,38 +189,44 @@ class Display(object):
             return self.scroll_max[0]
 
     def square_help(self, slice_plane):
-        pixel_to_position_matrix = self.compute_matrix_pixel_to_position()
-
+        matrix = self.compute_matrix_pixel_to_position()
         location = np.asarray([self.slice_location[0], self.slice_location[1], self.slice_location[2], 1])
-        rotation_center = location.dot(pixel_to_position_matrix.T)[:3]
-        transform = euler_transform(matrix=self.matrix, rotation_center=rotation_center)
-
-        center = np.round(np.asarray(self.image.dimensions) / 2).astype(np.int64)
         if slice_plane == 'Axial':
-            square = [np.asarray([-center[0], -center[1], location[2], 1]).dot(pixel_to_position_matrix.T)[:3],
-                      np.asarray([-center[0], 3 * center[1], location[2], 1]).dot(pixel_to_position_matrix.T)[:3],
-                      np.asarray([3 * center[0], -center[1], location[2], 1]).dot(pixel_to_position_matrix.T)[:3],
-                      np.asarray([3 * center[0], 3 * center[1], location[2], 1]).dot(pixel_to_position_matrix.T)[:3]]
+            origin_voxel = np.asarray([0, 0, location[2]])
+            origin_position = np.hstack((origin_voxel, 1)).astype(np.double).dot(matrix.T)[:3]
+            square = [np.asarray([-self.center[0], -self.center[1], location[2], 1]).dot(matrix.T)[:3],
+                      np.asarray([-self.center[0], 3 * self.center[1], location[2], 1]).dot(matrix.T)[:3],
+                      np.asarray([3 * self.center[0], -self.center[1], location[2], 1]).dot(matrix.T)[:3],
+                      np.asarray([3 * self.center[0], 3 * self.center[1], location[2], 1]).dot(matrix.T)[:3]]
 
         elif slice_plane == 'Coronal':
-            square = [np.asarray([-center[0], location[1], -center[2], 1]).dot(pixel_to_position_matrix.T)[:3],
-                      np.asarray([-center[0], location[1], 3 * center[2], 1]).dot(pixel_to_position_matrix.T)[:3],
-                      np.asarray([3 * center[0], location[1], -center[2], 1]).dot(pixel_to_position_matrix.T)[:3],
-                      np.asarray([3 * center[0], location[1], 3 * center[2], 1]).dot(pixel_to_position_matrix.T)[:3]]
+            origin_voxel = np.asarray([0, location[1], 0])
+            origin_position = np.hstack((origin_voxel, 1)).astype(np.double).dot(matrix.T)[:3]
+            square = [np.asarray([-self.center[0], location[1], -self.center[2], 1]).dot(matrix.T)[:3],
+                      np.asarray([-self.center[0], location[1], 3 * self.center[2], 1]).dot(matrix.T)[:3],
+                      np.asarray([3 * self.center[0], location[1], -self.center[2], 1]).dot(matrix.T)[:3],
+                      np.asarray([3 * self.center[0], location[1], 3 * self.center[2], 1]).dot(matrix.T)[:3]]
 
         else:
-            square = [np.asarray([location[0], -center[1], -center[2], 1]).dot(pixel_to_position_matrix.T)[:3],
-                      np.asarray([location[0], -center[1], 3 * center[2], 1]).dot(pixel_to_position_matrix.T)[:3],
-                      np.asarray([location[0], 3 * center[1], -center[2], 1]).dot(pixel_to_position_matrix.T)[:3],
-                      np.asarray([location[0], 3 * center[1], 3 * center[2], 1]).dot(pixel_to_position_matrix.T)[:3]]
+            origin_voxel = np.asarray([location[0], 0, 0])
+            origin_position = np.hstack((origin_voxel, 1)).astype(np.double).dot(matrix.T)[:3]
+            square = [np.asarray([location[0], -self.center[1], -self.center[2], 1]).dot(matrix.T)[:3],
+                      np.asarray([location[0], -self.center[1], 3 * self.center[2], 1]).dot(matrix.T)[:3],
+                      np.asarray([location[0], 3 * self.center[1], -self.center[2], 1]).dot(matrix.T)[:3],
+                      np.asarray([location[0], 3 * self.center[1], 3 * self.center[2], 1]).dot(matrix.T)[:3]]
 
         position_to_pixel_matrix = self.compute_matrix_position_to_pixel()
-        square_rotated_position = [transform.TransformPoint(s) for s in square]
+        square_rotated_position = [self.transform.TransformPoint(s) for s in square]
         square_rotated_concat = np.concatenate((square_rotated_position,
                                                 np.ones((len(square_rotated_position), 1))), axis=1)
         square_rotated_voxels = square_rotated_concat.dot(position_to_pixel_matrix.T)[:, :3]
+        expanded_origin_voxel = square_rotated_voxels[0]
 
-        return square_rotated_voxels
+        new_origin_position = self.transform.TransformPoint(origin_position)
+        new_origin_voxel = np.hstack((new_origin_position, 1)).dot(position_to_pixel_matrix.T)[:3]
+        origin_difference = new_origin_voxel - origin_voxel
+
+        return square_rotated_voxels, origin_difference
 
     def update_matrix(self, roll, pitch, yaw, reset=False):
         roll_rad = math.radians(roll)
@@ -212,17 +252,16 @@ class Display(object):
             self.update_rotation(rotation_matrix=rotation_matrix)
 
     def update_rotation(self, rotation_matrix=None):
-        self.matrix = rotation_matrix @ self.image.matrix
+        if rotation_matrix is None:
+            self.matrix = self.image.matrix
+        else:
+            self.matrix = rotation_matrix @ self.image.matrix
 
         pixel_to_position_matrix = self.compute_matrix_pixel_to_position()
         location = np.asarray([self.slice_location[0], self.slice_location[1], self.slice_location[2], 1])
         rotation_center = location.dot(pixel_to_position_matrix.T)[:3]
-        transform = euler_transform(matrix=self.matrix, rotation_center=rotation_center)
-
-        center = np.round(np.asarray(self.image.dimensions) / 2).astype(np.int64)
-        base = transform.TransformPoint(center.astype(np.double))
-        new = transform.TransformPoint(center.astype(np.double) - 1)
-        self.spacing = self.image.spacing * np.abs(np.asarray(base) - np.asarray(new))
+        self.transform = euler_transform(matrix=self.matrix, rotation_center=rotation_center)
+        self.spacing = self.image.spacing.dot(self.matrix)
 
     def update_slice_location(self, scroll, slice_plane):
         if slice_plane == 'Axial':
@@ -604,6 +643,9 @@ class Image(object):
 
     def retrieve_array_plane(self, slice_plane='Axial'):
         return self.display.compute_array(slice_plane=slice_plane)
+
+    def retrieve_vtk_plane(self, slice_plane='Axial'):
+        return self.display.compute_vtk_array(slice_plane=slice_plane)
 
     def retrieve_slice_location(self, slice_plane):
         if slice_plane == 'Axial':
