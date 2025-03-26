@@ -20,7 +20,7 @@ def euler_transform(matrix=None, angles=None, translation=None, rotation_center=
         transform.SetRotation(rotation[0], rotation[1], rotation[2])
 
     if matrix is not None:
-        transform.SetMatrix(matrix[:3, :3].flatten())
+        transform.SetMatrix(matrix[:3, :3].flatten().astype(np.double))
 
     if translation is not None:
         transform.SetTranslation(translation)
