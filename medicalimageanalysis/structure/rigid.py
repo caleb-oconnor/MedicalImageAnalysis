@@ -13,6 +13,8 @@ Structure:
 
 import numpy as np
 
+from scipy.spatial.transform import Rotation
+
 from ..utils.rigid.icp import ICP
 from ..data import Data
 
@@ -44,6 +46,10 @@ class Rigid(object):
         else:
             self.combo_matrix = combo_matrix
 
+        self.angles = None
+        self.translation = None
+        self.update_angles_translation()
+
     def compute_icp_vtk(self, source_mesh, target_mesh, distance=10, iterations=1000, landmarks=None):
         icp = ICP(source_mesh, target_mesh)
         if self.combo_name:
@@ -52,6 +58,16 @@ class Rigid(object):
             icp.compute_vtk(distance=distance, iterations=iterations, landmarks=landmarks, com_matching=True)
 
         self.matrix = icp.get_matrix()
+        self.update_angles_translation()
+
+    def update_matrix(self, matrix):
+        self.matrix = matrix
+        self.update_angles_translation()
+
+    def update_angles_translation(self):
+        rotation = Rotation.from_matrix(self.matrix[:3, :3])
+        self.angles = rotation.as_euler("ZXY", degrees=True)
+        self.translation = self.matrix[:3, 3]
 
     def add_rigid(self):
         Data.rigid = [self]
