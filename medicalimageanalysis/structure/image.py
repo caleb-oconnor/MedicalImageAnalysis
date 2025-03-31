@@ -53,6 +53,24 @@ class Display(object):
                            self.image.dimensions[1] - 1,
                            self.image.dimensions[2] - 1]
 
+    def compute_matrix_pixel_to_position(self, base=True):
+        if base:
+            matrix = copy.deepcopy(self.image.matrix)
+            spacing = self.image.spacing
+            origin = self.image.origin
+        else:
+            matrix = copy.deepcopy(self.matrix)
+            spacing = self.spacing
+            origin = self.origin
+
+        pixel_to_position_matrix = np.identity(4, dtype=np.float32)
+        pixel_to_position_matrix[:3, 0] = matrix[0, :] * spacing[0]
+        pixel_to_position_matrix[:3, 1] = matrix[1, :] * spacing[1]
+        pixel_to_position_matrix[:3, 2] = matrix[2, :] * spacing[2]
+        pixel_to_position_matrix[:3, 3] = origin
+
+        return pixel_to_position_matrix
+
     def compute_matrix_position_to_pixel(self, base=True):
         if base:
             matrix = copy.deepcopy(self.image.matrix)
@@ -73,24 +91,6 @@ class Display(object):
         position_to_pixel_matrix[:3, 3] = np.asarray(origin).dot(-hold_matrix.T)
 
         return position_to_pixel_matrix
-
-    def compute_matrix_pixel_to_position(self, base=True):
-        if base:
-            matrix = copy.deepcopy(self.image.matrix)
-            spacing = self.image.spacing
-            origin = self.image.origin
-        else:
-            matrix = copy.deepcopy(self.matrix)
-            spacing = self.spacing
-            origin = self.origin
-
-        pixel_to_position_matrix = np.identity(4, dtype=np.float32)
-        pixel_to_position_matrix[:3, 0] = matrix[0, :] * spacing[0]
-        pixel_to_position_matrix[:3, 1] = matrix[1, :] * spacing[1]
-        pixel_to_position_matrix[:3, 2] = matrix[2, :] * spacing[2]
-        pixel_to_position_matrix[:3, 3] = origin
-
-        return pixel_to_position_matrix
 
     def compute_array(self, slice_plane):
         if np.array_equal(self.matrix, self.image.matrix):
@@ -140,8 +140,8 @@ class Display(object):
             self.matrix = rotation_matrix @ self.image.matrix
 
         pixel_to_position_matrix = self.compute_matrix_pixel_to_position()
-        # location = np.asarray([self.slice_location[0], self.slice_location[1], self.slice_location[2], 1])
-        location = np.asarray([0, 0, 0, 1])
+        location = np.asarray([self.slice_location[0], self.slice_location[1], self.slice_location[2], 1])
+        # location = np.asarray([0, 0, 0, 1])
         rotation_center = location.dot(pixel_to_position_matrix.T)[:3]
 
         matrix_reshape = self.image.matrix.reshape(1, 9)[0]
@@ -178,19 +178,21 @@ class Display(object):
         extent = np.round(((rotated_box_max - rotated_box_min) / self.image.spacing)).astype(np.int32)
 
         transform = vtk.vtkTransform()
+        transform.Translate(-rotation_center)
         transform.RotateZ(euler_angles[0])
         transform.RotateX(euler_angles[1])
         transform.RotateY(euler_angles[2])
+        transform.Translate(rotation_center)
 
         vtk_reslice = vtk.vtkImageReslice()
         vtk_reslice.SetInputData(vtk_image)
         vtk_reslice.SetResliceTransform(transform)
         vtk_reslice.SetInterpolationModeToLinear()
-        # vtk_reslice.AutoCropOutputOn()
-        vtk_reslice.SetOutputExtent(0, extent[0], 0, extent[1], 0, extent[2])
-        vtk_reslice.SetOutputSpacing(self.image.spacing)
-        vtk_reslice.SetOutputOrigin(rotated_box_min)
-        vtk_reslice.SetBackgroundLevel(-3001)
+        vtk_reslice.AutoCropOutputOn()
+        # vtk_reslice.SetOutputExtent(0, extent[0], 0, extent[1], 0, extent[2])
+        # vtk_reslice.SetOutputSpacing(self.image.spacing)
+        # vtk_reslice.SetOutputOrigin(rotated_box_min)
+        # vtk_reslice.SetBackgroundLevel(-3001)
         vtk_reslice.Update()
 
         reslice_data = vtk_reslice.GetOutput()
@@ -594,6 +596,18 @@ class Image(object):
 
         else:
             return self.display.slice_location[0]
+
+    def retrieve_slice_position(self, slice_plane):
+        pixel_to_position_matrix = self.display.compute_matrix_pixel_to_position()
+
+        if slice_plane == 'Axial':
+            location = np.asarray([0, 0, self.display.slice_location[2], 1])
+        elif slice_plane == 'Coronal':
+            location = np.asarray([0, self.display.slice_location[1], 0, 1])
+        else:
+            location = np.asarray([self.display.slice_location[0], 0, 0, 1])
+
+        return location.dot(pixel_to_position_matrix.T)[:3]
 
     def retrieve_scroll_max(self, slice_plane):
         return self.display.compute_scroll_max(slice_plane)
