@@ -28,6 +28,14 @@ from ..structure.image import Image
 from ..data import Data
 
 
+def sort_images_by_datetime():
+    date_time = [str(Data.images[name].date) + str(Data.images[name].time) for name in Data.image_list]
+    new_key_order = [Data.image_list[idx] for idx in np.argsort(date_time)]
+
+    Data.images = {key: Data.images[key] for key in new_key_order}
+    Data.image_list = list(Data.images.keys())
+
+
 def thread_process_dicom(path, stop_before_pixels=False):
     try:
         datasets = dicom.dcmread(str(path), stop_before_pixels=stop_before_pixels)
@@ -65,6 +73,7 @@ class DicomReader(object):
         self.read()
         self.separate_modalities_and_images()
         self.image_creation()
+        sort_images_by_datetime()
         t2 = time.time()
 
         if display_time:
@@ -203,14 +212,24 @@ class DicomReader(object):
                 if load:
                     image = Image()
                     image.input(read_image)
-                    Data.images += [image]
+
+                    modality = image.modality
+                    idx = len(Data.image_list)
+                    if idx < 9:
+                        image_name = modality + ' 0' + str(1 + idx)
+                    else:
+                        image_name = modality + ' ' + str(1 + idx)
+                    image.image_name = image_name
+
+                    Data.images[image_name] = image
+                    Data.image_list += [image_name]
 
         for modality in ['RTSTRUCT']:
             for image_set in self.ds_modality[modality]:
                 if modality == 'RTSTRUCT':
-                    read_rtstruct = ReadRTStruct(image_set, Data.images, self.reader.only_tags)
-                    if read_rtstruct.match_image_idx is not None:
-                        Data.images[read_rtstruct.match_image_idx].input_rtstruct(read_rtstruct)
+                    read_rtstruct = ReadRTStruct(image_set, self.reader.only_tags)
+                    if read_rtstruct.match_image_name is not None:
+                        Data.images[read_rtstruct.match_image_name].input_rtstruct(read_rtstruct)
                     else:
                         print('dicom: rtstruct has no matching image')
 
@@ -706,9 +725,8 @@ class ReadUS(object):
 
 
 class ReadRTStruct(object):
-    def __init__(self, image_set, reference_images, only_tags):
+    def __init__(self, image_set, only_tags):
         self.image_set = image_set
-        self.reference_images = reference_images
         self.only_tags = only_tags
 
         self.series_uid = self._get_series_uid()
@@ -720,7 +738,7 @@ class ReadRTStruct(object):
         self.poi_names = [prop[1] for prop in self._properties if prop[3].lower() == 'point']
         self.poi_colors = [prop[2] for prop in self._properties if prop[3].lower() == 'point']
 
-        self.match_image_idx = self._match_with_image()
+        self.match_image_name = self._match_with_image()
 
         self.contours = []
         self.points = []
@@ -754,13 +772,14 @@ class ReadRTStruct(object):
         return properties
 
     def _match_with_image(self):
-        match_image_idx = None
-        for ii, reference in enumerate(self.reference_images):
-            if self.series_uid == reference.series_uid:
-                if self._properties[0][4][0] in reference.sops:
-                    match_image_idx = ii
+        match_image_name = None
 
-        return match_image_idx
+        for image_name in Data.images:
+            if self.series_uid == Data.images[image_name].series_uid:
+                if self._properties[0][4][0] in Data.images[image_name].sops:
+                    match_image_name = image_name
+
+        return match_image_name
 
     def _structure_positions(self):
         sequences = self.image_set.ROIContourSequence
