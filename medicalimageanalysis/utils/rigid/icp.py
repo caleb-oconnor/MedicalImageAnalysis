@@ -10,11 +10,14 @@ Description:
 Structure:
 
 """
+import copy
 
 import vtk
 import numpy as np
 import pyvista as pv
 import SimpleITK as sitk
+
+from scipy.spatial.transform import Rotation
 
 from open3d.geometry import PointCloud
 from open3d.utility import Vector3dVector
@@ -37,7 +40,7 @@ class ICP(object):
         self.matrix = np.identity(4)
         self.matrix[:3, 3] = translation
 
-    def compute_vtk(self, distance=10, iterations=1000, landmarks=None, com_matching=True):
+    def compute_vtk(self, distance=1e-5, iterations=1000, landmarks=None, com_matching=True):
         if landmarks is None:
             landmarks = int(np.round(len(self.target.points) / 10))
 
@@ -78,7 +81,10 @@ class ICP(object):
         else:
             self.icp = registration_icp(ref_pcd, mov_pcd, distance, initial_transform,
                                         TransformationEstimationPointToPlane())
-        self.matrix = self.icp.transformation
+
+        r_zyx = Rotation.from_matrix(self.icp.transformation)
+        zxy_angles = r_zyx.as_euler('zxy', degrees=True)
+        self.matrix = Rotation.from_euler('zxy', zxy_angles, degrees=True).as_matrix()
 
     def get_matrix(self):
         return self.matrix
