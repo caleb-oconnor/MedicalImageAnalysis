@@ -57,7 +57,7 @@ class Rigid(object):
         self.origin = None
         self.spacing = None
 
-    def compute_icp_vtk(self, source_mesh, target_mesh, distance=10, iterations=1000, landmarks=None):
+    def compute_icp_vtk(self, source_mesh, target_mesh, distance=1e-5, iterations=1000, landmarks=None):
         icp = ICP(source_mesh, target_mesh)
         if self.combo_name:
             icp.compute_vtk(distance=distance, iterations=iterations, landmarks=landmarks, com_matching=False)
@@ -71,7 +71,7 @@ class Rigid(object):
         if spacing is None:
             spacing = Data.images[self.target_name].spacing
 
-        matrix_reshape = self.matrix[:3, :3].reshape(1, 9)[0]
+        matrix_reshape = Data.images[self.target_name].matrix[:3, :3].reshape(1, 9)[0]
         vtk_image = vtk.vtkImageData()
         vtk_image.SetSpacing(spacing)
         vtk_image.SetDirectionMatrix(matrix_reshape)
@@ -79,10 +79,16 @@ class Rigid(object):
         vtk_image.SetOrigin(Data.images[self.target_name].origin)
         vtk_image.GetPointData().SetScalars(numpy_to_vtk(Data.images[self.target_name].array.flatten(order="F")))
 
+        set_matrix = np.identity(4)
+        set_matrix[:3, :3] = self.matrix[:3, :3]
+        set_matrix = set_matrix.T
+
         transform = vtk.vtkTransform()
-        transform.RotateZ(self.angles[0])
-        transform.RotateX(self.angles[1])
-        transform.RotateY(self.angles[2])
+        matrix = vtk.vtkMatrix4x4()
+        for i in range(4):
+            for j in range(4):
+                matrix.SetElement(i, j, set_matrix[i, j])
+        transform.SetMatrix(matrix)
 
         vtk_reslice = vtk.vtkImageReslice()
         vtk_reslice.SetInputData(vtk_image)
@@ -102,38 +108,47 @@ class Rigid(object):
                                                                     dimensions[1],
                                                                     dimensions[0]), (2, 1, 0))
 
-    def compute_matrix_pixel_to_position(self):
-        pixel_to_position_matrix = np.identity(4, dtype=np.float32)
-        pixel_to_position_matrix[:3, 0] = self.matrix[0, :] * self.spacing[0]
-        pixel_to_position_matrix[:3, 1] = self.matrix[1, :] * self.spacing[1]
-        pixel_to_position_matrix[:3, 2] = self.matrix[2, :] * self.spacing[2]
-        pixel_to_position_matrix[:3, 3] = self.origin
-
-        return pixel_to_position_matrix
-
-    def compute_matrix_position_to_pixel(self):
-
-        hold_matrix = np.identity(3, dtype=np.float32)
-        hold_matrix[0, :] = self.matrix[0, :] / self.spacing[0]
-        hold_matrix[1, :] = self.matrix[1, :] / self.spacing[1]
-        hold_matrix[2, :] = self.matrix[2, :] / self.spacing[2]
-
-        position_to_pixel_matrix = np.identity(4, dtype=np.float32)
-        position_to_pixel_matrix[:3, :3] = hold_matrix
-        position_to_pixel_matrix[:3, 3] = np.asarray(self.origin).dot(-hold_matrix.T)
-
-        return position_to_pixel_matrix
-
     def retrieve_array(self, slice_plane):
         position = Data.images[self.source_name].retrieve_slice_position(slice_plane)
+
+        source_shape = np.asarray(Data.images[self.source_name].array.shape)
+        image_pixel_to_position = Data.images[self.source_name].display.compute_matrix_pixel_to_position()
+        source_edge_pixel = np.concatenate((source_shape - 1, [1]))
+        source_edge_position = source_edge_pixel.dot(image_pixel_to_position.T)
+        source_bounds = (source_edge_position[:3] - position)
+        source_spacing = source_bounds / (source_shape - 1)
+
+        pixel_location = (position - self.origin) / self.spacing
+        pixel_space_correction = (self.spacing / source_spacing) * pixel_location
+
+        shape = np.asarray(self.vtk_array.shape)
+        bounds = shape * self.spacing
+
+        array = None
+        rect = [0, 0, 0, 0]
         if slice_plane == 'Axial':
-            array = np.flip(self.vtk_array[:, :, Data.images[self.target_name].slice_location[2]].T, 0)
+            slice_location = int(np.round(pixel_location[2]))
+            if 0 <= slice_location < shape[2]:
+                array = np.flip(self.vtk_array[:, :, slice_location].T, 0)
+                # pixel_shape_alteration = pixel_location[:2] + (shape - bounds)[:2]
+                # offset = pixel_shape_alteration * (self.spacing / source_spacing)[:2]
+
+                bounds_shift = (bounds[:2] / source_bounds[:2]) * (source_shape[:2] - 1)
+                offset = [pixel_space_correction[0], (bounds_shift[1] - source_shape[1]) - pixel_space_correction[1]]
+                rect = [-offset[0], -offset[1], bounds_shift[0], bounds_shift[1]]
+                # rect = [58, -3, bounds_shift[0], bounds_shift[1]]
+
+                # Original for same spacing between images
+                # offset = [pixel_location[0], ((shape[1] - source_shape[1]) - pixel_location[1])]
+                # rect = [-offset[0], -offset[1], shape[0], shape[1]]
+
         elif slice_plane == 'Coronal':
             array = self.vtk_array[:, Data.images[self.target_name].slice_location[1], :].T
+
         else:
             array = self.vtk_array[Data.images[self.target_name].slice_location[0], :, :].T
 
-        return array
+        return array, rect
 
     def update_rotation(self, matrix):
         self.matrix = matrix
