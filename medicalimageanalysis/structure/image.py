@@ -226,9 +226,11 @@ class Image(object):
         self.image_name = None
         self.patient_name = None
         self.mrn = None
+        self.birthdate = None
         self.date = None
         self.time = None
         self.series_uid = None
+        self.acq_number = None
         self.frame_ref = None
         self.modality = None
 
@@ -257,9 +259,11 @@ class Image(object):
 
         self.patient_name = self.get_patient_name()
         self.mrn = self.get_mrn()
+        self.birthdate = self.get_birthdate()
         self.date = self.get_date()
         self.time = self.get_time()
         self.series_uid = self.get_series_uid()
+        self.acq_number = self.get_acq_number()
         self.frame_ref = self.get_frame_ref()
         self.window = self.get_window()
 
@@ -300,15 +304,21 @@ class Image(object):
 
     def get_patient_name(self):
         if 'PatientName' in self.tags[0]:
-            return self.tags[0].PatientName
+            return str(self.tags[0].PatientName).split('^')[:3]
         else:
-            return 'Name tag missing'
+            return 'missing'
 
     def get_mrn(self):
         if 'PatientID' in self.tags[0]:
-            return self.tags[0].PatientID
+            return str(self.tags[0].PatientID)
         else:
-            return 'MRN tag missing'
+            return 'missing'
+
+    def get_birthdate(self):
+        if 'PatientBirthDate' in self.tags[0]:
+            return str(self.tags[0].PatientBirthDate)
+        else:
+            return 'missing'
 
     def get_date(self):
         if 'SeriesDate' in self.tags[0]:
@@ -345,6 +355,12 @@ class Image(object):
             return self.tags[0].SeriesInstanceUID
         else:
             return '00000.00000'
+
+    def get_acq_number(self):
+        if 'AcquisitionNumber' in self.tags[0]:
+            return self.tags[0].AcquisitionNumber
+        else:
+            return '1'
 
     def get_frame_ref(self):
         if 'FrameOfReferenceUID' in self.tags[0]:
