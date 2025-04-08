@@ -216,46 +216,15 @@ class Display(object):
 
 
 class Image(object):
-    def __init__(self):
+    def __init__(self, image):
         self.rois = {}
         self.pois = {}
 
-        self.tags = None
-        self.array = None
-
-        self.image_name = None
-        self.patient_name = None
-        self.mrn = None
-        self.birthdate = None
-        self.date = None
-        self.time = None
-        self.series_uid = None
-        self.acq_number = None
-        self.frame_ref = None
-        self.modality = None
-
-        self.filepaths = None
-        self.sops = None
-
-        self.plane = None
-        self.spacing = None
-        self.dimensions = None
-        self.orientation = None
-        self.origin = None
-        self.matrix = None
-        self.window = None
-        self.camera_position = None
-
-        self.unverified = None
-        self.skipped_slice = None
-        self.sections = None
-        self.rgb = False
-
-        self.display = None
-
-    def input(self, image):
         self.tags = image.image_set
         self.array = np.transpose(image.array, (2, 1, 0))
+
+        self.image_name = image.image_name
+        self.modality = image.modality
 
         self.patient_name = self.get_patient_name()
         self.mrn = self.get_mrn()
@@ -282,7 +251,8 @@ class Image(object):
         self.sections = image.sections
         self.rgb = image.rgb
 
-        self.modality = image.modality
+        self.camera_position = None
+
         self.display = Display(self)
 
     def input_rtstruct(self, rtstruct):
