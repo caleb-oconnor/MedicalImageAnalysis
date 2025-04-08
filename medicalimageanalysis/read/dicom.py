@@ -56,8 +56,7 @@ class DicomReader(object):
         self.reader = reader
 
         self.ds = []
-        self.ds_modality = {key: [] for key in ['CT', 'MR', 'PT', 'US', 'DX', 'MG', 'NM', 'XA', 'CR',
-                                                'RTSTRUCT', 'REG', 'RTDose']}
+        self.ds_modality = {key: [] for key in ['CT', 'MR', 'PT', 'US', 'DX', 'MG', 'NM', 'CR', 'RTSTRUCT']}
 
     def load(self, display_time=False):
         """
@@ -114,7 +113,16 @@ class DicomReader(object):
         for modality in list(self.ds_modality.keys()):
             images_in_modality = [d for d in self.ds if d['Modality'].value == modality]
             if len(images_in_modality) > 0 and modality in self.reader.only_modality:
-                if modality not in ['US', 'DX', 'MG', 'XA', 'CR', 'RTSTRUCT', 'REG', 'RTDose']:
+                if modality in ['US', 'DX', 'MG', 'CR', 'RTSTRUCT']:
+                    for image in images_in_modality:
+                        self.ds_modality[modality] += [image]
+
+                elif modality == 'RTSTRUCT':
+                    for image in images_in_modality:
+                        if 'StructureSetROISequence' in image and 'ROIContourSequence' in image:
+                            self.ds_modality[modality] += [image]
+
+                else:
                     sorting_tags = np.asarray([[img['SeriesInstanceUID'].value, img['AcquisitionNumber'].value] if
                                                'AcquisitionNumber' in img and img['AcquisitionNumber'].value is not None
                                                else [img['SeriesInstanceUID'].value, 1] for img in images_in_modality])
@@ -157,22 +165,13 @@ class DicomReader(object):
                                         slice_idx = np.argsort(position_tags[:, 1])
                                     else:
                                         slice_idx = np.argsort(position_tags[:, 1])[::-1]
-                                else:                                    
+                                else:
                                     if slice_direction[2] > 0:
                                         slice_idx = np.argsort(position_tags[:, 2])
                                     else:
                                         slice_idx = np.argsort(position_tags[:, 2])[::-1]
 
                                 self.ds_modality[modality] += [[orient_tags[idx] for idx in slice_idx]]
-
-                elif modality == 'RTSTRUCT':
-                    for image in images_in_modality:
-                        if 'StructureSetROISequence' in image and 'ROIContourSequence' in image:
-                            self.ds_modality[modality] += [image]
-
-                elif modality in ['US', 'DX', 'MG', 'XA', 'CR', 'RTSTRUCT', 'REG', 'RTDose']:
-                    for image in images_in_modality:
-                        self.ds_modality[modality] += [image]
 
     def image_creation(self):
         """
@@ -182,47 +181,25 @@ class DicomReader(object):
         :return:
         :rtype:
         """
-        for modality in ['CT', 'MR', 'DX', 'MG', 'US']:
-            read_image = None
+        for modality in ['CT', 'MR', 'DX', 'CR', 'MG', 'US']:
             for image_set in self.ds_modality[modality]:
-                load = False
-
                 if modality in ['CT', 'MR']:
-                    load = True
-                    read_image = Read3D(image_set, self.reader.only_tags)
+                    Read3D(image_set, self.reader.only_tags)
 
-                elif modality == 'DX':
-                    load = True
-                    read_image = ReadDX(image_set, self.reader.only_tags)
+                elif modality in ['DX', 'CR']:
+                    ReadXRay(image_set, self.reader.only_tags)
 
                 elif modality == 'MG':
                     if 'ImageType' in image_set:
                         if 'VOLUME' in image_set['ImageType'].value or 'TOMOSYNTHESIS' in image_set['ImageType'].value:
                             pass
-                            # images += [ReadMG(image_set, self.reader.only_tags)]
+                            # [ReadMG(image_set, self.reader.only_tags)]
 
                         else:
-                            load = True
-                            read_image = ReadDX(image_set, self.reader.only_tags)
+                            ReadXRay(image_set, self.reader.only_tags)
 
                 elif modality == 'US':
-                    load = True
-                    read_image = ReadUS(image_set, self.reader.only_tags)
-
-                if load:
-                    image = Image()
-                    image.input(read_image)
-
-                    modality = image.modality
-                    idx = len(Data.image_list)
-                    if idx < 9:
-                        image_name = modality + ' 0' + str(1 + idx)
-                    else:
-                        image_name = modality + ' ' + str(1 + idx)
-                    image.image_name = image_name
-
-                    Data.images[image_name] = image
-                    Data.image_list += [image_name]
+                    ReadUS(image_set, self.reader.only_tags)
 
         for modality in ['RTSTRUCT']:
             for image_set in self.ds_modality[modality]:
@@ -265,6 +242,12 @@ class Read3D(object):
         self.orientation = self._compute_orientation()
         self.origin = self._compute_origin()
         self.image_matrix = self._compute_image_matrix()
+
+        self.image_name = create_image_name(self.modality)
+
+        image = Image(self)
+        Data.images[self.image_name] = image
+        Data.image_list += [self.image_name]
 
     def _compute_array(self):
         """
@@ -451,7 +434,7 @@ class Read3D(object):
                 self.skipped_slice = ii + 1
 
 
-class ReadDX(object):
+class ReadXRay(object):
     """
     This is X-ray images, modalities are DX or MG (mammograms). Mammograms can also be tomosynthesis which are not read
     in this class.
@@ -473,7 +456,8 @@ class ReadDX(object):
 
         self.filepaths = self.image_set[0].filename
         self.sops = self.image_set[0].SOPInstanceUID
-        self.plane = self.image_set[0].ViewPosition
+        self.plane = 'Axial'
+
         self.orientation = [1, 0, 0, 0, 1, 0]
         self.origin = np.asarray([0, 0, 0])
         self.image_matrix = np.identity(4, dtype=np.float32)
@@ -483,6 +467,12 @@ class ReadDX(object):
         if not self.only_tags:
             self._compute_array()
         self.spacing = self._compute_spacing()
+
+        self.image_name = create_image_name(self.modality)
+
+        image = Image(self)
+        Data.images[self.image_name] = image
+        Data.image_list += [self.image_name]
 
     def _compute_array(self):
         """
@@ -511,6 +501,9 @@ class ReadDX(object):
 
         if 'PixelSpacing' in self.image_set[0]:
             inplane_spacing = self.image_set[0].PixelSpacing
+
+        elif 'ImagerPixelSpacing' in self.image_set[0]:
+            inplane_spacing = self.image_set[0].ImagerPixelSpacing
 
         elif 'ContributingSourcesSequence' in self.image_set[0]:
             sequence = 'ContributingSourcesSequence'
@@ -554,6 +547,12 @@ class ReadMG(object):
         self.plane = self._compute_plane
         self.image_matrix = None
         # self.image_matrix = self._compute_image_matrix()
+
+        self.image_name = create_image_name(self.modality)
+
+        image = Image(self)
+        Data.images[self.image_name] = image
+        Data.image_list += [self.image_name]
 
     def _compute_array(self):
         if (0x0028, 0x1052) in self.image_set[0]:
@@ -681,6 +680,12 @@ class ReadUS(object):
             self._compute_array()
         self.spacing = self._compute_spacing()
 
+        self.image_name = create_image_name(self.modality)
+
+        image = Image(self)
+        Data.images[self.image_name] = image
+        Data.image_list += [self.image_name]
+
     def _compute_array(self):
         us_data = np.asarray(self.image_set[0].pixel_array)
         del self.image_set[0].PixelData
@@ -805,3 +810,13 @@ class ReadRTStruct(object):
                     contour_list.append(contour)
 
                 self.points += contour_list
+
+
+def create_image_name(modality):
+    idx = len(Data.image_list)
+    if idx < 9:
+        image_name = modality + ' 0' + str(1 + idx)
+    else:
+        image_name = modality + ' ' + str(1 + idx)
+
+    return image_name
