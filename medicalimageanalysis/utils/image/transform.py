@@ -12,7 +12,7 @@ import numpy as np
 import SimpleITK as sitk
 
 
-def euler_transform(matrix=None, angles=None, translation=None, rotation_center=None):
+def euler_transform(matrix=None, angles=None, translation=None, rotation_center=None, zyx=False):
     transform = sitk.Euler3DTransform()
 
     if angles is not None:
@@ -28,6 +28,7 @@ def euler_transform(matrix=None, angles=None, translation=None, rotation_center=
     if rotation_center is not None:
         transform.SetCenter(rotation_center)
 
-    transform.SetComputeZYX(True)
+    if zyx:
+        transform.SetComputeZYX(True)
 
     return transform
