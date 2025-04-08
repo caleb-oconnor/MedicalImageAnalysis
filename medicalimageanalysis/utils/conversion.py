@@ -21,18 +21,23 @@ from vtk.util import numpy_support
 
 
 class ContourToDiscreteMesh(object):
-    def __init__(self, contour_position=None, contour_pixel=None, spacing=None, origin=None, dimensions=None, matrix=None):
+    def __init__(self, contour_position=None, contour_pixel=None, spacing=None, origin=None, dimensions=None,
+                 matrix=None, mask=None):
         self.contour_position = contour_position
         self.contour_pixel = contour_pixel
         self.spacing = spacing
         self.origin = origin
         self.dimensions = dimensions
-        self.matrix = matrix
 
-        self.mask = None
+        self.mask = mask
         self.mesh = None
 
-        if self.contour_pixel is None:
+        if matrix is None:
+            self.matrix = np.identity(3)
+        else:
+            self.matrix = matrix
+
+        if self.contour_pixel is None and self.mask is None:
             self.convert_to_pixel_spacing()
 
         if self.mask is None:
@@ -82,12 +87,18 @@ class ContourToDiscreteMesh(object):
         img_vtk.SetDirectionMatrix(self.matrix.flatten(order='F'))
         img_vtk.GetPointData().SetScalars(label)
 
-        vtk_mesh = vtk.vtkDiscreteMarchingCubes()
-        vtk_mesh.SetInputData(img_vtk)
-        vtk_mesh.GenerateValues(1, 1, 1)
-        vtk_mesh.Update()
+        # vtk_mesh = vtk.vtkDiscreteMarchingCubes()
+        # vtk_mesh.SetInputData(img_vtk)
+        # vtk_mesh.GenerateValues(1, 1, 1)
+        # vtk_mesh.Update()
 
-        return pv.PolyData(vtk_mesh.GetOutput())
+        # Faster
+        flying_edges = vtk.vtkDiscreteFlyingEdges3D()
+        flying_edges.SetInputData(img_vtk)
+        flying_edges.SetValue(0, 1)
+        flying_edges.Update()
+
+        return pv.PolyData(flying_edges.GetOutput())
 
 
 class ContourToMask(object):
