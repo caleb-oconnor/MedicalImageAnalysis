@@ -30,7 +30,6 @@ class ContourToDiscreteMesh(object):
         self.dimensions = dimensions
 
         self.mask = mask
-        self.mesh = None
 
         if matrix is None:
             self.matrix = np.identity(3)
@@ -105,12 +104,22 @@ class ContourToDiscreteMesh(object):
         # vtk_mesh.Update()
 
         # Faster
-        flying_edges = vtk.vtkDiscreteFlyingEdges3D()
-        flying_edges.SetInputData(pad_image)
-        flying_edges.SetValue(0, 1)
-        flying_edges.Update()
+        # flying_edges = vtk.vtkDiscreteFlyingEdges3D()
+        # flying_edges.SetInputData(pad_image)
+        # flying_edges.SetValue(0, 1)
+        # flying_edges.Update()
 
-        return pv.PolyData(flying_edges.GetOutput())
+        # Fastest with smoothing
+        # surface_nets = vtk.vtkSurfaceNets3D()
+        # surface_nets.SetInputData(pad_image)
+        # surface_nets.GenerateLabels(1, 1, 255)
+        # surface_nets.SmoothingOn()
+        # surface_nets.Update()
+
+        img = pv.ImageData(pad_image)
+
+        return img.contour_labeled(smoothing=True, output_mesh_type='triangles')
+        # return pv.PolyData(flying_edges.GetOutput())
 
 
 class ContourToMask(object):
