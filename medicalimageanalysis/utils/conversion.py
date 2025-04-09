@@ -87,14 +87,26 @@ class ContourToDiscreteMesh(object):
         img_vtk.SetDirectionMatrix(self.matrix.flatten(order='F'))
         img_vtk.GetPointData().SetScalars(label)
 
+        pad_filter = vtk.vtkImageConstantPad()
+        pad_filter.SetInputData(img_vtk)
+        pad_filter.SetConstant(0)
+
+        old_extent = img_vtk.GetExtent()
+        new_extent = [old_extent[0] - 1, old_extent[1] + 1,
+                      old_extent[2] - 1, old_extent[3] + 1,
+                      old_extent[4] - 1, old_extent[5] + 1]
+        pad_filter.SetOutputWholeExtent(new_extent)
+        pad_filter.Update()
+        pad_image = pad_filter.GetOutput()
+
         # vtk_mesh = vtk.vtkDiscreteMarchingCubes()
-        # vtk_mesh.SetInputData(img_vtk)
+        # vtk_mesh.SetInputData(pad_image)
         # vtk_mesh.GenerateValues(1, 1, 1)
         # vtk_mesh.Update()
 
         # Faster
         flying_edges = vtk.vtkDiscreteFlyingEdges3D()
-        flying_edges.SetInputData(img_vtk)
+        flying_edges.SetInputData(pad_image)
         flying_edges.SetValue(0, 1)
         flying_edges.Update()
 
