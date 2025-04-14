@@ -26,17 +26,17 @@ def compute_external(array, threshold=-250, only_mask=True):
 
     mask = np.zeros(array.shape)
     reduce_mask = np.zeros(box_image.shape)
-    centroid_external = np.zeros((box_image.shape[2], 2))
-    external_components = np.zeros((box_image.shape[2], 1))
-    for ii in range(box_image.shape[2]):
-        filled_image = binary_fill_holes(box_image[:, :, ii])
+    centroid_external = np.zeros((box_image.shape[0], 2))
+    external_components = np.zeros((box_image.shape[0], 1))
+    for ii in range(box_image.shape[0]):
+        filled_image = binary_fill_holes(box_image[ii, :, :])
         fill_image = label(filled_image)
         fill_regions = regionprops(fill_image)
         external_components[ii] = len([region.area for region in fill_regions if region.area > 100000])
 
         centroid_external[ii, :] = np.round(np.mean(np.argwhere(filled_image), axis=0))
-        reduce_mask[:, :, ii] = filled_image * array[bounds[0]:bounds[3], bounds[1]:bounds[4], ii + bounds[2]]
-        mask[bounds[0]:bounds[3], bounds[1]:bounds[4], ii + bounds[2]] = 1 * filled_image
+        reduce_mask[ii, :, :] = filled_image * array[ii + bounds[2], bounds[1]:bounds[4], bounds[2]:bounds[5]]
+        mask[ii + bounds[0], bounds[1]:bounds[4], bounds[2]:bounds[5]] = 1 * filled_image
 
     if only_mask:
         return mask
