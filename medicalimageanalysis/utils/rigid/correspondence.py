@@ -35,11 +35,13 @@ class SurfaceMatching(object):
 
     def compute_rigid(self, distance=10, iterations=1000, rmse=1e-7, fitness=1e-7):
         icp = ICP(self.source_mesh, self.target_mesh)
-        icp.compute_o3d(distance=distance, iterations=iterations, rmse=rmse, fitness=fitness)
+        icp.compute_o3d(distance=distance, iterations=iterations, rmse=rmse, fitness=fitness, method='plane')
         matrix = np.linalg.inv(icp.matrix)
 
         self.target_mesh.transform(matrix, inplace=True)
         self.initial_correspondence = icp.get_correspondence_set()
+        self.ignore_faces = []
+        self.ignore_points = None
 
     def compute_matching(self):
         self.find_duplicates()
@@ -103,6 +105,7 @@ class SurfaceMatching(object):
         base_min = np.min(base_quality)
 
         deformed_quality = []
+        deformed_area = []
         for idx in range(len(good_faces)):
             new_face = np.asarray(self.source_mesh.points)[good_faces[idx]] - self.boundary_condition[good_faces[idx]]
             a = np.linalg.norm(new_face[0, :] - new_face[1, :])
@@ -110,4 +113,10 @@ class SurfaceMatching(object):
             c = np.linalg.norm(new_face[2, :] - new_face[0, :])
             s = (a + b + c) / 2
             area = np.sqrt(s * (s - a) * (s - b) * (s - c))
+            deformed_area += [area]
             deformed_quality += [(4 * np.sqrt(3) * area) / (a ** 2 + b ** 2 + c ** 2)]
+        #     if deformed_quality[-1] < .5:
+        #         self.ignore_faces += [good_faces[idx]]
+        #
+        # self.ignore_points = np.unique(self.ignore_faces)
+        # self.boundary_condition[self.ignore_points] = [0, 0, 0]
