@@ -13,21 +13,27 @@ Structure:
 
 import vtk
 import numpy as np
-
 import SimpleITK as sitk
+
+from scipy.spatial.transform import Rotation
 
 from ..utils.mesh.surface import Refinement
 from ..utils.conversion import ContourToDiscreteMesh
 
 
 class Roi(object):
-    def __init__(self, image, position=None, name=None, color=None, visible=False, filepaths=None):
+    def __init__(self, image, position=None, name=None, color=None, visible=False, filepaths=None, plane=None):
         self.image = image
 
         self.name = name
         self.visible = visible
         self.color = color
         self.filepaths = filepaths
+
+        if plane is not None:
+            self.plane = plane
+        else:
+            self.plane = self.image.plane
 
         if position is not None:
             self.contour_position = position
@@ -37,7 +43,6 @@ class Roi(object):
             self.contour_pixel = None
 
         self.mesh = None
-        self.display_mesh = None
 
         self.volume = None
         self.com = None
@@ -46,8 +51,19 @@ class Roi(object):
         self.rotated_mesh = None
         self.multi_color = None
 
-    def convert_position_to_pixel(self, position=None):
-        position_to_pixel_matrix = self.image.display.compute_matrix_position_to_pixel(base=False)
+    def clear(self):
+        self.contour_position = None
+        self.contour_pixel = None
+
+        self.mesh = None
+        self.volume = None
+        self.com = None
+        self.bounds = None
+
+        self.multi_color = None
+
+    def convert_position_to_pixel(self, position=None, base=True):
+        position_to_pixel_matrix = self.image.display.compute_matrix_position_to_pixel(base=base)
 
         pixel = []
         for ii, pos in enumerate(position):
@@ -67,67 +83,103 @@ class Roi(object):
 
         return position
 
-    def create_discrete_mesh(self):
+    def create_discrete_mesh(self, smoothing_num_iterations=20, smoothing_relaxation_factor=.5,
+                             smoothing_constraint_distance=1):
         meshing = ContourToDiscreteMesh(contour_pixel=self.contour_pixel,
                                         spacing=self.image.spacing,
                                         origin=self.image.origin,
                                         dimensions=self.image.dimensions,
-                                        matrix=self.image.matrix)
-        self.mesh = meshing.compute_mesh()
+                                        matrix=self.image.matrix,
+                                        plane=self.plane)
+        self.mesh = meshing.compute_mesh(smoothing_num_iterations=smoothing_num_iterations,
+                                         smoothing_relaxation_factor=smoothing_relaxation_factor,
+                                         smoothing_constraint_distance=smoothing_constraint_distance)
         self.volume = self.mesh.volume
         self.com = self.mesh.center
         self.bounds = self.mesh.bounds
 
     def create_display_mesh(self, iterations=20, angle=60, passband=0.001):
         refine = Refinement(self.mesh)
-        self.display_mesh = refine.smooth(iterations=iterations, angle=angle, passband=passband)
+        self.mesh = refine.smooth(iterations=iterations, angle=angle, passband=passband)
 
-    def create_decimate_mesh(self, percent=None, display=True):
-        if display:
-            refine = Refinement(self.display_mesh)
-        else:
-            refine = Refinement(self.mesh)
+    def create_decimate_mesh(self, percent=None):
+        refine = Refinement(self.mesh)
             
         return refine.decimate(percent=percent)
 
-    def create_cluster_mesh(self, points=None, display=True):
-        if display:
-            refine = Refinement(self.display_mesh)
-        else:
-            refine = Refinement(self.mesh)
+    def create_cluster_mesh(self, points=None):
+        refine = Refinement(self.mesh)
 
         return refine.cluster(points=points)
 
     def compute_contour(self, slice_location):
         contour_list = []
         if self.contour_pixel is not None:
-            roi_z = [np.round(c[0, 2]).astype(int) for c in self.contour_pixel]
-            keep_idx = np.argwhere(np.asarray(roi_z) == slice_location)
+            if self.plane == 'Axial':
+                roi_z = [np.round(c[0, 2]).astype(int) for c in self.contour_pixel]
+                keep_idx = np.argwhere(np.asarray(roi_z) == slice_location)
 
-            if len(keep_idx) > 0:
-                for ii, idx in enumerate(keep_idx):
-                    contour_corrected = np.vstack((self.contour_pixel[idx[0]][:, 0:2], self.contour_pixel[idx[0]][0, 0:2]))
-                    contour_corrected[:, 1] = self.image.dimensions[1] - contour_corrected[:, 1]
-                    contour_list.append(contour_corrected)
+                if len(keep_idx) > 0:
+                    for ii, idx in enumerate(keep_idx):
+                        contour_corrected = np.vstack((self.contour_pixel[idx[0]][:, 0:2],
+                                                       self.contour_pixel[idx[0]][0, 0:2]))
+                        contour_corrected[:, 1] = self.image.dimensions[1] - contour_corrected[:, 1]
+                        contour_list += [contour_corrected]
+
+            elif self.plane == 'Coronal':
+                roi_y = [np.round(c[0, 1]).astype(int) for c in self.contour_pixel]
+                keep_idx = np.argwhere(np.asarray(roi_y) == slice_location)
+
+                if len(keep_idx) > 0:
+                    for ii, idx in enumerate(keep_idx):
+                        pixel_reshape = np.column_stack((self.contour_pixel[idx[0]][:, 0],
+                                                         self.contour_pixel[idx[0]][:, 2]))
+                        stack = np.asarray([self.contour_pixel[idx[0]][0, 0], self.contour_pixel[idx[0]][0, 2]])
+                        contour_corrected = np.vstack((pixel_reshape, stack))
+                        contour_list += [contour_corrected]
+
+            else:
+                roi_x = [np.round(c[0, 0]).astype(int) for c in self.contour_pixel]
+                keep_idx = np.argwhere(np.asarray(roi_x) == slice_location)
+
+                if len(keep_idx) > 0:
+                    for ii, idx in enumerate(keep_idx):
+                        contour_corrected = np.vstack((self.contour_pixel[idx[0]][:, 1:],
+                                                       self.contour_pixel[idx[0]][0, 1:]))
+                        contour_list += [contour_corrected]
 
         return contour_list
 
-    def compute_mesh_slice(self, display=True, location=None, plane=None, normal=None, return_pixel=False):
-        if normal is None:
-            matrix = self.image.display.matrix.T
-            if plane == 'Axial':
-                normal = matrix[:3, 2]
-            elif plane == 'Coronal':
-                normal = matrix[:3, 1]
-            else:
-                normal = matrix[:3, 0]
-
-        if display:
-            roi_slice = self.display_mesh.slice(normal=normal, origin=location)
+    def compute_mesh_slice(self, location=None, slice_plane=None, return_pixel=False):
+        matrix = self.image.display.matrix
+        rotation = Rotation.from_matrix(matrix)
+        euler_angles = rotation.as_euler('zyx', degrees=True)
+        angle_correction = 0
+        if slice_plane == 'Axial':
+            normal = matrix[:3, 2]
+            angle_correction = euler_angles[0]
+            rotate_angle = 'z'
+        elif slice_plane == 'Coronal':
+            normal = matrix[:3, 1]
+            angle_correction = euler_angles[1]
+            rotate_angle = 'y'
         else:
-            roi_slice = self.mesh.slice(normal=normal, origin=location)
+            normal = matrix[:3, 0]
+            angle_correction = euler_angles[2]
+            rotate_angle = 'x'
+
+        # roi_slice = self.mesh.slice(normal=normal, origin=self.image.display.origin)
+        roi_slice = self.mesh.slice(normal=normal, origin=location)
 
         if return_pixel:
+            if angle_correction != 0:
+                if rotate_angle == 'z':
+                    roi_slice.rotate_z(angle=-1 * angle_correction, point=location, inplace=True)
+                elif rotate_angle == 'y':
+                    roi_slice.rotate_y(angle=-1 * angle_correction, point=location, inplace=True)
+                else:
+                    roi_slice.rotate_x(angle=-1 * angle_correction, point=location, inplace=True)
+
             if roi_slice.number_of_points > 0:
                 roi_strip = roi_slice.strip()
                 position = [np.asarray(c.points) for c in roi_strip.cell]
@@ -146,9 +198,21 @@ class Roi(object):
                             line_splits = [line_idx, line_idx + len(p) - 1]
                         line_values += [[lines[line_splits[0]], lines[line_splits[1]]]]
 
+                    # line_flatten = np.asarray(line_values).flatten()
+                    # n = 0
+                    # position_correction = []
+                    # while n >= 0:
+                    #     if line_flatten[n][0] == line_flatten[n][1]:
+                    #         position_correction += [position[n]]
+                    #         n += 1
+                    #         idx = n
+                    #     else:
+
+
                     n = 0
                     position_correction = []
                     while n >= 0:
+                        print(n)
                         if line_values[n][0] == line_values[n][1]:
                             position_correction += [position[n]]
                             n += 1
@@ -189,8 +253,8 @@ class Roi(object):
                 else:
                     position_correction = position
 
-                pixels = self.convert_position_to_pixel(position=position_correction)
-                pixel_correct = self.pixel_slice_correction(pixels, plane)
+                pixels = self.convert_position_to_pixel(position=position_correction, base=True)
+                pixel_correct = self.pixel_slice_correction(pixels, slice_plane)
 
                 return pixel_correct
 
