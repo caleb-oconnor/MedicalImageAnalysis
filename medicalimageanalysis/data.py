@@ -7,6 +7,7 @@ class Data(object):
     meshes = []
 
     image_list = []
+    roi_list = []
     rigid_list = []
 
     @classmethod
@@ -18,6 +19,7 @@ class Data(object):
         cls.meshes = []
 
         cls.image_list = []
+        cls.roi_list = []
         cls.rigid_list = []
 
     @classmethod
