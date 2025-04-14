@@ -13,8 +13,6 @@ Structure:
 
 import os
 import copy
-import math
-import time
 
 import numpy as np
 import pandas as pd
@@ -22,9 +20,11 @@ import pyvista as pv
 import SimpleITK as sitk
 
 import vtk
-from vtkmodules.util.numpy_support import numpy_to_vtk, vtk_to_numpy
+from vtkmodules.util.numpy_support import numpy_to_vtk
 
 from ..utils.image.transform import euler_transform
+from ..utils.roi.external import compute_external
+from ..utils.roi.contour import contours_from_mask
 
 from .poi import Poi
 from .roi import Roi
@@ -394,6 +394,9 @@ class Image(object):
     def add_poi(self, poi_name=None, color=None, visible=False, path=None, point=None):
         self.pois[poi_name] = Poi(self, position=point, name=poi_name, color=color, visible=visible, filepaths=path)
 
+    def create_roi(self, name=None, color=None, visible=False, filepath=None):
+        self.rois[name] = Roi(self, name=name, color=color, visible=visible, filepaths=filepath)
+
     def get_patient_name(self):
         if 'PatientName' in self.tags[0]:
             return str(self.tags[0].PatientName).split('^')[:3]
@@ -640,6 +643,21 @@ class Image(object):
 
         # resample_image = sitk.Resample(sitk_image, transform, sitk.sitkLinear, 0.0, sitk_image.GetPixelID())
         return sitk.GetArrayFromImage(resample_image)
+
+    def create_external(self, name='External', color=None, visible=False, filepaths=None, threshold=-250):
+        if color is None:
+            color = [0, 255, 0]
+
+        if name not in list(self.rois.keys()):
+            self.rois[name] = Roi(self, name=name, color=color, visible=visible, filepaths=filepaths)
+
+            mask = compute_external(self.array, threshold=threshold, only_mask=True)
+            contours = contours_from_mask(mask.astype(np.uint8))
+            positions = self.rois[name].convert_pixel_to_position(pixel=contours)
+
+            self.rois[name].contour_pixel = contours
+            self.rois[name].contour_position = positions
+            self.rois[name].create_discrete_mesh()
 
     def compute_aspect(self, slice_plane):
         if slice_plane == 'Axial':
