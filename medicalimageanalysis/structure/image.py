@@ -97,9 +97,9 @@ class Display(object):
             if slice_plane == 'Axial':
                 array = np.flip(self.image.array[self.slice_location[0], :, :], 0)
             elif slice_plane == 'Coronal':
-                array = self.image.array[:, self.slice_location[1], :].T
+                array = self.image.array[:, self.slice_location[1], :]
             else:
-                array = self.image.array[:, :, self.slice_location[2]].T
+                array = self.image.array[:, :, self.slice_location[2]]
 
         else:
             angled_array = self.compute_off_axis_slice(slice_plane)
@@ -107,9 +107,9 @@ class Display(object):
             if slice_plane == 'Axial':
                 array = np.flip(angled_array.T, 0)
             elif slice_plane == 'Coronal':
-                array = angled_array.T
+                array = angled_array
             else:
-                array = angled_array.T
+                array = angled_array
 
         return array.astype(np.float32)
 
@@ -150,16 +150,16 @@ class Display(object):
             base_grid = np.linspace(first_row, last_row, 2 * self.image.dimensions[1])
             slice_array = np.full((2 * self.image.dimensions[0], 2 * self.image.dimensions[1]), np.nan)
 
-        grid_x = (base_grid[:, :, 0] >= -0.001) & (base_grid[:, :, 0] <= self.image.dimensions[0] - .51)
-        grid_y = (base_grid[:, :, 1] >= -0.001) & (base_grid[:, :, 1] <= self.image.dimensions[1] - .51)
-        grid_z = (base_grid[:, :, 2] >= -0.001) & (base_grid[:, :, 2] <= self.image.dimensions[2] - .51)
+        grid_x = (base_grid[:, :, 0] >= -0.001) & (base_grid[:, :, 0] <= self.image.dimensions[1] - .51)
+        grid_y = (base_grid[:, :, 1] >= -0.001) & (base_grid[:, :, 1] <= self.image.dimensions[2] - .51)
+        grid_z = (base_grid[:, :, 2] >= -0.001) & (base_grid[:, :, 2] <= self.image.dimensions[0] - .51)
         combine_grid = 1 * ((1 * grid_x + 1 * grid_y + 1 * grid_z) == 3)
         idx = np.transpose(np.where(combine_grid > 0))
         grid_keep = np.round(base_grid[idx[:, 0], idx[:, 1], :]).astype(np.int64)
-        grid_keep_transpose = np.asarray([grid_keep[:, 0], grid_keep[:, 1], grid_keep[:, 2]]).T
-        keep_values = self.image.array[grid_keep_transpose[:, 1], grid_keep_transpose[:, 0], grid_keep_transpose[:, 2]]
+        grid_keep_transpose = np.asarray([grid_keep[:, 2], grid_keep[:, 0], grid_keep[:, 1]]).T
+        keep_values = self.image.array[grid_keep_transpose[:, 0], grid_keep_transpose[:, 1], grid_keep_transpose[:, 2]]
 
-        slice_array[idx[:, 0], idx[:, 1]] = keep_values
+        slice_array[idx[:, 1], idx[:, 0]] = keep_values
 
         return slice_array
 
@@ -232,9 +232,19 @@ class Display(object):
     def square_help(self, slice_plane):
         pixel_to_position_matrix = self.compute_matrix_pixel_to_position()
 
-        location = np.asarray([self.slice_location[0], self.slice_location[1], self.slice_location[2], 1])
-        center = np.round(np.asarray(self.image.dimensions) / 2).astype(np.int64)
+        location = np.asarray([self.slice_location[1], self.slice_location[2], self.slice_location[0], 1])
+        center = np.round([self.image.dimensions[1] / 2,
+                           self.image.dimensions[2] / 2,
+                           self.image.dimensions[0] / 2]).astype(np.int64)
         if slice_plane == 'Axial':
+            square_voxels = [[-center[0], -center[1], location[2], 1],
+                             [-center[0], 3 * center[1], location[2], 1],
+                             [3 * center[0], -center[1], location[2], 1],
+                             [3 * center[0], 3 * center[1], location[2], 1]]
+
+            square = np.asarray(square_voxels).dot(pixel_to_position_matrix.T)[:, :3]
+
+        elif slice_plane == 'Coronal':
             square_voxels = [[location[0], -center[1], -center[2], 1],
                              [location[0], -center[1], 3 * center[2], 1],
                              [location[0], 3 * center[1], -center[2], 1],
@@ -242,19 +252,11 @@ class Display(object):
 
             square = np.asarray(square_voxels).dot(pixel_to_position_matrix.T)[:, :3]
 
-        elif slice_plane == 'Coronal':
+        else:
             square_voxels = [[-center[0], location[1], -center[2], 1],
                              [-center[0], location[1], 3 * center[2], 1],
                              [3 * center[0], location[1], -center[2], 1],
                              [3 * center[0], location[1], 3 * center[2], 1]]
-
-            square = np.asarray(square_voxels).dot(pixel_to_position_matrix.T)[:, :3]
-
-        else:
-            square_voxels = [[-center[0], -center[1], location[2], 1],
-                             [-center[0], 3 * center[1], location[2], 1],
-                             [3 * center[0], -center[1], location[2], 1],
-                             [3 * center[0], 3 * center[1], location[2], 1]]
 
             square = np.asarray(square_voxels).dot(pixel_to_position_matrix.T)[:, :3]
 
@@ -273,15 +275,13 @@ class Display(object):
             self.origin = self.image.origin
             self.transform = None
         else:
-            r = R.from_euler('xyz', angles, degrees=True)
-            self.matrix = r.as_matrix() @ self.image.matrix
 
             pixel_to_position_matrix = self.compute_matrix_pixel_to_position()
-            location = np.asarray([self.slice_location[0], self.slice_location[1], self.slice_location[2], 1])
+            location = np.asarray([self.slice_location[1], self.slice_location[2], self.slice_location[0], 1])
             rotation_center = location.dot(pixel_to_position_matrix.T)[:3]
 
-            r = R.from_euler('zyx', angles, degrees=True)
-            self.transform = euler_transform(matrix=r.as_matrix(), rotation_center=rotation_center)
+            self.transform = euler_transform(angles=angles, rotation_center=rotation_center)
+            self.matrix = np.asarray(self.transform.GetMatrix()).reshape(3, 3) @ self.image.matrix
 
             xy_new = self.transform.TransformPoint(np.asarray([1, 1, 0, 1]).dot(pixel_to_position_matrix.T)[:3])
             z_new = self.transform.TransformPoint(np.asarray([0, 0, 1, 1]).dot(pixel_to_position_matrix.T)[:3])
