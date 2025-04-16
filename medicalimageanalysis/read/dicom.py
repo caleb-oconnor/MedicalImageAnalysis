@@ -460,7 +460,7 @@ class ReadXRay(object):
 
         self.orientation = [1, 0, 0, 0, 1, 0]
         self.origin = np.asarray([0, 0, 0])
-        self.image_matrix = np.identity(4, dtype=np.float32)
+        self.image_matrix = np.identity(3, dtype=np.float32)
         self.dimensions = np.asarray([self.image_set[0]['Columns'].value, self.image_set[0]['Rows'].value, 1])
 
         self.array = None
@@ -545,7 +545,7 @@ class ReadMG(object):
         self.dimensions = self._compute_dimensions()
         self.orientation = self._compute_orientation()
         self.plane = self._compute_plane
-        self.image_matrix = None
+        self.image_matrix = np.identity(3, dtype=np.float32)
         # self.image_matrix = self._compute_image_matrix()
 
         self.image_name = create_image_name(self.modality)
@@ -672,7 +672,7 @@ class ReadUS(object):
         self.plane = 'Axial'
         self.orientation = [1, 0, 0, 0, 1, 0]
         self.origin = np.asarray([0, 0, 0])
-        self.image_matrix = np.identity(4, dtype=np.float32)
+        self.image_matrix = np.identity(3, dtype=np.float32)
         self.dimensions = np.asarray([self.image_set[0]['Columns'].value, self.image_set[0]['Rows'].value, 1])
 
         self.array = None
