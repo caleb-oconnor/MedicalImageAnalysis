@@ -672,16 +672,16 @@ class Image(object):
         pixel_to_position_matrix = self.display.compute_matrix_pixel_to_position()
 
         if slice_plane is None:
-            location = np.asarray([self.display.slice_location[0],
+            location = np.asarray([self.display.slice_location[2],
                                    self.display.slice_location[1],
-                                   self.display.slice_location[2], 1])
+                                   self.display.slice_location[0], 1])
         else:
             if slice_plane == 'Axial':
-                location = np.asarray([self.display.slice_location[0], 0, 0, 1])
+                location = np.asarray([0, 0, self.display.slice_location[0], 1])
             elif slice_plane == 'Coronal':
                 location = np.asarray([0, self.display.slice_location[1], 0, 1])
             else:
-                location = np.asarray([0, 0, self.display.slice_location[2], 1])
+                location = np.asarray([self.display.slice_location[2], 0, 0, 1])
 
         return location.dot(pixel_to_position_matrix.T)[:3]
 
