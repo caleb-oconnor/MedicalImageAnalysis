@@ -153,7 +153,7 @@ class Roi(object):
     def compute_mesh_slice(self, location=None, slice_plane=None, return_pixel=False):
         matrix = self.image.display.matrix
         rotation = Rotation.from_matrix(matrix)
-        euler_angles = rotation.as_euler('zyx', degrees=True)
+        euler_angles = rotation.as_euler('zxy', degrees=True)
         angle_correction = 0
         if slice_plane == 'Axial':
             normal = matrix[:3, 2]
@@ -161,11 +161,11 @@ class Roi(object):
             rotate_angle = 'z'
         elif slice_plane == 'Coronal':
             normal = matrix[:3, 1]
-            angle_correction = euler_angles[1]
+            angle_correction = euler_angles[2]
             rotate_angle = 'y'
         else:
             normal = matrix[:3, 0]
-            angle_correction = euler_angles[2]
+            angle_correction = euler_angles[1]
             rotate_angle = 'x'
 
         # roi_slice = self.mesh.slice(normal=normal, origin=self.image.display.origin)
@@ -174,11 +174,11 @@ class Roi(object):
         if return_pixel:
             if angle_correction != 0:
                 if rotate_angle == 'z':
-                    roi_slice.rotate_z(angle=-1 * angle_correction, point=location, inplace=True)
+                    roi_slice.rotate_z(angle=1 * angle_correction, point=location, inplace=True)
                 elif rotate_angle == 'y':
-                    roi_slice.rotate_y(angle=-1 * angle_correction, point=location, inplace=True)
+                    roi_slice.rotate_y(angle=1 * angle_correction, point=location, inplace=True)
                 else:
-                    roi_slice.rotate_x(angle=-1 * angle_correction, point=location, inplace=True)
+                    roi_slice.rotate_x(angle=1 * angle_correction, point=location, inplace=True)
 
             if roi_slice.number_of_points > 0:
                 roi_strip = roi_slice.strip()
@@ -208,11 +208,9 @@ class Roi(object):
                     #         idx = n
                     #     else:
 
-
                     n = 0
                     position_correction = []
                     while n >= 0:
-                        print(n)
                         if line_values[n][0] == line_values[n][1]:
                             position_correction += [position[n]]
                             n += 1
