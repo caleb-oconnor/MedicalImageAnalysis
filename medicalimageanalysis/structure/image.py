@@ -168,18 +168,18 @@ class Display(object):
         pixel_to_position_matrix = self.compute_matrix_pixel_to_position()
         if np.array_equal(self.matrix, self.image.matrix):
             if slice_plane == 'Axial':
-                location = np.asarray([self.slice_location[0], 0, 0, 1])
-                array_slice = self.image.array[self.slice_location[0], :, :]
+                location = np.asarray([0, 0, self.slice_location[0], 1])
+                array_slice = self.image.array[self.slice_location[0], :, :].T
                 array_shape = array_slice.shape
                 dim = [array_shape[0], array_shape[1], 1]
             elif slice_plane == 'Coronal':
                 location = np.asarray([0, self.slice_location[1], 0, 1])
-                array_slice = self.image.array[:, self.slice_location[1], :]
+                array_slice = self.image.array[:, self.slice_location[1], :].T
                 array_shape = array_slice.shape
                 dim = [array_shape[0], 1, array_shape[1]]
             else:
-                location = np.asarray([0, 0, self.slice_location[2], 1])
-                array_slice = self.image.array[:, :, self.slice_location[2]]
+                location = np.asarray([self.slice_location[2], 0, 0, 1])
+                array_slice = self.image.array[:, :, self.slice_location[2]].T
                 array_shape = array_slice.shape
                 dim = [1, array_shape[0], array_shape[1]]
 
