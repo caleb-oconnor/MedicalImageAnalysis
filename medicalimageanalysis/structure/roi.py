@@ -150,6 +150,16 @@ class Roi(object):
 
         return contour_list
 
+    def compute_mask(self):
+        mask = ContourToDiscreteMesh(contour_pixel=self.contour_pixel,
+                                     spacing=self.image.spacing,
+                                     origin=self.image.origin,
+                                     dimensions=self.image.dimensions,
+                                     matrix=self.image.matrix,
+                                     plane=self.plane)
+
+        return mask.mask
+
     def compute_mesh_slice(self, location=None, slice_plane=None, return_pixel=False):
         matrix = self.image.display.matrix
         rotation = Rotation.from_matrix(matrix)
@@ -186,67 +196,9 @@ class Roi(object):
                 lines = roi_strip.lines
 
                 if len(position) > 1:
-                    n = 0
-                    line_values = []
-                    for ii, p in enumerate(position):
-                        if ii == 0:
-                            n = len(p)
-                            line_splits = [1, len(p)]
-                        else:
-                            line_idx = n + 2
-                            n = line_idx + len(p) - 1
-                            line_splits = [line_idx, line_idx + len(p) - 1]
-                        line_values += [[lines[line_splits[0]], lines[line_splits[1]]]]
-
-                    # line_flatten = np.asarray(line_values).flatten()
-                    # n = 0
-                    # position_correction = []
-                    # while n >= 0:
-                    #     if line_flatten[n][0] == line_flatten[n][1]:
-                    #         position_correction += [position[n]]
-                    #         n += 1
-                    #         idx = n
-                    #     else:
-
-                    n = 0
-                    position_correction = []
-                    while n >= 0:
-                        if line_values[n][0] == line_values[n][1]:
-                            position_correction += [position[n]]
-                            n += 1
-                            idx = n
-
-                        else:
-                            values = np.asarray(line_values).reshape(2 * (len(line_values) - n))
-                            first = np.where(values[1:] == values[0])[0][0] + 1
-                            last = np.where(values[2:] == values[1])[0][0] + 2
-
-                            position_hold = []
-                            if first > last:
-                                idx = n + int(first / 2) + 1
-                                line_test = np.asarray(line_values)[n:n + idx, :]
-                                position_hold += [position[n]]
-
-                            else:
-                                idx = n + int(last / 2) + 1
-                                line_test = np.asarray(line_values)[n:n + idx, :]
-                                line_test[0, :] = np.flip(line_test[0, :])
-                                position_hold += [np.flip(position[n], axis=0)]
-
-                            for ii in range(len(line_test)):
-                                if ii > 0:
-                                    if line_test[ii - 1, 1] == line_test[ii, 0]:
-                                        position_hold += [position[n + ii]]
-                                    else:
-                                        line_test[ii, :] = np.flip(line_test[ii, :])
-                                        position_hold += [np.flip(position[n + ii], axis=0)]
-
-                            position_correction += [np.vstack(position_hold)]
-
-                            n = idx
-
-                        if idx >= len(line_values):
-                            n = -1
+                    position_correction = self.line_deconstruction(lines, position)
+                    # if len(position_correction) == 0:
+                    #     print(1)
 
                 else:
                     position_correction = position
@@ -261,6 +213,101 @@ class Roi(object):
 
         else:
             return roi_slice
+
+    @staticmethod
+    def line_deconstruction(lines, position):
+        n = 0
+        line_values = []
+        for ii, p in enumerate(position):
+            if ii == 0:
+                n = len(p)
+                line_splits = [1, len(p)]
+            else:
+                line_idx = n + 2
+                n = line_idx + len(p) - 1
+                line_splits = [line_idx, line_idx + len(p) - 1]
+            line_values += [[lines[line_splits[0]], lines[line_splits[1]]]]
+
+        line_values = np.vstack(line_values)
+
+        order_idx = []
+        for ii, val in enumerate(line_values):
+            if val[0] == val[1]:
+                order_idx += [[ii]]
+
+        reduced_line_values = np.asarray([val for ii, val in enumerate(line_values) if ii not in order_idx])
+
+        idx_keep = []
+        idx_object = [0]
+        idx_check = [0]
+        value = reduced_line_values[0, 1]
+        n = 0
+        while n == 0:
+            n += 1
+            try:
+                check_1 = np.where(reduced_line_values[:, 0] == value)[0]
+                check_2 = np.where(reduced_line_values[:, 1] == value)[0]
+            except:
+                print(1)
+
+            if n == 100:
+                print(1)
+
+            if len(check_1) > 0:
+                remove_duplicates_1 = [idx for idx in check_1 if idx not in np.abs(idx_check)]
+                if len(remove_duplicates_1) > 0:
+                    idx_object += [remove_duplicates_1[0]]
+                    idx_check += [remove_duplicates_1[0]]
+                    value = reduced_line_values[remove_duplicates_1[0], 1]
+
+            if len(check_2) > 0:
+                remove_duplicates_2 = [idx for idx in check_2 if idx not in np.abs(idx_check)]
+                if len(remove_duplicates_2) > 0:
+                    idx_object += [-remove_duplicates_2[0]]
+                    idx_check += [-remove_duplicates_2[0]]
+                    value = reduced_line_values[remove_duplicates_2[0], 0]
+
+            if idx_object[-1] > 0 and reduced_line_values[idx_object[-1], 1] == value:
+                sign_arr = np.sign(idx_object)
+                idx_keep += [sign_arr * (np.abs(idx_object) + len(order_idx))]
+
+                idx_start = np.where(np.arange(len(reduced_line_values)) != np.abs(idx_check))[0]
+                if len(idx_start) > 0:
+                    idx_object = [idx_start]
+                    idx_check += [idx_start]
+                    value = reduced_line_values[idx_start]
+
+            elif reduced_line_values[-idx_object[0], 1] == value:
+                sign_arr = np.sign(idx_object)
+                idx_keep += [sign_arr * (np.abs(idx_object) + len(order_idx))]
+
+                idx_start = np.where(np.arange(len(reduced_line_values)) != np.abs(idx_check))[0]
+                if len(idx_start) > 0:
+                    idx_object = [idx_start]
+                    idx_check += [idx_start]
+                    value = reduced_line_values[idx_start]
+
+            if len(reduced_line_values) == len(idx_check):
+                n = -1
+
+        order_idx = order_idx + idx_keep
+
+        position_correction = []
+        for idx in order_idx:
+            if isinstance(idx, int):
+                position_correction += [position[idx]]
+
+            else:
+                position_hold = []
+                for ii in idx:
+                    if ii >= 0:
+                        position_hold += [position[ii]]
+                    else:
+                        position_hold += [np.flip(position[np.abs(ii)], axis=0)]
+
+                position_correction += [np.vstack(position_hold)]
+
+        return position_correction
 
     def pixel_slice_correction(self, pixels, plane):
         pixel_corrected = []
@@ -280,3 +327,9 @@ class Roi(object):
                 pixel_corrected += [pixel_reshape]
 
         return pixel_corrected
+
+    def update_pixel(self, pixel, plane='Axial'):
+        self.plane = plane
+        self.contour_pixel = pixel
+        self.contour_position = self.convert_pixel_to_position(pixel=pixel)
+        self.create_discrete_mesh()
