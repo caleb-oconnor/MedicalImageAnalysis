@@ -14,8 +14,11 @@ from scipy.ndimage import binary_fill_holes
 from skimage.measure import label, regionprops
 
 
-def compute_external(array, threshold=-250, only_mask=True):
-    binary = array > threshold
+def external(array, threshold=-250, only_mask=True, less_than=False):
+    if less_than:
+        binary = array < threshold
+    else:
+        binary = array > threshold
     label_image = label(binary)
     label_regions = regionprops(label_image)
     region_areas = [region.area for region in label_regions]
@@ -35,7 +38,7 @@ def compute_external(array, threshold=-250, only_mask=True):
         external_components[ii] = len([region.area for region in fill_regions if region.area > 100000])
 
         centroid_external[ii, :] = np.round(np.mean(np.argwhere(filled_image), axis=0))
-        reduce_mask[ii, :, :] = filled_image * array[ii + bounds[2], bounds[1]:bounds[4], bounds[2]:bounds[5]]
+        reduce_mask[ii, :, :] = filled_image * array[ii + bounds[0], bounds[1]:bounds[4], bounds[2]:bounds[5]]
         mask[ii + bounds[0], bounds[1]:bounds[4], bounds[2]:bounds[5]] = 1 * filled_image
 
     if only_mask:
