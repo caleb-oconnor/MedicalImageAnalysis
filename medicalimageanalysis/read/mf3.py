@@ -21,13 +21,20 @@ import xml.etree.ElementTree as ET
 import numpy as np
 import pyvista as pv
 
+from ..structure.image import Image
+from ..utils.creation import CreateImageFromMask
+from ..utils.conversion import ModelToMask
+
+from ..data import Data
+
 
 class ThreeMfReader(object):
     """
     Converts 3mf file to pyvista polydata mesh.
     """
-    def __init__(self, reader):
+    def __init__(self, reader, create_image=False):
         self.reader = reader
+        self.create_image = create_image
 
     def input_files(self, files):
         self.reader.files['3mf'] = files
@@ -75,8 +82,19 @@ class ThreeMfReader(object):
             vertices_color[v3] = rgb_color
             triangle_list[0, ii * 4:(ii + 1) * 4] = [3, v1, v2, v3]
 
-        self.reader.meshes += [pv.PolyData(np.float64(np.asarray(vertex_list)), triangle_list[0, :].astype(int))]
-        self.reader.meshes[-1]['colors'] = np.abs(255-vertices_color)
+        mesh = pv.PolyData(np.float64(np.asarray(vertex_list)), triangle_list[0, :].astype(int))
+        mesh['colors'] = np.abs(255-vertices_color)
+        if self.create_image:
+            image_name = 'CT ' + '0' + str(len(Data.image_list))
+
+            model_to_mask = ModelToMask([mesh])
+            mask = model_to_mask.mask.T
+
+            new_image = CreateImageFromMask(mask, model_to_mask.origin, model_to_mask.spacing, image_name)
+            Image(new_image)
+
+        else:
+            Data.meshes += [mesh]
 
     @staticmethod
     def color_avg(color_list, p1, p2, p3):
@@ -126,3 +144,5 @@ class ThreeMfReader(object):
         hexAvg = '#%02x%02x%02x' % (rgbAvg[0], rgbAvg[1], rgbAvg[2])
 
         return hexAvg
+
+
