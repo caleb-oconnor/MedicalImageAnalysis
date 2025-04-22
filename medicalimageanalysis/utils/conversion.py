@@ -54,7 +54,7 @@ class ContourToDiscreteMesh(object):
         conversion_matrix[:3, 3] = np.asarray(self.origin).dot(-matrix.T)
 
         self.contour_pixel = []
-        for ii, pos in enumerate(position):
+        for ii, pos in enumerate(self.contour_position):
             p_concat = np.concatenate((pos, np.ones((pos.shape[0], 1))), axis=1)
             self.contour_pixel += [p_concat.dot(conversion_matrix.T)[:, :3]]
 
@@ -110,13 +110,14 @@ class ContourToDiscreteMesh(object):
                     hold_mask[:, :, slice_num] = hold_mask[:, :, slice_num] + image
             self.mask = (hold_mask > 0).astype(np.uint8)
 
-    def compute_mesh(self, smoothing_num_iterations=20, smoothing_relaxation_factor=.5, smoothing_constraint_distance=1):
+    def compute_mesh(self, discrete=False, smoothing_num_iterations=20, smoothing_relaxation_factor=.5,
+                     smoothing_constraint_distance=1):
         label = numpy_support.numpy_to_vtk(num_array=self.mask.ravel(),
                                            deep=True, 
                                            array_type=vtk.VTK_FLOAT)
 
         img_vtk = vtk.vtkImageData()
-        img_vtk.SetDimensions(self.dimensions[1], self.dimensions[2], self.dimensions[0])
+        img_vtk.SetDimensions(self.dimensions[2], self.dimensions[1], self.dimensions[0])
         img_vtk.SetSpacing(self.spacing)
         img_vtk.SetOrigin(self.origin)
         img_vtk.SetDirectionMatrix(self.matrix.flatten(order='F'))
@@ -134,33 +135,24 @@ class ContourToDiscreteMesh(object):
         pad_filter.Update()
         pad_image = pad_filter.GetOutput()
 
-        # vtk_mesh = vtk.vtkDiscreteMarchingCubes()
-        # vtk_mesh.SetInputData(pad_image)
-        # vtk_mesh.GenerateValues(1, 1, 1)
-        # vtk_mesh.Update()
+        if discrete:
+            vtk_mesh = vtk.vtkDiscreteMarchingCubes()
+            vtk_mesh.SetInputData(pad_image)
+            vtk_mesh.GenerateValues(1, 1, 1)
+            vtk_mesh.Update()
 
-        # Faster
-        # flying_edges = vtk.vtkDiscreteFlyingEdges3D()
-        # flying_edges.SetInputData(pad_image)
-        # flying_edges.SetValue(0, 1)
-        # flying_edges.Update()
+            return pv.PolyData(vtk_mesh.GetOutput())
 
-        # Fastest with smoothing
-        # surface_nets = vtk.vtkSurfaceNets3D()
-        # surface_nets.SetInputData(pad_image)
-        # surface_nets.GenerateLabels(1, 1, 255)
-        # surface_nets.SmoothingOn()
-        # surface_nets.Update()
+        else:
+            # Uses VTK surface nets 3d
+            img = pv.ImageData(pad_image)
+            mesh = img.contour_labeled(smoothing=True,
+                                       output_mesh_type='triangles',
+                                       smoothing_num_iterations=smoothing_num_iterations,
+                                       smoothing_relaxation_factor=smoothing_relaxation_factor,
+                                       smoothing_constraint_distance=smoothing_constraint_distance)
 
-        img = pv.ImageData(pad_image)
-        mesh = img.contour_labeled(smoothing=True,
-                                   output_mesh_type='triangles',
-                                   smoothing_num_iterations=smoothing_num_iterations,
-                                   smoothing_relaxation_factor=smoothing_relaxation_factor,
-                                   smoothing_constraint_distance=smoothing_constraint_distance)
-
-        return mesh
-        # return pv.PolyData(flying_edges.GetOutput())
+            return mesh
 
 
 class ContourToMask(object):
