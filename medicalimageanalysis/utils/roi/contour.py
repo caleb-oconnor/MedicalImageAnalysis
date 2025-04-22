@@ -13,6 +13,8 @@ import numpy as np
 
 
 def contours_from_mask(mask, plane='Axial'):
+    mask = mask.astype(np.uint8)
+
     if plane == 'Axial':
         slices = mask.shape[0]
     elif plane == 'Coronal':
@@ -24,7 +26,7 @@ def contours_from_mask(mask, plane='Axial'):
     for ii in range(slices):
         if plane == 'Axial':
             tuple_contour, _ = cv2.findContours(mask[ii, :, :], cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            contours += [np.concatenate((ii * np.ones((len(t), 1)), np.vstack(t)), axis=1) for t in tuple_contour]
+            contours += [np.concatenate((np.vstack(t), ii * np.ones((len(t), 1))), axis=1) for t in tuple_contour]
         elif plane == 'Coronal':
             tuple_contour, _ = cv2.findContours(mask[:, ii, :], cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             for t in tuple_contour:
@@ -32,6 +34,6 @@ def contours_from_mask(mask, plane='Axial'):
                 contours += [np.vstack((stack[:, 0], ii * np.ones(len(t)), stack[:, 1])).T]
         else:
             tuple_contour, _ = cv2.findContours(mask[:, :, ii], cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            contours += [np.concatenate((np.vstack(t), ii * np.ones((len(t), 1))), axis=1) for t in tuple_contour]
+            contours += [np.concatenate((ii * np.ones((len(t), 1)), np.vstack(t)), axis=1) for t in tuple_contour]
 
     return contours
