@@ -40,7 +40,7 @@ class ICP(object):
         self.matrix = np.identity(4)
         self.matrix[:3, 3] = translation
 
-    def compute_vtk(self, distance=1e-5, iterations=1000, landmarks=None, com_matching=True):
+    def compute_vtk(self, distance=1e-5, iterations=1000, landmarks=None, com_matching=True, inverse=True):
         if landmarks is None:
             landmarks = int(np.round(len(self.target.points) / 10))
 
@@ -57,9 +57,13 @@ class ICP(object):
         self.icp.Modified()
         self.icp.Update()
 
-        self.matrix = np.linalg.inv(pv.array_from_vtkmatrix(self.icp.GetMatrix()))
+        if inverse:
+            self.matrix = np.linalg.inv(pv.array_from_vtkmatrix(self.icp.GetMatrix()))
+        else:
+            self.matrix = pv.array_from_vtkmatrix(self.icp.GetMatrix())
 
-    def compute_o3d(self, distance=10, iterations=1000, rmse=1e-7, fitness=1e-7, method='point', com_matching=True):
+    def compute_o3d(self, distance=10, iterations=1000, rmse=1e-7, fitness=1e-7, method='point', com_matching=True,
+                    inverse=True):
         ref_pcd = PointCloud()
         ref_pcd.points = Vector3dVector(np.asarray(self.source.points))
 
@@ -82,9 +86,10 @@ class ICP(object):
             self.icp = registration_icp(ref_pcd, mov_pcd, distance, initial_transform,
                                         TransformationEstimationPointToPlane())
 
-        r_zyx = Rotation.from_matrix(self.icp.transformation)
-        zxy_angles = r_zyx.as_euler('zxy', degrees=True)
-        self.matrix = Rotation.from_euler('zxy', zxy_angles, degrees=True).as_matrix()
+        if inverse:
+            self.matrix = np.linalg.inv(self.icp.transformation)
+        else:
+            self.matrix = self.icp.transformation
 
     def get_matrix(self):
         return self.matrix
