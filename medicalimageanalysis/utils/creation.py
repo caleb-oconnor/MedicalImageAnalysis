@@ -6,8 +6,7 @@ import numpy as np
 import pydicom as dicom
 from pydicom.uid import generate_uid, UID, ExplicitVRLittleEndian
 
-from ..data.image import Image
-from ..data.roi import Roi
+from ..data import Data
 
 
 class CreateDicomImage(object):
@@ -109,20 +108,16 @@ class CreateDicomImage(object):
             ds.save_as(export_file, write_like_original=False)
 
 
-class CreateImageFromMask(Image):
-    def __init__(self, array, origin, spacing):
-        super(Image, self).__init__()
+class CreateImageFromMask(object):
+    def __init__(self, array, origin, spacing, image_name):
         self.rois = {}
         self.pois = {}
-        
-        self.tags = None
+
         self.array = array
         self.spacing = spacing
         self.origin = origin
 
-        self.image_name = None
-        self.patient_name = None
-        self.mrn = None
+        self.image_name = image_name
 
         now = datetime.datetime.now()
         self.date = str(now.year) + str(now.month) + str(now.day)
@@ -130,17 +125,14 @@ class CreateImageFromMask(Image):
             self.time = str(now.hour) + '0' + str(now.second) + '00'
         else:
             self.time = str(now.hour) + str(now.second) + '00'
-        self.series_uid = generate_uid()
-        self.frame_ref = generate_uid()
-        self.window = [0, 1]
-        self.modality = 'CT'
+        self.birthdate = self.date
 
         self.filepaths = None
 
         self.plane = 'Axial'
         self.dimensions = array.shape
         self.orientation = [1, 0, 0, 0, 1, 0]
-        self.matrix = np.identity(3, dtype=np.float32)
+        self.image_matrix = np.identity(3, dtype=np.float32)
         self.display_matrix = np.identity(4, dtype=np.float32)
 
         self.camera_position = None
@@ -154,12 +146,68 @@ class CreateImageFromMask(Image):
 
         self.rotated_array = None
 
-    def add_mesh_roi(self, mesh, roi_name, decimate_points=50000):
-        self.rois[roi_name] = Roi(self, name=roi_name, color=[0, 0, 255])
+        ds = dicom.Dataset()
+        ds.file_meta = dicom.Dataset()
+        ds.file_meta.ImplementationClassUID = "1.2.3.4"
+        ds.file_meta.MediaStorageSOPClassUID = UID("1.2.840.10008.5.1.4.1.1.2")
+        ds.file_meta.MediaStorageSOPInstanceUID = str(10000)
+        ds.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+
+        ds.is_little_endian = True
+        ds.is_implicit_VR = False
+
+        self.study_uid = generate_uid()
+        self.series_uid = generate_uid()
+        self.series_uid = generate_uid()
+        self.frame_ref = generate_uid()
+        self.acq_number = 1
+        self.window = [0, 1]
+        self.modality = 'CT'
+
+        ds.PatientName = 'User^Created^ ^'
+        ds.PatientSex = 'M'
+        ds.SeriesDescription = '3mf to Image'
+        ds.PatientID = 'User^Created^ ^'
+        ds.Modality = 'CT'
+        ds.StudyDate = self.date
+        ds.ContentDate = self.date
+        ds.StudyTime = self.time
+        ds.ContentTime = self.time
+        ds.StudyInstanceUID = generate_uid()
+        ds.SeriesInstanceUID = generate_uid()
+        ds.SOPInstanceUID = UID(str(10000))
+        ds.SOPClassUID = UID("1.2.840.10008.5.1.4.1.1.2")
+        ds.StudyID = '100'
+
+        ds.FrameOfReferenceUID = generate_uid()
+        ds.AcquisitionNumber = '1'
+        ds.SeriesNumber = '2'
+        ds.InstanceNumber = str(1)
+        ds.ImageOrientationPatient = self.orientation
+        ds.PixelSpacing = spacing[:2]
+        ds.SliceThickness = spacing[2]
+        ds.ImagePositionPatient = [self.origin[0], self.origin[1], (self.origin[2] + spacing[2])]
+
+        ds.SamplesPerPixel = 1
+        ds.PhotometricInterpretation = "MONOCHROME2"
+        ds.PixelRepresentation = 1
+        ds.HighBit = 15
+        ds.BitsStored = 16
+        ds.BitsAllocated = 16
+        ds.Columns = array.shape[0]
+        ds.Rows = array.shape[1]
+        ds.RescaleIntercept = 0
+        ds.RescaleSlope = 1
+
+        self.image_set = [ds]
+
+    def add_mesh_roi(self, mesh, roi_name):
+        Data.images[self.image_name].create_roi(self, name=roi_name, color=[0, 0, 255], visible=False, filepath=None)
         self.rois[roi_name].mesh = mesh
-        self.rois[roi_name].display_mesh = mesh.decimate_pro(1 - (decimate_points / len(mesh.points)))
         
         self.rois[roi_name].volume = mesh.volume
         self.rois[roi_name].com = mesh.center
         self.rois[roi_name].bounds = mesh.bounds
+
+
         
