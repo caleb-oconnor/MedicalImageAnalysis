@@ -23,6 +23,11 @@ class Data(object):
         cls.rigid_list = []
 
     @classmethod
+    def delete_image(cls, image_name):
+        del cls.images[image_name]
+        del cls.image_list[image_name]
+
+    @classmethod
     def match_rois(cls):
         image_rois = [list(cls.images[image_name].rois.keys()) for image_name in list(cls.images.keys())]
         roi_names = list({x for r in image_rois for x in r})
