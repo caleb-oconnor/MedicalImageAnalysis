@@ -85,13 +85,22 @@ class ThreeMfReader(object):
         mesh = pv.PolyData(np.float64(np.asarray(vertex_list)), triangle_list[0, :].astype(int))
         mesh['colors'] = np.abs(255-vertices_color)
         if self.create_image:
-            image_name = 'CT ' + '0' + str(len(Data.image_list))
 
-            model_to_mask = ModelToMask([mesh])
+            decimate_mesh = mesh.decimate_pro(1 - (50000 / len(mesh.points)))
+
+            image_name = 'CT ' + '0' + str(len(Data.image_list) + 1)
+
+            model_to_mask = ModelToMask([decimate_mesh])
             mask = model_to_mask.mask.T
 
             new_image = CreateImageFromMask(mask, model_to_mask.origin, model_to_mask.spacing, image_name)
-            Image(new_image)
+            Data.images[image_name] = Image(new_image)
+            Data.image_list += [image_name]
+
+            Data.images[image_name].create_roi(name='mandible', visible=True, filepath=self.reader.files['3mf'])
+            Data.images[image_name].rois['mandible'].add_mesh(decimate_mesh)
+            Data.images[image_name].rois['mandible'].multi_color = True
+            Data.match_rois()
 
         else:
             Data.meshes += [mesh]
