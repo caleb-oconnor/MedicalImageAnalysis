@@ -51,6 +51,13 @@ class Roi(object):
         self.rotated_mesh = None
         self.multi_color = None
 
+    def add_mesh(self, mesh):
+        self.mesh = mesh
+
+        self.volume = mesh.volume
+        self.com = mesh.center
+        self.bounds = mesh.bounds
+
     def clear(self):
         self.contour_position = None
         self.contour_pixel = None
@@ -83,8 +90,7 @@ class Roi(object):
 
         return position
 
-    def create_discrete_mesh(self, smoothing_num_iterations=20, smoothing_relaxation_factor=.5,
-                             smoothing_constraint_distance=1):
+    def create_mesh(self, smoothing_num_iterations=20, smoothing_relaxation_factor=.5, smoothing_constraint_distance=1):
         meshing = ContourToDiscreteMesh(contour_pixel=self.contour_pixel,
                                         spacing=self.image.spacing,
                                         origin=self.image.origin,
@@ -94,6 +100,19 @@ class Roi(object):
         self.mesh = meshing.compute_mesh(smoothing_num_iterations=smoothing_num_iterations,
                                          smoothing_relaxation_factor=smoothing_relaxation_factor,
                                          smoothing_constraint_distance=smoothing_constraint_distance)
+        self.volume = self.mesh.volume
+        self.com = self.mesh.center
+        self.bounds = self.mesh.bounds
+
+    def create_discrete_mesh(self):
+        meshing = ContourToDiscreteMesh(contour_pixel=self.contour_pixel,
+                                        spacing=self.image.spacing,
+                                        origin=self.image.origin,
+                                        dimensions=self.image.dimensions,
+                                        matrix=self.image.matrix,
+                                        plane=self.plane)
+        self.mesh = meshing.compute_mesh(discrete=True)
+
         self.volume = self.mesh.volume
         self.com = self.mesh.center
         self.bounds = self.mesh.bounds
@@ -332,4 +351,4 @@ class Roi(object):
         self.plane = plane
         self.contour_pixel = pixel
         self.contour_position = self.convert_pixel_to_position(pixel=pixel)
-        self.create_discrete_mesh()
+        self.create_mesh()
