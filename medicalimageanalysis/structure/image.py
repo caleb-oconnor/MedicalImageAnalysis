@@ -22,10 +22,8 @@ import SimpleITK as sitk
 import vtk
 from vtkmodules.util.numpy_support import numpy_to_vtk
 
-from scipy.spatial.transform import Rotation as R
-
 from ..utils.image.transform import euler_transform
-from ..utils.roi.external import compute_external
+from medicalimageanalysis.utils.image.threshold import external
 from ..utils.roi.contour import contours_from_mask
 
 from .poi import Poi
@@ -49,6 +47,9 @@ class Display(object):
         else:
             self.slice_location = [0, int(self.image.dimensions[1] / 2), int(self.image.dimensions[2] / 2)]
 
+        self.rotation_center = copy.deepcopy(self.slice_location)
+        self.expanded_image = self.compute_expanded_image()
+
         self.scroll_max = [self.image.dimensions[0] - 1,
                            self.image.dimensions[1] - 1,
                            self.image.dimensions[2] - 1]
@@ -59,7 +60,7 @@ class Display(object):
             spacing = self.image.spacing
             origin = self.image.origin
         else:
-            matrix = copy.deepcopy(self.image.matrix)
+            matrix = copy.deepcopy(self.matrix)
             spacing = self.spacing
             origin = self.origin
 
@@ -77,7 +78,7 @@ class Display(object):
             spacing = self.image.spacing
             origin = self.image.origin
         else:
-            matrix = copy.deepcopy(self.image.matrix)
+            matrix = copy.deepcopy(self.matrix)
             spacing = self.spacing
             origin = self.origin
 
@@ -112,6 +113,34 @@ class Display(object):
                 array = angled_array
 
         return array.astype(np.float32)
+
+    def compute_expanded_image(self, expansion=None):
+        pixel_to_position_matrix = self.compute_matrix_pixel_to_position()
+
+        if expansion is None:
+            center = np.round([self.image.dimensions[1] / 2,
+                               self.image.dimensions[2] / 2,
+                               self.image.dimensions[0] / 2]).astype(np.int64)
+        else:
+            center = expansion
+
+        new_edges = [[-center[0], -center[1], -center[2]], [-center[0], -center[1], 3 * center[2]],
+                     [-center[0], 3 * center[1], 3 * center[2]], [-center[0], 3 * center[1], -center[2]],
+                     [3 * center[0], -center[1], -center[2]], [3 * center[0], 3 * center[1], -center[2]],
+                     [3 * center[0], 3 * center[1], 3 * center[2]], [3 * center[0], -center[1], 3 * center[2]]]
+
+        corner_points = [np.asarray([new[0], new[1], new[2], 1]).dot(pixel_to_position_matrix.T)[:3] for new in new_edges]
+
+        faces = [4, 0, 1, 2, 3,
+                 4, 4, 5, 6, 7,
+                 4, 0, 4, 7, 1,
+                 4, 3, 2, 6, 5,
+                 4, 0, 3, 5, 4,
+                 4, 1, 7, 6, 2]
+
+        image = pv.PolyData(corner_points, faces)
+
+        return image
 
     def compute_scroll_max(self):
         if np.array_equal(self.matrix, self.image.matrix):
@@ -193,26 +222,28 @@ class Display(object):
             img.GetPointData().SetScalars(numpy_to_vtk(array_slice.flatten(order="F")))
 
         else:
-            location = np.asarray([self.slice_location[0], self.slice_location[1], self.slice_location[2], 1])
-            rotation_center = location.dot(pixel_to_position_matrix.T)[:3]
+            angled_array = self.compute_off_axis_slice(slice_plane)
+            array_shape = angled_array.shape
 
             if slice_plane == 'Axial':
-                normal = self.matrix[:, 2]
+                location = np.asarray([0, 0, self.slice_location[0], 1])
+                dim = [array_shape[0], array_shape[1], 1]
             elif slice_plane == 'Coronal':
-                normal = self.matrix[:, 1]
+                location = np.asarray([0, self.slice_location[1], 0, 1])
+                dim = [array_shape[0], 1, array_shape[1]]
             else:
-                normal = self.matrix[:, 0]
+                location = np.asarray([self.slice_location[2], 0, 0, 1])
+                dim = [1, array_shape[0], array_shape[1]]
 
-            plane = vtk.vtkPlane()
-            plane.SetOrigin(rotation_center)
-            plane.SetNormal(normal)
+            slice_origin = location.dot(pixel_to_position_matrix.T)[:3]
+            # new_slice_origin = transform.TransformPoint(slice_origin)
 
-            cutter = vtk.vtkCutter()
-            cutter.SetCutFunction(plane)
-            cutter.SetInputData(self.vtk_image)
-            cutter.Update()
-
-            img = pv.PolyData(cutter.GetOutput())
+            img = vtk.vtkImageData()
+            img.SetSpacing(self.image.spacing)
+            img.SetDirectionMatrix(self.matrix.T.reshape(1, 9)[0])
+            img.SetDimensions(dim)
+            img.SetOrigin(self.image.origin)
+            img.GetPointData().SetScalars(numpy_to_vtk(angled_array.flatten(order="F")))
 
         return img
 
@@ -274,21 +305,20 @@ class Display(object):
             self.spacing = self.image.spacing
             self.origin = self.image.origin
             self.transform = None
+
         else:
-
             pixel_to_position_matrix = self.compute_matrix_pixel_to_position()
-            location = np.asarray([self.slice_location[1], self.slice_location[2], self.slice_location[0], 1])
-            rotation_center = location.dot(pixel_to_position_matrix.T)[:3]
+            location = np.asarray([self.rotation_center[2], self.rotation_center[1], self.rotation_center[0], 1])
+            center_position = location.dot(pixel_to_position_matrix.T)[:3]
 
-            self.transform = euler_transform(angles=angles, rotation_center=rotation_center)
-            self.matrix = np.asarray(self.transform.GetMatrix()).reshape(3, 3) @ self.image.matrix
+            self.transform = euler_transform(angles=angles, rotation_center=center_position)
+            self.matrix = np.asarray(self.transform.GetMatrix()).reshape(3, 3)
 
-            xy_new = self.transform.TransformPoint(np.asarray([1, 1, 0, 1]).dot(pixel_to_position_matrix.T)[:3])
-            z_new = self.transform.TransformPoint(np.asarray([0, 0, 1, 1]).dot(pixel_to_position_matrix.T)[:3])
+    def update_rotation_center(self, new_center=None):
+        if new_center is None:
+            new_center = self.slice_location
 
-            # self.spacing = xy_new - np.asarray(transform.TransformPoint(self.origin))
-            # self.spacing[2] = (z_new - np.asarray(transform.TransformPoint(self.origin)))[2]
-            # self.origin = transform.TransformPoint(self.origin)
+        self.rotation_center = new_center
 
     def update_slice_location(self, scroll, slice_plane):
         if slice_plane == 'Axial':
@@ -613,13 +643,13 @@ class Image(object):
         if name not in list(self.rois.keys()):
             self.rois[name] = Roi(self, name=name, color=color, visible=visible, filepaths=filepaths)
 
-            mask = compute_external(self.array, threshold=threshold, only_mask=True)
-            contours = contours_from_mask(mask.astype(np.uint8))
-            positions = self.rois[name].convert_pixel_to_position(pixel=contours)
+        mask = external(self.array, threshold=threshold, only_mask=True)
+        contours = contours_from_mask(mask.astype(np.uint8))
+        positions = self.rois[name].convert_pixel_to_position(pixel=contours)
 
-            self.rois[name].contour_pixel = contours
-            self.rois[name].contour_position = positions
-            self.rois[name].create_discrete_mesh()
+        self.rois[name].contour_pixel = contours
+        self.rois[name].contour_position = positions
+        self.rois[name].create_discrete_mesh()
 
     def compute_aspect(self, slice_plane):
         if slice_plane == 'Axial':
@@ -630,6 +660,54 @@ class Image(object):
             aspect = np.round(self.spacing[1] / self.spacing[2], 2)
 
         return aspect
+
+    def compute_bounds(self):
+        shape = self.array.shape
+        matrix_reshape = self.matrix.reshape(1, 9)[0]
+        vtk_image = vtk.vtkImageData()
+        vtk_image.SetSpacing(self.spacing)
+        vtk_image.SetDirectionMatrix(matrix_reshape)
+        vtk_image.SetDimensions([shape[1], shape[2], shape[0]])
+        vtk_image.SetOrigin(self.origin)
+
+        x_min, x_max, y_min, y_max, z_min, z_max = vtk_image.GetBounds()
+
+        return [x_min, x_max, y_min, y_max, z_min, z_max]
+
+    def compute_corner_positions(self):
+        shape = self.array.shape
+        matrix_reshape = self.matrix.reshape(1, 9)[0]
+        vtk_image = vtk.vtkImageData()
+        vtk_image.SetSpacing(self.spacing)
+        vtk_image.SetDirectionMatrix(matrix_reshape)
+        vtk_image.SetDimensions([shape[1], shape[2], shape[0]])
+        vtk_image.SetOrigin(self.origin)
+
+        x_min, x_max, y_min, y_max, z_min, z_max = vtk_image.GetBounds()
+
+        corner_points = [(x_min, y_min, z_min),
+                         (x_max, y_min, z_min),
+                         (x_max, y_max, z_min),
+                         (x_min, y_max, z_min),
+                         (x_min, y_min, z_max),
+                         (x_max, y_min, z_max),
+                         (x_max, y_max, z_max),
+                         (x_min, y_max, z_max)]
+
+        return corner_points
+
+    def compute_corner_sides(self):
+        corner_points = self.compute_corner_positions()
+        points = [corner_points[0], corner_points[4], corner_points[7], corner_points[3],
+                  corner_points[1], corner_points[2], corner_points[6], corner_points[5]]
+        faces = [4, 0, 1, 2, 3,
+                 4, 4, 5, 6, 7,
+                 4, 0, 4, 7, 1,
+                 4, 3, 2, 6, 5,
+                 4, 0, 3, 5, 4,
+                 4, 1, 7, 6, 2]
+
+        return pv.PolyData(points, faces)
 
     def compute_matrix_position_to_pixel(self):
         matrix = np.identity(3, dtype=np.float32)
