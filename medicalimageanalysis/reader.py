@@ -27,7 +27,7 @@ Functions:
 import os
 import psutil
 
-from .read import DicomReader, MhdReader, NiftiReader, StlReader, VtkReader, ThreeMfReader
+from .read import DicomReader, StlReader, VtkReader, ThreeMfReader
 
 from .data import Data
 
@@ -76,10 +76,10 @@ class Reader(Data):
         if only_modality is not None:
             self.only_modality = only_modality
         else:
-            self.only_modality = ['CT', 'MR', 'PT', 'US', 'DX', 'MG', 'NM', 'CR', 'RTSTRUCT']
+            self.only_modality = ['CT', 'MR', 'PT', 'US', 'DX', 'CR', 'RTSTRUCT']
 
         self.files = None
-        if folder_path is not None or file_list is not N0ne:
+        if folder_path is not None or file_list is not None:
             self.file_parsar(folder_path=folder_path, file_list=file_list, exclude_files=self.exclude_files)
 
     def file_parsar(self, folder_path=None, file_list=None, exclude_files=None):
@@ -161,7 +161,7 @@ class Reader(Data):
                       '3mf': mf3_files,
                       'NoExtension': no_file_extension}
 
-    def check_memory(self, file_dictionary):
+    def check_memory(self):
         dicom_size = 0
         for file in self.files['Dicom']:
             dicom_size = dicom_size + os.path.getsize(file)
@@ -199,17 +199,6 @@ class Reader(Data):
         dicom_reader = DicomReader(self)
         dicom_reader.load()
 
-    def read_rtstruct_only(self, base_image=None):
-        print('reader')
-
-    def read_mhd(self, match_image=None, create_contours=False):
-        mf3_reader = MhdReader(self)
-        mf3_reader.load()
-
-    def read_nifti(self, match_image=None, create_contours=False):
-        nifti_reader = NiftiReader(self)
-        nifti_reader.load()
-
     def read_stl(self, files=None, create_image=False, match_image=None):
         stl_reader = StlReader(self)
         if files is not None:
@@ -223,7 +212,7 @@ class Reader(Data):
         vtk_reader.load()
 
     def read_3mf(self, files=None, create_image=False, match_image=None):
-        mf3_reader = ThreeMfReader(self)
+        mf3_reader = ThreeMfReader(self, create_image=create_image)
         if files is not None:
             mf3_reader.input_files(files)
         mf3_reader.load()
