@@ -56,7 +56,7 @@ class DicomReader(object):
         self.reader = reader
 
         self.ds = []
-        self.ds_modality = {key: [] for key in ['CT', 'MR', 'PT', 'US', 'DX', 'MG', 'NM', 'CR', 'RTSTRUCT']}
+        self.ds_modality = {key: [] for key in ['CT', 'MR', 'PT', 'US', 'DX', 'CR', 'RTSTRUCT']}
 
     def load(self, display_time=False):
         """
@@ -111,9 +111,9 @@ class DicomReader(object):
 
         """
         for modality in list(self.ds_modality.keys()):
-            images_in_modality = [d for d in self.ds if d['Modality'].value == modality]
+            images_in_modality = [d for d in self.ds if (0x0008, 0x0060) in d and d['Modality'].value == modality]
             if len(images_in_modality) > 0 and modality in self.reader.only_modality:
-                if modality in ['US', 'DX', 'MG', 'CR', 'RTSTRUCT']:
+                if modality in ['US', 'DX', 'CR', 'RTSTRUCT']:
                     for image in images_in_modality:
                         self.ds_modality[modality] += [image]
 
@@ -130,48 +130,48 @@ class DicomReader(object):
                     unique_tags = np.unique(sorting_tags, axis=0)
                     for tag in unique_tags:
                         sorted_idx = np.where((sorting_tags[:, 0] == tag[0]) & (sorting_tags[:, 1] == tag[1]))
-                        image_tags = [images_in_modality[idx] for idx in sorted_idx[0]]
+                        image_tags = [images_in_modality[idx] for idx in sorted_idx[0] if 'ImageOrientationPatient' in images_in_modality[idx] and 'ImagePositionPatient' in images_in_modality[idx]]
 
-                        if 'ImageOrientationPatient' in image_tags[0] and 'ImagePositionPatient' in image_tags[0]:
-                            orientations = np.asarray([img['ImageOrientationPatient'].value for img in image_tags])
-                            _, indices = np.unique(np.round(orientations, 4), axis=0, return_index=True)
-                            unique_orientations = [orientations[ind] for ind in indices]
-                            for orient in unique_orientations:
-                                orient_idx = np.where((np.round(orientations[:, 0]) == np.round(orient[0])) &
-                                                      (np.round(orientations[:, 1]) == np.round(orient[1])) &
-                                                      (np.round(orientations[:, 2]) == np.round(orient[2])) &
-                                                      (np.round(orientations[:, 3]) == np.round(orient[3])) &
-                                                      (np.round(orientations[:, 4]) == np.round(orient[4])) &
-                                                      (np.round(orientations[:, 5]) == np.round(orient[5])))
+                        orientations = np.asarray([img['ImageOrientationPatient'].value for img in image_tags])
+                        _, indices = np.unique(np.round(orientations, 4), axis=0, return_index=True)
+                        unique_orientations = [orientations[ind] for ind in indices]
+                        for orient in unique_orientations:
+                            orient_idx = np.where((np.round(orientations[:, 0], 3) == np.round(orient[0], 3)) &
+                                                  (np.round(orientations[:, 1], 3) == np.round(orient[1], 3)) &
+                                                  (np.round(orientations[:, 2], 3) == np.round(orient[2], 3)) &
+                                                  (np.round(orientations[:, 3], 3) == np.round(orient[3], 3)) &
+                                                  (np.round(orientations[:, 4], 3) == np.round(orient[4], 3)) &
+                                                  (np.round(orientations[:, 5], 3) == np.round(orient[5], 3)))
 
-                                orient_tags = [image_tags[idx] for idx in orient_idx[0]]
-                                correct_orientation = orient_tags[0]['ImageOrientationPatient'].value
-                                position_tags = np.asarray([t['ImagePositionPatient'].value for t in orient_tags])
+                            orient_tags = [image_tags[idx] for idx in orient_idx[0]]
+                            correct_orientation = orient_tags[0]['ImageOrientationPatient'].value
 
-                                x = np.abs(correct_orientation[0]) + np.abs(correct_orientation[3])
-                                y = np.abs(correct_orientation[1]) + np.abs(correct_orientation[4])
-                                z = np.abs(correct_orientation[2]) + np.abs(correct_orientation[5])
+                            position_tags = np.asarray([t['ImagePositionPatient'].value for t in orient_tags])
 
-                                row_direction = correct_orientation[:3]
-                                column_direction = correct_orientation[3:]
-                                slice_direction = np.cross(row_direction, column_direction)
-                                if x < y and x < z:
-                                    if slice_direction[0] > 0:
-                                        slice_idx = np.argsort(position_tags[:, 0])
-                                    else:
-                                        slice_idx = np.argsort(position_tags[:, 0])[::-1]
-                                elif y < x and y < z:
-                                    if slice_direction[1] > 0:
-                                        slice_idx = np.argsort(position_tags[:, 1])
-                                    else:
-                                        slice_idx = np.argsort(position_tags[:, 1])[::-1]
+                            x = np.abs(correct_orientation[0]) + np.abs(correct_orientation[3])
+                            y = np.abs(correct_orientation[1]) + np.abs(correct_orientation[4])
+                            z = np.abs(correct_orientation[2]) + np.abs(correct_orientation[5])
+
+                            row_direction = correct_orientation[:3]
+                            column_direction = correct_orientation[3:]
+                            slice_direction = np.cross(row_direction, column_direction)
+                            if x < y and x < z:
+                                if slice_direction[0] > 0:
+                                    slice_idx = np.argsort(position_tags[:, 0])
                                 else:
-                                    if slice_direction[2] > 0:
-                                        slice_idx = np.argsort(position_tags[:, 2])
-                                    else:
-                                        slice_idx = np.argsort(position_tags[:, 2])[::-1]
+                                    slice_idx = np.argsort(position_tags[:, 0])[::-1]
+                            elif y < x and y < z:
+                                if slice_direction[1] > 0:
+                                    slice_idx = np.argsort(position_tags[:, 1])
+                                else:
+                                    slice_idx = np.argsort(position_tags[:, 1])[::-1]
+                            else:
+                                if slice_direction[2] > 0:
+                                    slice_idx = np.argsort(position_tags[:, 2])
+                                else:
+                                    slice_idx = np.argsort(position_tags[:, 2])[::-1]
 
-                                self.ds_modality[modality] += [[orient_tags[idx] for idx in slice_idx]]
+                            self.ds_modality[modality] += [[orient_tags[idx] for idx in slice_idx]]
 
     def image_creation(self):
         """
@@ -181,22 +181,13 @@ class DicomReader(object):
         :return:
         :rtype:
         """
-        for modality in ['CT', 'MR', 'DX', 'CR', 'MG', 'US']:
+        for modality in ['CT', 'MR', 'PT', 'DX', 'CR', 'US']:
             for image_set in self.ds_modality[modality]:
-                if modality in ['CT', 'MR']:
+                if modality in ['CT', 'MR', 'PT']:
                     Read3D(image_set, self.reader.only_tags)
 
                 elif modality in ['DX', 'CR']:
                     ReadXRay(image_set, self.reader.only_tags)
-
-                elif modality == 'MG':
-                    if 'ImageType' in image_set:
-                        if 'VOLUME' in image_set['ImageType'].value or 'TOMOSYNTHESIS' in image_set['ImageType'].value:
-                            pass
-                            # [ReadMG(image_set, self.reader.only_tags)]
-
-                        else:
-                            ReadXRay(image_set, self.reader.only_tags)
 
                 elif modality == 'US':
                     ReadUS(image_set, self.reader.only_tags)
@@ -516,135 +507,6 @@ class ReadXRay(object):
                 inplane_spacing = self.image_set[0][sequence][0]['PixelMeasuresSequence'][0]['PixelSpacing']
 
         return np.asarray([inplane_spacing[0], inplane_spacing[1], slice_thickness])
-
-
-class ReadMG(object):
-    def __init__(self, image_set, only_tags):
-        if isinstance(image_set, list):
-            self.image_set = image_set
-        else:
-            self.image_set = [image_set]
-        self.only_tags = only_tags
-
-        self.unverified = 'Modality'
-        self.base_position = self.image_set[0].PatientOrientation
-        self.skipped_slice = None
-        self.sections = None
-        self.rgb = False
-
-        self.modality = self.image_set[0].Modality
-
-        self.filepaths = self.image_set[0].filename
-        self.sops = self.image_set[0].SOPInstanceUID
-        self.origin = np.asarray([0, 0, 0])
-
-        self.array = None
-        if not self.only_tags:
-            self._compute_array()
-        self.spacing = self._compute_spacing()
-        self.dimensions = self._compute_dimensions()
-        self.orientation = self._compute_orientation()
-        self.plane = self._compute_plane
-        self.image_matrix = np.identity(3, dtype=np.float32)
-        # self.image_matrix = self._compute_image_matrix()
-
-        self.image_name = create_image_name(self.modality)
-
-        image = Image(self)
-        Data.images[self.image_name] = image
-        Data.image_list += [self.image_name]
-
-    def _compute_array(self):
-        if (0x0028, 0x1052) in self.image_set[0]:
-            intercept = self.image_set[0].RescaleIntercept
-        else:
-            intercept = 0
-
-        if (0x0028, 0x1053) in self.image_set[0]:
-            slope = self.image_set[0].RescaleSlope
-        else:
-            slope = 1
-
-        self.array = ((self.image_set[0].pixel_array*slope)+intercept).astype('int16')
-
-        del self.image_set[0].PixelData
-
-    def _compute_plane(self):
-        x = np.abs(self.orientation[0]) + np.abs(self.orientation[3])
-        y = np.abs(self.orientation[1]) + np.abs(self.orientation[4])
-        z = np.abs(self.orientation[2]) + np.abs(self.orientation[5])
-
-        if x < y and x < z:
-            return 'Sagittal'
-        elif y < x and y < z:
-            return 'Coronal'
-        else:
-            return 'Axial'
-
-    def _compute_spacing(self):
-        inplane_spacing = [1, 1]
-        slice_thickness = 1
-
-        if 'PixelSpacing' in self.image_set[0]:
-            inplane_spacing = self.image_set[0].PixelSpacing
-
-        elif 'ContributingSourcesSequence' in self.image_set[0]:
-            sequence = 'ContributingSourcesSequence'
-            if 'DetectorElementSpacing' in self.image_set[0][sequence][0]:
-                inplane_spacing = self.image_set[0][sequence][0]['DetectorElementSpacing']
-
-        elif 'PerFrameFunctionalGroupsSequence' in self.image_set:
-            sequence = 'PerFrameFunctionalGroupsSequence'
-            if 'PixelMeasuresSequence' in self.image_set[0][sequence][0]:
-                inplane_spacing = self.image_set[0][sequence][0]['PixelMeasuresSequence'][0]['PixelSpacing']
-
-        return np.asarray([inplane_spacing[0], inplane_spacing[1], slice_thickness])
-
-    def _compute_dimensions(self):
-        if self.array is not None:
-            slices = self.array.shape[0]
-        else:
-            slices = 1
-        return np.asarray([self.image_set[0]['Columns'].value, self.image_set[0]['Rows'].value, slices])
-
-    def _compute_orientation(self):
-        orientation = np.asarray([1, 0, 0, 0, 1, 0])
-        if 'ImageOrientationPatient' in self.image_set[0]:
-            orientation = np.asarray(self.image_set[0]['ImageOrientationPatient'].value)
-
-        else:
-            if 'SharedFunctionalGroupsSequence' in self.image_set[0]:
-                seq_str = 'SharedFunctionalGroupsSequence'
-                if 'PlaneOrientationSequence' in self.image_set[0][seq_str][0]:
-                    plane_str = 'PlaneOrientationSequence'
-                    image_str = 'ImageOrientationPatient'
-                    orientation = np.asarray(self.image_set[0][seq_str][0][plane_str][0][image_str].value)
-
-                else:
-                    self.unverified = 'Orientation'
-
-            else:
-                self.unverified = 'Orientation'
-
-        return orientation
-
-    def _compute_image_matrix(self):
-        row_direction = self.orientation[:3]
-        column_direction = self.orientation[3:]
-
-        slice_direction = np.cross(row_direction, column_direction)
-        if len(self.image_set) > 1:
-            first = np.dot(slice_direction, self.image_set[0].ImagePositionPatient)
-            last = np.dot(slice_direction, self.image_set[-1].ImagePositionPatient)
-
-            self.spacing[2] = np.asarray((last - first) / (len(self.image_set) - 1))
-
-        mat = np.identity(3, dtype=np.float32)
-        mat[0, :3] = row_direction
-        mat[1, :3] = column_direction
-        mat[2, :3] = slice_direction
-
-        return mat
 
 
 class ReadUS(object):
