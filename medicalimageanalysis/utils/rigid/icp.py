@@ -40,7 +40,7 @@ class ICP(object):
         self.matrix = np.identity(4)
         self.matrix[:3, 3] = translation
 
-    def compute_vtk(self, distance=1e-5, iterations=1000, landmarks=None, com_matching=True, inverse=True):
+    def compute_vtk(self, distance=1e-5, iterations=1000, landmarks=None, com_matching=True, inverse=False):
         if landmarks is None:
             landmarks = int(np.round(len(self.target.points) / 10))
 
@@ -50,7 +50,8 @@ class ICP(object):
         self.icp.GetLandmarkTransform().SetModeToRigidBody()
         self.icp.SetCheckMeanDistance(1)
         self.icp.SetMeanDistanceModeToRMS()
-        self.icp.SetMaximumNumberOfLandmarks(landmarks)
+        if landmarks:
+            self.icp.SetMaximumNumberOfLandmarks(landmarks)
         self.icp.SetMaximumMeanDistance(distance)
         self.icp.SetMaximumNumberOfIterations(iterations)
         self.icp.SetStartByMatchingCentroids(com_matching)
@@ -63,7 +64,7 @@ class ICP(object):
             self.matrix = pv.array_from_vtkmatrix(self.icp.GetMatrix())
 
     def compute_o3d(self, distance=10, iterations=1000, rmse=1e-7, fitness=1e-7, method='point', com_matching=True,
-                    inverse=True):
+                    inverse=False):
         ref_pcd = PointCloud()
         ref_pcd.points = Vector3dVector(np.asarray(self.source.points))
 
