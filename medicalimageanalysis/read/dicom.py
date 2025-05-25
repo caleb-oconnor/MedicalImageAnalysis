@@ -438,7 +438,6 @@ class ReadXRay(object):
         self.only_tags = only_tags
 
         self.unverified = 'Modality'
-        self.base_position = self.image_set[0].PatientOrientation
         self.skipped_slice = None
         self.sections = None
         self.rgb = False
@@ -447,12 +446,26 @@ class ReadXRay(object):
 
         self.filepaths = self.image_set[0].filename
         self.sops = self.image_set[0].SOPInstanceUID
+
         self.plane = 'Axial'
+        if 'PatientOrientation' in self.image_set[0]:
+            orient = self.image_set[0].PatientOrientation
+            if 'L' in orient or 'R' in orient:
+                self.plane = 'Coronal'
+
+            elif 'A' in orient or 'P' in orient:
+                self.plane = 'Sagittal'
 
         self.orientation = [1, 0, 0, 0, 1, 0]
         self.origin = np.asarray([0, 0, 0])
         self.image_matrix = np.identity(3, dtype=np.float32)
-        self.dimensions = np.asarray([self.image_set[0]['Columns'].value, self.image_set[0]['Rows'].value, 1])
+
+        if self.plane == 'Axial':
+            self.dimensions = np.asarray([self.image_set[0]['Columns'].value, self.image_set[0]['Rows'].value, 1])
+        elif self.plane == 'Coronal':
+            self.dimensions = np.asarray([self.image_set[0]['Columns'].value, 1, self.image_set[0]['Rows'].value])
+        else:
+            self.dimensions = np.asarray([1, self.image_set[0]['Columns'].value, self.image_set[0]['Rows'].value])
 
         self.array = None
         if not self.only_tags:
@@ -477,7 +490,12 @@ class ReadXRay(object):
         if 'PresentationLUTShape' in self.image_set[0] and self.image_set[0]['PresentationLUTShape'] == 'Inverse':
             self.array = 16383 - self.array
 
-        self.array = self.array.reshape((1, self.array.shape[0], self.array.shape[1]))
+        if self.plane == 'Axial':
+            self.array = self.array.reshape((1, self.array.shape[0], self.array.shape[1]))
+        elif self.plane == 'Coronal':
+            self.array = self.array.reshape((self.array.shape[0], 1, self.array.shape[1]))
+        else:
+            self.array = self.array.reshape((self.array.shape[0], self.array.shape[1], 1))
 
     def _compute_spacing(self):
         """
