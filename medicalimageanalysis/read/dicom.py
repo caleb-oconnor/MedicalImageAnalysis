@@ -56,7 +56,7 @@ class DicomReader(object):
         self.reader = reader
 
         self.ds = []
-        self.ds_modality = {key: [] for key in ['CT', 'MR', 'PT', 'US', 'DX', 'CR', 'RTSTRUCT']}
+        self.ds_modality = {key: [] for key in ['CT', 'MR', 'PT', 'US', 'DX', 'RF', 'CR', 'RTSTRUCT']}
 
     def load(self, display_time=False):
         """
@@ -113,7 +113,7 @@ class DicomReader(object):
         for modality in list(self.ds_modality.keys()):
             images_in_modality = [d for d in self.ds if (0x0008, 0x0060) in d and d['Modality'].value == modality]
             if len(images_in_modality) > 0 and modality in self.reader.only_modality:
-                if modality in ['US', 'DX', 'CR', 'RTSTRUCT']:
+                if modality in ['US', 'DX', 'RF', 'CR', 'RTSTRUCT']:
                     for image in images_in_modality:
                         self.ds_modality[modality] += [image]
 
@@ -181,13 +181,16 @@ class DicomReader(object):
         :return:
         :rtype:
         """
-        for modality in ['CT', 'MR', 'PT', 'DX', 'CR', 'US']:
+        for modality in ['CT', 'MR', 'PT', 'DX', 'RF', 'CR', 'US']:
             for image_set in self.ds_modality[modality]:
                 if modality in ['CT', 'MR', 'PT']:
                     Read3D(image_set, self.reader.only_tags)
 
                 elif modality in ['DX', 'CR']:
                     ReadXRay(image_set, self.reader.only_tags)
+
+                elif modality == 'RF':
+                    ReadRF(image_set, self.reader.only_tags)
 
                 elif modality == 'US':
                     ReadUS(image_set, self.reader.only_tags)
@@ -525,6 +528,100 @@ class ReadXRay(object):
                 inplane_spacing = self.image_set[0][sequence][0]['PixelMeasuresSequence'][0]['PixelSpacing']
 
         return np.asarray([inplane_spacing[0], inplane_spacing[1], slice_thickness])
+
+
+class ReadRF(object):
+    def __init__(self, image_set, only_tags):
+        if isinstance(image_set, list):
+            self.image_set = image_set
+        else:
+            self.image_set = [image_set]
+        self.only_tags = only_tags
+
+        self.unverified = 'Modality'
+        self.skipped_slice = None
+        self.sections = None
+        self.rgb = False
+
+        self.modality = self.image_set[0].Modality
+
+        self.filepaths = self.image_set[0].filename
+        self.sops = self.image_set[0].SOPInstanceUID
+
+        self.plane = 'Axial'
+        if 'PatientOrientation' in self.image_set[0]:
+            orient = self.image_set[0].PatientOrientation
+            if 'L' in orient or 'R' in orient:
+                self.plane = 'Coronal'
+
+            elif 'A' in orient or 'P' in orient:
+                self.plane = 'Sagittal'
+
+        self.orientation = [1, 0, 0, 0, 1, 0]
+        self.origin = np.asarray([0, 0, 0])
+        self.image_matrix = np.identity(3, dtype=np.float32)
+
+        self.dimensions = None
+
+        self.array = None
+        if not self.only_tags:
+            self._compute_array()
+        self.spacing = self._compute_spacing()
+
+        self.image_name = create_image_name(self.modality)
+
+        image = Image(self)
+        Data.images[self.image_name] = image
+        Data.image_list += [self.image_name]
+
+    def _compute_array(self):
+        """
+        Creates the image array.
+        :return:
+        :rtype:
+        """
+        self.array = self.image_set[0].pixel_array.astype('int16')
+        del self.image_set[0].PixelData
+
+        if len(self.array.shape) < 3:
+            if self.plane == 'Axial':
+                self.array = self.array.reshape((1, self.array.shape[0], self.array.shape[1]))
+            elif self.plane == 'Coronal':
+                self.array = self.array.reshape((self.array.shape[0], 1, self.array.shape[1]))
+            else:
+                self.array = self.array.reshape((self.array.shape[0], self.array.shape[1], 1))
+
+        self.dimensions = self.array.shape
+
+    def _compute_spacing(self):
+        """
+        Creates 3 axis spacing by inplane pixel spacing the 1 mm being the slice thickness even though 2D images don't
+        have thickness.
+
+        :return:
+        :rtype:
+        """
+        inplane_spacing = [1, 1]
+        slice_thickness = 1
+
+        if 'PixelSpacing' in self.image_set[0]:
+            inplane_spacing = self.image_set[0].PixelSpacing
+
+        elif 'ImagerPixelSpacing' in self.image_set[0]:
+            inplane_spacing = self.image_set[0].ImagerPixelSpacing
+
+        elif 'ContributingSourcesSequence' in self.image_set[0]:
+            sequence = 'ContributingSourcesSequence'
+            if 'DetectorElementSpacing' in self.image_set[0][sequence][0]:
+                inplane_spacing = self.image_set[0][sequence][0]['DetectorElementSpacing']
+
+        elif 'PerFrameFunctionalGroupsSequence' in self.image_set[0]:
+            sequence = 'PerFrameFunctionalGroupsSequence'
+            if 'PixelMeasuresSequence' in self.image_set[0][sequence][0]:
+                inplane_spacing = self.image_set[0][sequence][0]['PixelMeasuresSequence'][0]['PixelSpacing']
+
+        return np.asarray([inplane_spacing[0], inplane_spacing[1], slice_thickness])
+
 
 
 class ReadUS(object):

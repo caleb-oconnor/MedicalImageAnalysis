@@ -76,7 +76,7 @@ class Reader(Data):
         if only_modality is not None:
             self.only_modality = only_modality
         else:
-            self.only_modality = ['CT', 'MR', 'PT', 'US', 'DX', 'CR', 'RTSTRUCT']
+            self.only_modality = ['CT', 'MR', 'PT', 'US', 'DX', 'RF', 'CR', 'RTSTRUCT']
 
         self.files = None
         if folder_path is not None or file_list is not None:
