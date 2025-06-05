@@ -18,6 +18,7 @@ import time
 import gdcm
 import threading
 
+import vtk
 import numpy as np
 import pandas as pd
 import pydicom as dicom
@@ -223,19 +224,21 @@ class Read3D(object):
         self.rgb = False
 
         self.modality = self.image_set[0].Modality
+        self.filepaths = [image.filename for image in self.image_set]
+        self.sops = [image.SOPInstanceUID for image in self.image_set]
 
         self.array = None
         if not self.only_tags:
             self._compute_array()
 
-        self.filepaths = [image.filename for image in self.image_set]
-        self.sops = [image.SOPInstanceUID for image in self.image_set]
+        self.orientation = self._compute_orientation()
         self.plane = self._compute_plane()
         self.spacing = self._compute_spacing()
         self.dimensions = self._compute_dimensions()
-        self.orientation = self._compute_orientation()
-        self.origin = self._compute_origin()
         self.image_matrix = self._compute_image_matrix()
+
+        self._verify_axial_orientation()
+        self.origin = self._compute_origin()
 
         self.image_name = create_image_name(self.modality)
 
@@ -268,16 +271,41 @@ class Read3D(object):
 
         self.array = np.asarray(image_slices)
 
+    def _compute_orientation(self):
+        """
+        Looks in the tags for image orientation, typically exist in ImageOrientationPatient.
+        :return:
+        :rtype:
+        """
+        orientation = np.asarray([1, 0, 0, 0, 1, 0])
+        if 'ImageOrientationPatient' in self.image_set[0]:
+            orientation = np.asarray(self.image_set[0]['ImageOrientationPatient'].value)
+
+        else:
+            if 'SharedFunctionalGroupsSequence' in self.image_set[0]:
+                seq_str = 'SharedFunctionalGroupsSequence'
+                if 'PlaneOrientationSequence' in self.image_set[0][0][seq_str][0]:
+                    plane_str = 'PlaneOrientationSequence'
+                    image_str = 'ImageOrientationPatient'
+                    orientation = np.asarray(self.image_set[0][0][seq_str][0][plane_str][0][image_str].value)
+
+                else:
+                    self.unverified = 'Orientation'
+
+            else:
+                self.unverified = 'Orientation'
+
+        return orientation
+
     def _compute_plane(self):
         """
         Computes the image plane for the slices
         :return:
         :rtype:
         """
-        orientation = self.image_set[0]['ImageOrientationPatient'].value
-        x = np.abs(orientation[0]) + np.abs(orientation[3])
-        y = np.abs(orientation[1]) + np.abs(orientation[4])
-        z = np.abs(orientation[2]) + np.abs(orientation[5])
+        x = np.abs(self.orientation[0]) + np.abs(self.orientation[3])
+        y = np.abs(self.orientation[1]) + np.abs(self.orientation[4])
+        z = np.abs(self.orientation[2]) + np.abs(self.orientation[5])
 
         if x < y and x < z:
             return 'Sagittal'
@@ -318,31 +346,77 @@ class Read3D(object):
         """
         return np.asarray([self.image_set[0]['Columns'].value, self.image_set[0]['Rows'].value, len(self.image_set)])
 
-    def _compute_orientation(self):
+    def _compute_image_matrix(self):
         """
-        Looks in the tags for image orientation, typically exist in ImageOrientationPatient.
+        Computes the image matrix using the image orientation.
+
+        Sometimes SliceThickness tag isn't correct this looks for position changes over the slices to recalculate the
+        slice thickness as need. Also, rarely when scans transition from abdomen to pelvis protocol there is a skipped
+        slice, this signals when that happens (it could happen in other instances this is just one I am familiar with).
         :return:
         :rtype:
         """
-        orientation = np.asarray([1, 0, 0, 0, 1, 0])
-        if 'ImageOrientationPatient' in self.image_set[0]:
-            orientation = np.asarray(self.image_set[0]['ImageOrientationPatient'].value)
+        row_direction = self.orientation[:3]
+        column_direction = self.orientation[3:]
 
-        else:
-            if 'SharedFunctionalGroupsSequence' in self.image_set[0]:
-                seq_str = 'SharedFunctionalGroupsSequence'
-                if 'PlaneOrientationSequence' in self.image_set[0][0][seq_str][0]:
-                    plane_str = 'PlaneOrientationSequence'
-                    image_str = 'ImageOrientationPatient'
-                    orientation = np.asarray(self.image_set[0][0][seq_str][0][plane_str][0][image_str].value)
-
-                else:
-                    self.unverified = 'Orientation'
-
+        slice_direction = np.cross(row_direction, column_direction)
+        if len(self.image_set) > 1:
+            first = np.dot(slice_direction, self.image_set[0].ImagePositionPatient)
+            second = np.dot(slice_direction, self.image_set[1].ImagePositionPatient)
+            last = np.dot(slice_direction, self.image_set[-1].ImagePositionPatient)
+            first_last_spacing = np.asarray((last - first) / (len(self.image_set) - 1))
+            if np.abs((second - first) - first_last_spacing) > 0.01:
+                if not self.only_tags:
+                    self._find_skipped_slices(slice_direction)
+                slice_spacing = second - first
             else:
-                self.unverified = 'Orientation'
+                slice_spacing = np.asarray((last - first) / (len(self.image_set) - 1))
 
-        return orientation
+            self.spacing[2] = slice_spacing
+
+        mat = np.identity(3, dtype=np.float32)
+        mat[0, :3] = row_direction
+        mat[1, :3] = column_direction
+        mat[2, :3] = slice_direction
+
+        return mat
+
+    def _verify_axial_orientation(self):
+        shape = self.array.shape
+        columns = shape[1] - 1
+        rows = shape[2] - 1
+        slices = shape[0] - 1
+
+        origin = np.asarray(self.image_set[0]['ImagePositionPatient'].value)
+
+        row_direction = self.orientation[:3]
+        column_direction = self.orientation[3:]
+        slice_direction = np.cross(row_direction, column_direction)
+
+        corners = np.zeros((8, 3))
+        corners[0] = origin
+        corners[1] = origin + (rows * self.spacing[1] * row_direction)
+        corners[2] = origin + (columns * self.spacing[0] * column_direction)
+        corners[3] = (origin + (rows * self.spacing[1] * row_direction) +
+                      (columns * self.spacing[0] * column_direction))
+
+        corners[4] = origin + (slices * self.spacing[2] * slice_direction)
+        corners[5] = (origin + (slices * self.spacing[2] * slice_direction) +
+                      (rows * self.spacing[1] * row_direction))
+        corners[6] = (origin + (slices * self.spacing[2] * slice_direction) +
+                      (columns * self.spacing[0] * column_direction))
+        corners[7] = (origin + (slices * self.spacing[2] * slice_direction) +
+                      (rows * self.spacing[1] * row_direction) + (columns * self.spacing[0] * column_direction))
+
+        corner_idx = np.argmin(np.sum(corners, axis=1))
+        if corner_idx != 0:
+            self.origin = corners[corner_idx]
+
+            # vtk_image = vtk.vtkImageData()
+            # vtk_image.SetSpacing(spacing)
+            # vtk_image.SetDirectionMatrix(mat.reshape(1, 9)[0])
+            # vtk_image.SetDimensions(dims)
+            # vtk_image.SetOrigin(origin)
 
     def _compute_origin(self):
         """
@@ -381,41 +455,6 @@ class Read3D(object):
 
         return origin
 
-    def _compute_image_matrix(self):
-        """
-        Computes the image matrix using the image orientation.
-
-        Sometimes SliceThickness tag isn't correct this looks for position changes over the slices to recalculate the
-        slice thickness as need. Also, rarely when scans transition from abdomen to pelvis protocol there is a skipped
-        slice, this signals when that happens (it could happen in other instances this is just one I am familiar with).
-        :return:
-        :rtype:
-        """
-        row_direction = self.orientation[:3]
-        column_direction = self.orientation[3:]
-
-        slice_direction = np.cross(row_direction, column_direction)
-        if len(self.image_set) > 1:
-            first = np.dot(slice_direction, self.image_set[0].ImagePositionPatient)
-            second = np.dot(slice_direction, self.image_set[1].ImagePositionPatient)
-            last = np.dot(slice_direction, self.image_set[-1].ImagePositionPatient)
-            first_last_spacing = np.asarray((last - first) / (len(self.image_set) - 1))
-            if np.abs((second - first) - first_last_spacing) > 0.01:
-                if not self.only_tags:
-                    self._find_skipped_slices(slice_direction)
-                slice_spacing = second - first
-            else:
-                slice_spacing = np.asarray((last - first) / (len(self.image_set) - 1))
-
-            self.spacing[2] = slice_spacing
-            
-        mat = np.identity(3, dtype=np.float32)
-        mat[0, :3] = row_direction
-        mat[1, :3] = column_direction
-        mat[2, :3] = slice_direction
-
-        return mat
-
     def _find_skipped_slices(self, slice_direction):
         base_spacing = None
         for ii in range(len(self.image_set) - 1):
@@ -444,36 +483,22 @@ class ReadXRay(object):
         self.skipped_slice = None
         self.sections = None
         self.rgb = False
+        self.orientation = [1, 0, 0, 0, 1, 0]
+        self.origin = np.asarray([0, 0, 0])
+        self.image_matrix = np.identity(3, dtype=np.float32)
 
         self.modality = self.image_set[0].Modality
 
         self.filepaths = self.image_set[0].filename
         self.sops = self.image_set[0].SOPInstanceUID
 
-        self.plane = 'Axial'
-        if 'PatientOrientation' in self.image_set[0]:
-            orient = self.image_set[0].PatientOrientation
-            if 'L' in orient or 'R' in orient:
-                self.plane = 'Coronal'
-
-            elif 'A' in orient or 'P' in orient:
-                self.plane = 'Sagittal'
-
-        self.orientation = [1, 0, 0, 0, 1, 0]
-        self.origin = np.asarray([0, 0, 0])
-        self.image_matrix = np.identity(3, dtype=np.float32)
-
-        if self.plane == 'Axial':
-            self.dimensions = np.asarray([self.image_set[0]['Columns'].value, self.image_set[0]['Rows'].value, 1])
-        elif self.plane == 'Coronal':
-            self.dimensions = np.asarray([self.image_set[0]['Columns'].value, 1, self.image_set[0]['Rows'].value])
-        else:
-            self.dimensions = np.asarray([1, self.image_set[0]['Columns'].value, self.image_set[0]['Rows'].value])
+        self.plane = self._compute_plane()
+        self.dimensions = self._compute_dimensions()
+        self.spacing = self._compute_spacing()
 
         self.array = None
         if not self.only_tags:
             self._compute_array()
-        self.spacing = self._compute_spacing()
 
         self.image_name = create_image_name(self.modality)
 
@@ -481,24 +506,30 @@ class ReadXRay(object):
         Data.images[self.image_name] = image
         Data.image_list += [self.image_name]
 
-    def _compute_array(self):
-        """
-        Creates the image array.
-        :return:
-        :rtype:
-        """
-        self.array = self.image_set[0].pixel_array.astype('int16')
-        del self.image_set[0].PixelData
+    def _compute_plane(self):
+        if 'PatientOrientation' in self.image_set[0]:
+            orient = self.image_set[0].PatientOrientation
+            if 'L' in orient or 'R' in orient:
+                return 'Coronal'
 
-        if 'PresentationLUTShape' in self.image_set[0] and self.image_set[0]['PresentationLUTShape'] == 'Inverse':
-            self.array = 16383 - self.array
+            elif 'A' in orient or 'P' in orient:
+                return 'Sagittal'
 
-        if self.plane == 'Axial':
-            self.array = self.array.reshape((1, self.array.shape[0], self.array.shape[1]))
-        elif self.plane == 'Coronal':
-            self.array = self.array.reshape((self.array.shape[0], 1, self.array.shape[1]))
+            else:
+                return 'Axial'
+
         else:
-            self.array = self.array.reshape((self.array.shape[0], self.array.shape[1], 1))
+            return 'Axial'
+
+    def _compute_dimensions(self):
+        if self.plane == 'Axial':
+            return np.asarray([self.image_set[0]['Columns'].value, self.image_set[0]['Rows'].value, 1])
+
+        elif self.plane == 'Coronal':
+            return np.asarray([self.image_set[0]['Columns'].value, 1, self.image_set[0]['Rows'].value])
+
+        else:
+            return np.asarray([1, self.image_set[0]['Columns'].value, self.image_set[0]['Rows'].value])
 
     def _compute_spacing(self):
         """
@@ -527,7 +558,33 @@ class ReadXRay(object):
             if 'PixelMeasuresSequence' in self.image_set[0][sequence][0]:
                 inplane_spacing = self.image_set[0][sequence][0]['PixelMeasuresSequence'][0]['PixelSpacing']
 
-        return np.asarray([inplane_spacing[0], inplane_spacing[1], slice_thickness])
+        if self.plane == 'Axial':
+            return np.asarray([inplane_spacing[1], inplane_spacing[0], slice_thickness])
+
+        elif self.plane == 'Coronal':
+            return np.asarray([inplane_spacing[1], slice_thickness, inplane_spacing[0]])
+
+        else:
+            return np.asarray([slice_thickness, inplane_spacing[1], inplane_spacing[0]])
+
+    def _compute_array(self):
+        """
+        Creates the image array.
+        :return:
+        :rtype:
+        """
+        self.array = self.image_set[0].pixel_array.astype('int16')
+        del self.image_set[0].PixelData
+
+        if 'PresentationLUTShape' in self.image_set[0] and self.image_set[0]['PresentationLUTShape'] == 'Inverse':
+            self.array = 16383 - self.array
+
+        if self.plane == 'Axial':
+            self.array = self.array.reshape((1, self.array.shape[0], self.array.shape[1]))
+        elif self.plane == 'Coronal':
+            self.array = self.array.reshape((self.array.shape[0], 1, self.array.shape[1]))
+        else:
+            self.array = self.array.reshape((self.array.shape[0], self.array.shape[1], 1))
 
 
 class ReadRF(object):
@@ -542,26 +599,17 @@ class ReadRF(object):
         self.skipped_slice = None
         self.sections = None
         self.rgb = False
+        self.dimensions = None
 
         self.modality = self.image_set[0].Modality
 
         self.filepaths = self.image_set[0].filename
         self.sops = self.image_set[0].SOPInstanceUID
-
-        self.plane = 'Axial'
-        if 'PatientOrientation' in self.image_set[0]:
-            orient = self.image_set[0].PatientOrientation
-            if 'L' in orient or 'R' in orient:
-                self.plane = 'Coronal'
-
-            elif 'A' in orient or 'P' in orient:
-                self.plane = 'Sagittal'
-
         self.orientation = [1, 0, 0, 0, 1, 0]
         self.origin = np.asarray([0, 0, 0])
         self.image_matrix = np.identity(3, dtype=np.float32)
 
-        self.dimensions = None
+        self.plane = self._compute_plane()
 
         self.array = None
         if not self.only_tags:
@@ -574,6 +622,21 @@ class ReadRF(object):
         Data.images[self.image_name] = image
         Data.image_list += [self.image_name]
 
+    def _compute_plane(self):
+        if 'PatientOrientation' in self.image_set[0]:
+            orient = self.image_set[0].PatientOrientation
+            if 'L' in orient or 'R' in orient:
+                return 'Coronal'
+
+            elif 'A' in orient or 'P' in orient:
+                return 'Sagittal'
+
+            else:
+                return 'Axial'
+
+        else:
+            return 'Axial'
+
     def _compute_array(self):
         """
         Creates the image array.
@@ -585,11 +648,11 @@ class ReadRF(object):
 
         if len(self.array.shape) < 3:
             if self.plane == 'Axial':
-                self.array = self.array.reshape((1, self.array.shape[0], self.array.shape[1]))
+                self.array = self.array.reshape((self.array.shape[2], self.array.shape[0], self.array.shape[1]))
             elif self.plane == 'Coronal':
-                self.array = self.array.reshape((self.array.shape[0], 1, self.array.shape[1]))
+                self.array = self.array.reshape((self.array.shape[0], self.array.shape[2], self.array.shape[1]))
             else:
-                self.array = self.array.reshape((self.array.shape[0], self.array.shape[1], 1))
+                self.array = self.array.reshape((self.array.shape[0], self.array.shape[1], self.array.shape[2]))
 
         self.dimensions = self.array.shape
 
@@ -620,8 +683,14 @@ class ReadRF(object):
             if 'PixelMeasuresSequence' in self.image_set[0][sequence][0]:
                 inplane_spacing = self.image_set[0][sequence][0]['PixelMeasuresSequence'][0]['PixelSpacing']
 
-        return np.asarray([inplane_spacing[0], inplane_spacing[1], slice_thickness])
+        if self.plane == 'Axial':
+            return np.asarray([inplane_spacing[1], inplane_spacing[0], slice_thickness])
 
+        elif self.plane == 'Coronal':
+            return np.asarray([inplane_spacing[1], slice_thickness, inplane_spacing[0]])
+
+        else:
+            return np.asarray([slice_thickness, inplane_spacing[1], inplane_spacing[0]])
 
 
 class ReadUS(object):
@@ -700,10 +769,10 @@ class ReadUS(object):
 
         elif 'SequenceOfUltrasoundRegions' in self.image_set[0]:
             if 'PhysicalDeltaX' in self.image_set[0].SequenceOfUltrasoundRegions[0]:
-                inplane_spacing = [10 * np.round(self.image_set[0].SequenceOfUltrasoundRegions[0].PhysicalDeltaX, 4),
-                                   10 * np.round(self.image_set[0].SequenceOfUltrasoundRegions[0].PhysicalDeltaY, 4)]
+                inplane_spacing = [10 * np.round(self.image_set[0].SequenceOfUltrasoundRegions[0].PhysicalDeltaY, 4),
+                                   10 * np.round(self.image_set[0].SequenceOfUltrasoundRegions[0].PhysicalDeltaX, 4)]
 
-        return np.asarray([inplane_spacing[0], inplane_spacing[1], slice_thickness])
+        return np.asarray([inplane_spacing[1], inplane_spacing[0], slice_thickness])
 
 
 class ReadRTStruct(object):
