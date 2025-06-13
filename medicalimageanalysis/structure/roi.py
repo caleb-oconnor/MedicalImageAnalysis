@@ -69,8 +69,10 @@ class Roi(object):
 
         self.multi_color = None
 
-    def convert_position_to_pixel(self, position=None, base=True):
-        position_to_pixel_matrix = self.image.display.compute_matrix_position_to_pixel(base=base)
+    def convert_position_to_pixel(self, position=None):
+        if self.plane == 'Coronal':
+            print(1)
+        position_to_pixel_matrix = self.image.display.compute_matrix_position_to_pixel()
 
         pixel = []
         for ii, pos in enumerate(position):
@@ -122,9 +124,11 @@ class Roi(object):
         self.mesh = refine.smooth(iterations=iterations, angle=angle, passband=passband)
 
     def create_decimate_mesh(self, percent=None):
-        refine = Refinement(self.mesh)
-            
-        return refine.decimate(percent=percent)
+        if percent is None:
+            points = np.round(10 * np.sqrt(self.mesh.number_of_points))
+            percent = 1 - (points / self.mesh.number_of_points)
+
+        return self.mesh.decimate(percent)
 
     def create_cluster_mesh(self, points=None):
         refine = Refinement(self.mesh)
@@ -181,34 +185,16 @@ class Roi(object):
 
     def compute_mesh_slice(self, location=None, slice_plane=None, return_pixel=False):
         matrix = self.image.display.matrix
-        rotation = Rotation.from_matrix(matrix)
-        euler_angles = rotation.as_euler('zxy', degrees=True)
-        angle_correction = 0
         if slice_plane == 'Axial':
             normal = matrix[:3, 2]
-            angle_correction = euler_angles[0]
-            rotate_angle = 'z'
         elif slice_plane == 'Coronal':
             normal = matrix[:3, 1]
-            angle_correction = euler_angles[2]
-            rotate_angle = 'y'
         else:
             normal = matrix[:3, 0]
-            angle_correction = euler_angles[1]
-            rotate_angle = 'x'
 
-        # roi_slice = self.mesh.slice(normal=normal, origin=self.image.display.origin)
         roi_slice = self.mesh.slice(normal=normal, origin=location)
 
         if return_pixel:
-            if angle_correction != 0:
-                if rotate_angle == 'z':
-                    roi_slice.rotate_z(angle=1 * angle_correction, point=location, inplace=True)
-                elif rotate_angle == 'y':
-                    roi_slice.rotate_y(angle=1 * angle_correction, point=location, inplace=True)
-                else:
-                    roi_slice.rotate_x(angle=1 * angle_correction, point=location, inplace=True)
-
             if roi_slice.number_of_points > 0:
                 roi_strip = roi_slice.strip()
                 position = [np.asarray(c.points) for c in roi_strip.cell]
@@ -216,13 +202,11 @@ class Roi(object):
 
                 if len(position) > 1:
                     position_correction = self.line_deconstruction(lines, position)
-                    # if len(position_correction) == 0:
-                    #     print(1)
 
                 else:
                     position_correction = position
 
-                pixels = self.convert_position_to_pixel(position=position_correction, base=True)
+                pixels = self.convert_position_to_pixel(position=position_correction)
                 pixel_correct = self.pixel_slice_correction(pixels, slice_plane)
 
                 return pixel_correct
@@ -250,66 +234,49 @@ class Roi(object):
         line_values = np.vstack(line_values)
 
         order_idx = []
-        for ii, val in enumerate(line_values):
-            if val[0] == val[1]:
-                order_idx += [[ii]]
+        m = 0
+        while m >= 0:
+            if line_values[m, 0] == line_values[m, 1]:
+                order_idx += [[m]]
+                m += 1
+            else:
+                hold_idx = [m]
+                initial_value = line_values[m, 0]
+                value = line_values[m, 1]
+                n = 0
+                while n >= 0:
+                    check_1 = [idx for idx in np.where(line_values[:, 0] == value)[0] if idx != m and idx != n]
+                    check_2 = [idx for idx in np.where(line_values[:, 1] == value)[0] if idx != m and idx != n]
 
-        reduced_line_values = np.asarray([val for ii, val in enumerate(line_values) if ii not in order_idx])
+                    if len(check_1) > 0:
+                        hold_idx += [check_1[0]]
+                        if line_values[check_1[0], 1] == initial_value:
+                            order_idx += [hold_idx]
+                            m = np.sum([len(idx) for idx in order_idx])
+                            n = -100
 
-        idx_keep = []
-        idx_object = [0]
-        idx_check = [0]
-        value = reduced_line_values[0, 1]
-        n = 0
-        while n == 0:
-            n += 1
-            try:
-                check_1 = np.where(reduced_line_values[:, 0] == value)[0]
-                check_2 = np.where(reduced_line_values[:, 1] == value)[0]
-            except:
-                print(1)
+                        else:
+                            n = check_1[0]
+                            value = line_values[n, 1]
 
-            if n == 100:
-                print(1)
+                    elif len(check_2) > 0:
+                        hold_idx += [-check_2[0]]
+                        if line_values[check_2[0], 0] == initial_value:
+                            order_idx += [hold_idx]
+                            m = np.sum([len(idx) for idx in order_idx])
+                            n = -100
 
-            if len(check_1) > 0:
-                remove_duplicates_1 = [idx for idx in check_1 if idx not in np.abs(idx_check)]
-                if len(remove_duplicates_1) > 0:
-                    idx_object += [remove_duplicates_1[0]]
-                    idx_check += [remove_duplicates_1[0]]
-                    value = reduced_line_values[remove_duplicates_1[0], 1]
+                        else:
+                            n = check_2[0]
+                            value = line_values[n, 0]
 
-            if len(check_2) > 0:
-                remove_duplicates_2 = [idx for idx in check_2 if idx not in np.abs(idx_check)]
-                if len(remove_duplicates_2) > 0:
-                    idx_object += [-remove_duplicates_2[0]]
-                    idx_check += [-remove_duplicates_2[0]]
-                    value = reduced_line_values[remove_duplicates_2[0], 0]
+                    else:
+                        print('fail')
+                        n = -100
+                        m = -100
 
-            if idx_object[-1] > 0 and reduced_line_values[idx_object[-1], 1] == value:
-                sign_arr = np.sign(idx_object)
-                idx_keep += [sign_arr * (np.abs(idx_object) + len(order_idx))]
-
-                idx_start = np.where(np.arange(len(reduced_line_values)) != np.abs(idx_check))[0]
-                if len(idx_start) > 0:
-                    idx_object = [idx_start]
-                    idx_check += [idx_start]
-                    value = reduced_line_values[idx_start]
-
-            elif reduced_line_values[-idx_object[0], 1] == value:
-                sign_arr = np.sign(idx_object)
-                idx_keep += [sign_arr * (np.abs(idx_object) + len(order_idx))]
-
-                idx_start = np.where(np.arange(len(reduced_line_values)) != np.abs(idx_check))[0]
-                if len(idx_start) > 0:
-                    idx_object = [idx_start]
-                    idx_check += [idx_start]
-                    value = reduced_line_values[idx_start]
-
-            if len(reduced_line_values) == len(idx_check):
-                n = -1
-
-        order_idx = order_idx + idx_keep
+            if m == line_values.shape[0]:
+                m = -100
 
         position_correction = []
         for idx in order_idx:
