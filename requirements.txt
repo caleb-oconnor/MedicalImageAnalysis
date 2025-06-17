@@ -55,7 +55,7 @@ pykdtree==1.4.1
 pymeshfix==0.17.0
 pyparsing==3.2.1
 pytetwild==0.1.dev1
-python-dateutil
+python-dateutil==2.9.0.post0
 python-gdcm==3.0.24.1
 pytz==2025.1
 pyvista==0.44.2
@@ -75,7 +75,7 @@ tornado==6.4.2
 traitlets==5.14.3
 typing_extensions==4.12.2
 tzdata==2025.1
-urllib3
+urllib3==2.3.0
 vtk==9.3.1
 wcwidth==0.2.13
 webencodings==0.5.1
