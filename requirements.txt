@@ -59,7 +59,6 @@ python-dateutil==2.9.0.post0
 python-gdcm==3.0.24.1
 pytz==2025.1
 pyvista==0.44.2
-pywin32==308
 pyzmq==26.2.1
 referencing==0.36.2
 requests==2.32.3

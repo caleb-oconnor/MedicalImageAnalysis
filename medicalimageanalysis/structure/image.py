@@ -42,9 +42,6 @@ class Display(object):
 
         self.slice_location = self.image.compute_center(position=False, zyx=True)
 
-        self.rotation_center = copy.deepcopy(self.slice_location)
-        self.expanded_image = self.compute_expanded_image()
-
         self.scroll_max = [self.image.dimensions[0] - 1,
                            self.image.dimensions[1] - 1,
                            self.image.dimensions[2] - 1]
@@ -107,30 +104,30 @@ class Display(object):
         pixel_to_position_matrix = self.compute_matrix_pixel_to_position()
         if slice_plane == 'Axial':
             location = np.asarray([0, 0, self.slice_location[0], 1])
-            array_slice = self.image.array[self.slice_location[0], :, :].T
+            array_slice = self.image.array[self.slice_location[0], :, :]
             array_shape = array_slice.shape
             dim = [array_shape[0], array_shape[1], 1]
         elif slice_plane == 'Coronal':
             location = np.asarray([0, self.slice_location[1], 0, 1])
-            array_slice = self.image.array[:, self.slice_location[1], :].T
+            array_slice = self.image.array[:, self.slice_location[1], :]
             array_shape = array_slice.shape
             dim = [array_shape[0], 1, array_shape[1]]
         else:
             location = np.asarray([self.slice_location[2], 0, 0, 1])
-            array_slice = self.image.array[:, :, self.slice_location[2]].T
+            array_slice = self.image.array[:, :, self.slice_location[2]]
             array_shape = array_slice.shape
             dim = [1, array_shape[0], array_shape[1]]
 
         slice_origin = location.dot(pixel_to_position_matrix.T)[:3]
 
-        img = vtk.vtkImageData()
-        img.SetSpacing(self.image.spacing)
-        img.SetDirectionMatrix(matrix_reshape)
-        img.SetDimensions(dim)
-        img.SetOrigin(slice_origin)
-        img.GetPointData().SetScalars(numpy_to_vtk(array_slice.flatten(order="F")))
+        vtk_image = vtk.vtkImageData()
+        vtk_image.SetSpacing(self.image.spacing)
+        vtk_image.SetDirectionMatrix(matrix_reshape)
+        vtk_image.SetDimensions(dim)
+        vtk_image.SetOrigin(slice_origin)
+        vtk_image.GetPointData().SetScalars(numpy_to_vtk(array_slice.flatten(order="C")))
 
-        return img
+        return vtk_image
 
     def get_scroll_max(self, slice_plane):
         if slice_plane == 'Axial':
@@ -227,7 +224,7 @@ class Image(object):
         if 'PatientBirthDate' in self.tags[0]:
             return str(self.tags[0].PatientBirthDate)
         else:
-            return 'missing'
+            return ''
 
     def get_date(self):
         if 'SeriesDate' in self.tags[0]:
@@ -310,7 +307,7 @@ class Image(object):
 
     def save_image(self, path, rois=True, pois=True):
         variable_names = self.__dict__.keys()
-        column_names = [name for name in variable_names if name not in ['rois', 'pois', 'tags', 'array']]
+        column_names = [name for name in variable_names if name not in ['rois', 'pois', 'tags', 'array', 'display']]
 
         df = pd.DataFrame(index=[0], columns=column_names)
         for name in column_names:
