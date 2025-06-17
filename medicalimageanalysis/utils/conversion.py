@@ -206,8 +206,8 @@ class ContourToMask(object):
         elif self.plane == 'Coronal':
             slice_check = np.zeros(self.dimensions[1])
             for c in self.contour_pixel:
-                stack_1 = np.vstack((c[:, 2], c[:, 0])).T
-                stack_2 = np.asarray([c[0, 2], c[0, 0]])
+                stack_1 = np.vstack((c[:, 0], c[:, 2])).T
+                stack_2 = np.asarray([c[0, 0], c[0, 2]])
                 contour_stacked = np.vstack((stack_1, stack_2))
                 new_contour = np.array([contour_stacked], dtype=np.int32)
                 image = np.zeros([self.dimensions[0], self.dimensions[2]], dtype=np.uint8)
@@ -224,12 +224,12 @@ class ContourToMask(object):
         else:
             slice_check = np.zeros(self.dimensions[2])
             for c in self.contour_pixel:
-                contour_stacked = np.vstack((c[:, 0:2], c[0, 0:2]))
+                contour_stacked = np.vstack((c[:, 1:], c[0, 1:]))
                 new_contour = np.array([contour_stacked], dtype=np.int32)
                 image = np.zeros([self.dimensions[0], self.dimensions[1]], dtype=np.uint8)
                 cv2.fillPoly(image, new_contour, 1)
 
-                slice_num = int(np.round(c[0, 2]))
+                slice_num = int(np.round(c[0, 0]))
                 if slice_check[slice_num] == 0:
                     hold_mask[:, :, slice_num] = image
                     slice_check[slice_num] = 1
