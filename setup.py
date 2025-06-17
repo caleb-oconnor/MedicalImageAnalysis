@@ -15,7 +15,7 @@ setup(
     name='medicalimageanalysis',
     author='Caleb OConnor',
     author_email='csoconnor@mdanderson.org',
-    version='2.1.79',
+    version='2.1.80',
     description='Reads in medical images and structures them into 3D arrays with associated ROI/POIs if they exist.',
     long_description=long_description,
     long_description_content_type="text/markdown",
