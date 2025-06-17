@@ -55,7 +55,7 @@ pykdtree==1.4.1
 pymeshfix==0.17.0
 pyparsing==3.2.1
 pytetwild==0.1.dev1
-python-dateutil==2.9.0.post0
+python-dateutil
 python-gdcm==3.0.24.1
 pytz==2025.1
 pyvista==0.44.2
