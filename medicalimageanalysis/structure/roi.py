@@ -238,7 +238,14 @@ class Roi(object):
         while m >= 0:
             if line_values[m, 0] == line_values[m, 1]:
                 order_idx += [[m]]
-                m += 1
+
+                combined_idx = np.sort(np.abs([item for sublist in order_idx for item in sublist]))
+                mm = [ii for ii in range(line_values.shape[0]) if ii not in combined_idx]
+                if len(mm) > 0:
+                    m = mm[0]
+                else:
+                    m = -100
+
             else:
                 hold_idx = [m]
                 initial_value = line_values[m, 0]
@@ -252,8 +259,14 @@ class Roi(object):
                         hold_idx += [check_1[0]]
                         if line_values[check_1[0], 1] == initial_value:
                             order_idx += [hold_idx]
-                            m = np.sum([len(idx) for idx in order_idx])
                             n = -100
+
+                            combined_idx = np.sort(np.abs([item for sublist in order_idx for item in sublist]))
+                            mm = [ii for ii in range(line_values.shape[0]) if ii not in combined_idx]
+                            if len(mm) > 0:
+                                m = mm[0]
+                            else:
+                                m = -100
 
                         else:
                             n = check_1[0]
@@ -263,8 +276,14 @@ class Roi(object):
                         hold_idx += [-check_2[0]]
                         if line_values[check_2[0], 0] == initial_value:
                             order_idx += [hold_idx]
-                            m = np.sum([len(idx) for idx in order_idx])
                             n = -100
+
+                            combined_idx = np.sort(np.abs([item for sublist in order_idx for item in sublist]))
+                            mm = [ii for ii in range(line_values.shape[0]) if ii not in combined_idx]
+                            if len(mm) > 0:
+                                m = mm[0]
+                            else:
+                                m = -100
 
                         else:
                             n = check_2[0]
@@ -274,9 +293,6 @@ class Roi(object):
                         print('fail')
                         n = -100
                         m = -100
-
-            if m == line_values.shape[0]:
-                m = -100
 
         position_correction = []
         for idx in order_idx:
