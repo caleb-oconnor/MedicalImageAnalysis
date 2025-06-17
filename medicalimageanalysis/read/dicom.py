@@ -235,11 +235,9 @@ class Read3D(object):
         self.plane = self._compute_plane()
         self.spacing = self._compute_spacing()
         self.dimensions = self._compute_dimensions()
-        self.image_matrix = self._compute_image_matrix()
-
         self._verify_axial_orientation()
-        self.origin = self._compute_origin()
 
+        self.image_matrix = self._compute_image_matrix()
         self.image_name = create_image_name(self.modality)
 
         image = Image(self)
@@ -336,31 +334,11 @@ class Read3D(object):
             if 'PixelMeasuresSequence' in self.image_set[0][sequence][0]:
                 inplane_spacing = self.image_set[0][sequence][0]['PixelMeasuresSequence'][0]['PixelSpacing']
 
-        return np.asarray([inplane_spacing[0], inplane_spacing[1], slice_thickness])
-
-    def _compute_dimensions(self):
-        """
-        Creates dimensions by columns, rows, and number of slices.
-        :return:
-        :rtype:
-        """
-        return np.asarray([self.image_set[0]['Columns'].value, self.image_set[0]['Rows'].value, len(self.image_set)])
-
-    def _compute_image_matrix(self):
-        """
-        Computes the image matrix using the image orientation.
-
-        Sometimes SliceThickness tag isn't correct this looks for position changes over the slices to recalculate the
-        slice thickness as need. Also, rarely when scans transition from abdomen to pelvis protocol there is a skipped
-        slice, this signals when that happens (it could happen in other instances this is just one I am familiar with).
-        :return:
-        :rtype:
-        """
-        row_direction = self.orientation[:3]
-        column_direction = self.orientation[3:]
-
-        slice_direction = np.cross(row_direction, column_direction)
         if len(self.image_set) > 1:
+            row_direction = self.orientation[:3]
+            column_direction = self.orientation[3:]
+            slice_direction = np.cross(row_direction, column_direction)
+
             first = np.dot(slice_direction, self.image_set[0].ImagePositionPatient)
             second = np.dot(slice_direction, self.image_set[1].ImagePositionPatient)
             last = np.dot(slice_direction, self.image_set[-1].ImagePositionPatient)
@@ -368,11 +346,44 @@ class Read3D(object):
             if np.abs((second - first) - first_last_spacing) > 0.01:
                 if not self.only_tags:
                     self._find_skipped_slices(slice_direction)
-                slice_spacing = second - first
+                slice_thickness = second - first
             else:
-                slice_spacing = np.asarray((last - first) / (len(self.image_set) - 1))
+                slice_thickness = np.asarray((last - first) / (len(self.image_set) - 1))
 
-            self.spacing[2] = slice_spacing
+        if self.plane == 'Axial':
+            return np.asarray([inplane_spacing[1], inplane_spacing[0], slice_thickness])
+
+        elif self.plane == 'Coronal':
+            return np.asarray([inplane_spacing[1], slice_thickness, inplane_spacing[0]])
+
+        else:
+            return np.asarray([slice_thickness, inplane_spacing[1], inplane_spacing[0]])
+
+    def _compute_dimensions(self):
+        """
+        Creates dimensions by columns, rows, and number of slices.
+        :return:
+        :rtype:
+        """
+        shape = self.array.shape
+        if self.plane == 'Axial':
+            return np.asarray([shape[0], shape[1], shape[2]])
+
+        elif self.plane == 'Coronal':
+            return np.asarray([shape[1], shape[0], shape[2]])
+
+        else:
+            return np.asarray([shape[1], shape[2], shape[0]])
+
+    def _compute_image_matrix(self):
+        """
+        Computes the image matrix using the image orientation.
+        :return:
+        :rtype:
+        """
+        row_direction = self.orientation[:3]
+        column_direction = self.orientation[3:]
+        slice_direction = np.cross(row_direction, column_direction)
 
         mat = np.identity(3, dtype=np.float32)
         mat[0, :3] = row_direction
@@ -383,9 +394,16 @@ class Read3D(object):
 
     def _verify_axial_orientation(self):
         shape = self.array.shape
-        columns = shape[1] - 1
-        rows = shape[2] - 1
+        if self.plane == 'Axial':
+            spacing = self.spacing
+        elif self.plane == 'Coronal':
+            spacing = [self.spacing[0], self.spacing[2], self.spacing[1]]
+        else:
+            spacing = [self.spacing[1], self.spacing[2], self.spacing[0]]
+
         slices = shape[0] - 1
+        y = shape[1] - 1
+        x = shape[2] - 1
 
         origin = np.asarray(self.image_set[0]['ImagePositionPatient'].value)
 
@@ -395,65 +413,68 @@ class Read3D(object):
 
         corners = np.zeros((8, 3))
         corners[0] = origin
-        corners[1] = origin + (rows * self.spacing[1] * row_direction)
-        corners[2] = origin + (columns * self.spacing[0] * column_direction)
-        corners[3] = (origin + (rows * self.spacing[1] * row_direction) +
-                      (columns * self.spacing[0] * column_direction))
+        corners[1] = origin + (x * spacing[0] * row_direction)
+        corners[2] = origin + (y * spacing[1] * column_direction)
+        corners[3] = (origin + (x * spacing[0] * row_direction) + (y * spacing[1] * column_direction))
 
-        corners[4] = origin + (slices * self.spacing[2] * slice_direction)
-        corners[5] = (origin + (slices * self.spacing[2] * slice_direction) +
-                      (rows * self.spacing[1] * row_direction))
-        corners[6] = (origin + (slices * self.spacing[2] * slice_direction) +
-                      (columns * self.spacing[0] * column_direction))
-        corners[7] = (origin + (slices * self.spacing[2] * slice_direction) +
-                      (rows * self.spacing[1] * row_direction) + (columns * self.spacing[0] * column_direction))
+        corners[4] = origin + (slices * spacing[2] * slice_direction)
+        corners[5] = (origin + (slices * spacing[2] * slice_direction) + (x * spacing[0] * row_direction))
+        corners[6] = (origin + (slices * spacing[2] * slice_direction) + (y * spacing[1] * column_direction))
+        corners[7] = (origin + (slices * spacing[2] * slice_direction) + (x * spacing[0] * row_direction) +
+                      (y * spacing[1] * column_direction))
 
         corner_idx = np.argmin(np.sum(corners, axis=1))
         if corner_idx != 0:
             self.origin = corners[corner_idx]
-
-            # vtk_image = vtk.vtkImageData()
-            # vtk_image.SetSpacing(spacing)
-            # vtk_image.SetDirectionMatrix(mat.reshape(1, 9)[0])
-            # vtk_image.SetDimensions(dims)
-            # vtk_image.SetOrigin(origin)
-
-    def _compute_origin(self):
-        """
-        Patient can exist on stomach, back, or side laying on the bench. This is used to rotate the image to always be
-        feet first supine. It creates the array, the orientation, and the position.
-        :return:
-        :rtype:
-        """
-        origin = np.asarray(self.image_set[0]['ImagePositionPatient'].value)
-        if 'PatientPosition' in self.image_set[0]:
-            self.base_position = self.image_set[0]['PatientPosition'].value
-
-            if self.base_position in ['HFDR', 'FFDR']:
-                if not self.only_tags:
+            if self.plane == "Axial":
+                if corner_idx == 1:
+                    self.array = np.rot90(self.array, 1, (1, 2))
+                elif corner_idx == 2:
                     self.array = np.rot90(self.array, 3, (1, 2))
-
-                origin[0] = np.double(origin[0]) - self.spacing[0] * (self.dimensions[0] - 1)
-                self.orientation = [-self.orientation[3], -self.orientation[4], -self.orientation[5],
-                                    self.orientation[0], self.orientation[1], self.orientation[2]]
-
-            elif self.base_position in ['HFP', 'FFP']:
-                if not self.only_tags:
+                else:
                     self.array = np.rot90(self.array, 2, (1, 2))
 
-                origin[0] = np.double(origin[0]) - self.spacing[0] * (self.dimensions[0] - 1)
-                origin[1] = np.double(origin[1]) - self.spacing[1] * (self.dimensions[1] - 1)
-                self.orientation = -np.asarray(self.orientation)
+                square = corners[:4, :]
 
-            elif self.base_position in ['HFDL', 'FFDL']:
-                if not self.only_tags:
-                    self.array = np.rot90(self.array, 1, (1, 2))
+            elif self.plane == 'Coronal':
+                self.array = np.rot90(self.array, 1, (0, 1))
 
-                origin[1] = np.double(origin[1]) - self.spacing[1] * (self.dimensions[1] - 1)
-                self.orientation = [self.orientation[3], self.orientation[4], self.orientation[5],
-                                    -self.orientation[0], -self.orientation[1], -self.orientation[2]]
+                s1 = np.argsort(corners[:4, 2])
+                s2 = np.argsort(corners[4:, 2]) + 4
 
-        return origin
+                square = [corners[s1[0]], corners[s1[1]], corners[s2[0]], corners[s2[1]]]
+
+            else:
+                self.array = np.flip(np.rot90(self.array, 1, (0, 1)).transpose(0, 2, 1), axis=2)
+
+                s1 = np.argsort(corners[:4, 2])
+                s2 = np.argsort(corners[4:, 2]) + 4
+
+                square = [corners[s1[0]], corners[s1[1]], corners[s2[0]], corners[s2[1]]]
+
+            distances = np.asarray([np.linalg.norm(corners[corner_idx, :] - s) for s in square])
+            sorted_args = np.argsort(distances)
+
+            c1 = square[sorted_args[1]] - corners[corner_idx]
+            c2 = square[sorted_args[2]] - corners[corner_idx]
+
+            if np.abs(c1[0]) > np.abs(c2[0]):
+                # self.orientation[:3] = c1 / self.spacing / np.flip(self.dimensions - 1)
+                # self.orientation[3:] = c2 / self.spacing / np.flip(self.dimensions - 1)
+                # self.orientation[:3] = c1 * self.spacing / np.linalg.norm(c1 * self.spacing)
+                # self.orientation[3:] = c2 * self.spacing / np.linalg.norm(c2 * self.spacing)
+                self.orientation[:3] = c1 / (self.spacing[0] * self.dimensions[2])
+                self.orientation[3:] = c2 / (self.spacing[1] * self.dimensions[1])
+            else:
+                # self.orientation[:3] = c2 / self.spacing / np.flip(self.dimensions - 1)
+                # self.orientation[3:] = c1 / self.spacing / np.flip(self.dimensions - 1)
+                # self.orientation[:3] = c2 * self.spacing / np.linalg.norm(c2 * self.spacing)
+                # self.orientation[3:] = c1 * self.spacing / np.linalg.norm(c1 * self.spacing)
+                self.orientation[:3] = c2 / (self.spacing[0] * self.dimensions[2])
+                self.orientation[3:] = c1 / (self.spacing[1] * self.dimensions[1])
+
+        else:
+            self.origin = origin
 
     def _find_skipped_slices(self, slice_direction):
         base_spacing = None
