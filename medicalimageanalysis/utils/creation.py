@@ -49,7 +49,7 @@ class CreateDicomImage(object):
         if self.frame is None:
             self.frame = generate_uid()
         if self.origin is None:
-            self.origin = [0 ,0, 0]
+            self.origin = [0, 0, 0]
         if self.spacing is None:
             self.spacing = [1, 1]
         if self.thickness is None:

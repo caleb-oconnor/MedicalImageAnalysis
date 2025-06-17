@@ -79,8 +79,8 @@ class ContourToDiscreteMesh(object):
         elif self.plane == 'Coronal':
             slice_check = np.zeros(self.dimensions[1])
             for c in self.contour_pixel:
-                stack_1 = np.vstack((c[:, 2], c[:, 0])).T
-                stack_2 = np.asarray([c[0, 2], c[0, 0]])
+                stack_1 = np.vstack((c[:, 0], c[:, 2])).T
+                stack_2 = np.asarray([c[0, 0], c[0, 2]])
                 contour_stacked = np.vstack((stack_1, stack_2))
                 new_contour = np.array([contour_stacked], dtype=np.int32)
                 image = np.zeros([self.dimensions[0], self.dimensions[2]], dtype=np.uint8)

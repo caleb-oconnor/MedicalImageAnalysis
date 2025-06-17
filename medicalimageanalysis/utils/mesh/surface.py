@@ -15,12 +15,11 @@ Structure:
 import cv2
 import vtk
 import pyacvd
+import pymeshfix
 import numpy as np
 import pyvista as pv
 
 from scipy.spatial import distance
-
-import pymeshfix
 
 
 class Refinement(object):
