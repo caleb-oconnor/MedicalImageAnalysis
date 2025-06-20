@@ -134,7 +134,7 @@ class DicomReader(object):
                         image_tags = [images_in_modality[idx] for idx in sorted_idx[0] if 'ImageOrientationPatient' in images_in_modality[idx] and 'ImagePositionPatient' in images_in_modality[idx]]
 
                         orientations = np.asarray([img['ImageOrientationPatient'].value for img in image_tags])
-                        _, indices = np.unique(np.round(orientations, 4), axis=0, return_index=True)
+                        _, indices = np.unique(np.round(orientations, 3), axis=0, return_index=True)
                         unique_orientations = [orientations[ind] for ind in indices]
                         for orient in unique_orientations:
                             orient_idx = np.where((np.round(orientations[:, 0], 3) == np.round(orient[0], 3)) &
