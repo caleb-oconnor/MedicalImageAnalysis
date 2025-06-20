@@ -810,12 +810,15 @@ class ReadRTStruct(object):
         self.poi_names = [prop[1] for prop in self._properties if prop[3].lower() == 'point']
         self.poi_colors = [prop[2] for prop in self._properties if prop[3].lower() == 'point']
 
-        self.match_image_name = self._match_with_image()
+        if len(self.roi_names) > 0 or len(self.poi_names) > 0:
+            self.match_image_name = self._match_with_image()
 
-        self.contours = []
-        self.points = []
-        if not self.only_tags:
-            self._structure_positions()
+            self.contours = []
+            self.points = []
+            if not self.only_tags:
+                self._structure_positions()
+        else:
+            self.match_image_name = None
 
     def _get_series_uid(self):
         study = 'RTReferencedStudySequence'
