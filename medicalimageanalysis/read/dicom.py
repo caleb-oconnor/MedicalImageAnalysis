@@ -434,7 +434,10 @@ class Read3D(object):
                 else:
                     self.array = np.rot90(self.array, 2, (1, 2))
 
-                square = corners[:4, :]
+                if corner_idx < 4:
+                    square = corners[:4, :]
+                else:
+                    square = corners[4:, :]
 
             elif self.plane == 'Coronal':
                 self.array = np.rot90(self.array, 1, (0, 1))
