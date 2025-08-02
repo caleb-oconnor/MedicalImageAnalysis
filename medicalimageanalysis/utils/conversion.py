@@ -110,8 +110,7 @@ class ContourToDiscreteMesh(object):
                     hold_mask[:, :, slice_num] = hold_mask[:, :, slice_num] + image
             self.mask = (hold_mask > 0).astype(np.uint8)
 
-    def compute_mesh(self, discrete=False, smoothing_num_iterations=20, smoothing_relaxation_factor=.5,
-                     smoothing_constraint_distance=1):
+    def compute_mesh(self, discrete=False, smoothing_iterations=20, smoothing_relaxation=.5, smoothing_distance=1):
         label = numpy_support.numpy_to_vtk(num_array=self.mask.ravel(),
                                            deep=True, 
                                            array_type=vtk.VTK_FLOAT)
@@ -146,11 +145,11 @@ class ContourToDiscreteMesh(object):
         else:
             # Uses VTK surface nets 3d
             img = pv.ImageData(pad_image)
-            mesh = img.contour_labeled(smoothing=True,
+            mesh = img.contour_labels(smoothing=True,
                                        output_mesh_type='triangles',
-                                       smoothing_num_iterations=smoothing_num_iterations,
-                                       smoothing_relaxation_factor=smoothing_relaxation_factor,
-                                       smoothing_constraint_distance=smoothing_constraint_distance)
+                                       smoothing_iterations=smoothing_iterations,
+                                       smoothing_relaxation=smoothing_relaxation,
+                                       smoothing_distance=smoothing_distance)
 
             return mesh
 
