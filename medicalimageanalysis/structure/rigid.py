@@ -32,29 +32,38 @@ class Display(object):
         self.bounds = None
         self.array = None
 
-        self.slice_location = None
+        self.slice_location = [0, 0, 0]
         self.scroll_max = None
+        self.offset = {'Axial': [0, 0], 'Coronal': [0, 0], 'Sagittal': [0, 0]}
 
     def compute_array_slice(self, slice_plane):
-        if self.array is None:
-            self.compute_reslice()
-            self.compute_slice_location()
-            self.scroll_max = [self.array.dimensions[0] - 1,
-                               self.array.dimensions[1] - 1,
-                               self.array.dimensions[2] - 1]
-
         array_slice = None
         if slice_plane == 'Axial':
-            if 0 <= self.slice_location[0] <= self.array.shape[0]:
-                array_slice = np.flip(self.array[self.slice_location[0], :, :], 0)
-        elif slice_plane == 'Coronal':
-            if 0 <= self.slice_location[1] <= self.array.shape[1]:
-                array_slice = self.array[:, self.slice_location[1], :]
-        else:
-            if 0 <= self.slice_location[2] <= self.array.shape[2]:
-                array_slice = self.array[:, :, self.slice_location[2]]
+            if 0 <= self.slice_location[0] < self.array.shape[0]:
+                array_slice = self.array[self.slice_location[0], :, :].astype(np.double)
 
-        return array_slice.astype(np.double)
+        elif slice_plane == 'Coronal':
+            if 0 <= self.slice_location[1] < self.array.shape[1]:
+                array_slice = self.array[:, self.slice_location[1], :].astype(np.double)
+
+        else:
+            if 0 <= self.slice_location[2] < self.array.shape[2]:
+                array_slice = self.array[:, :, self.slice_location[2]].astype(np.double)
+
+        return array_slice
+
+    def compute_offset(self):
+        bx = self.bounds[0]
+        by = self.bounds[2]
+        bz = self.bounds[4]
+        pos = Data.images[self.rigid.source_name].display.origin
+
+        self.offset['Axial'][0] = (bx - pos[0]) / self.spacing[0]
+        self.offset['Axial'][1] = (by - pos[1]) / self.spacing[1]
+        self.offset['Coronal'][0] = (bx - pos[0]) / self.spacing[0]
+        self.offset['Coronal'][1] = (bz - pos[2]) / self.spacing[2]
+        self.offset['Sagittal'][0] = (by - pos[1]) / self.spacing[1]
+        self.offset['Sagittal'][1] = (bz - pos[2]) / self.spacing[2]
 
     def compute_matrix_pixel_to_position(self):
         matrix = copy.deepcopy(Data.images[self.rigid.target_name].matrix)
@@ -83,12 +92,10 @@ class Display(object):
 
     def compute_slice_location(self, position=None):
         bounds = np.asarray([self.bounds[0], self.bounds[2], self.bounds[4]])
-        if not position:
+        if position is None:
             source_location = np.flip(Data.images[self.rigid.source_name].display.slice_location)
-            source_positions = Data.images[self.rigid.source_name].display.compute_index_positions(source_location)
-            self.slice_location = np.round((source_positions - bounds) / self.spacing).astype(np.int32)
-        else:
-            self.slice_location = np.round((position - bounds) / self.spacing).astype(np.int32)
+            position = Data.images[self.rigid.source_name].display.compute_index_positions(source_location)
+        self.slice_location = np.flip(np.round((position - bounds) / self.spacing).astype(np.int32))
 
     def compute_slice_origin(self, slice_plane):
         slice_origin = None
@@ -103,6 +110,11 @@ class Display(object):
             slice_origin = self.origin + (location * self.spacing)
 
         return slice_origin
+
+    def compute_scroll_max(self):
+        self.scroll_max = [self.array.shape[0] - 1,
+                           self.array.shape[1] - 1,
+                           self.array.shape[2] - 1]
 
     def compute_vtk_slice(self, slice_plane):
         if self.array is None:
@@ -164,6 +176,7 @@ class Display(object):
 
         transform = vtk.vtkTransform()
         transform.SetMatrix(matrix)
+        # transform.Inverse()
 
         vtk_reslice = vtk.vtkImageReslice()
         vtk_reslice.SetInputData(vtk_image)
@@ -180,6 +193,7 @@ class Display(object):
         self.spacing = reslice_data.GetSpacing()
         self.bounds = reslice_data.GetBounds()
         dimensions = reslice_data.GetDimensions()
+        self.compute_offset()
 
         scalars = reslice_data.GetPointData().GetScalars()
         self.array = numpy_support.vtk_to_numpy(scalars).reshape(dimensions[2], dimensions[1], dimensions[0])
@@ -243,11 +257,7 @@ class Rigid(object):
         else:
             self.combo_matrix = combo_matrix
 
-        self.angles = np.asarray([0, 0, 0])
-        self.translation = np.asarray([0, 0, 0])
         self.rotation_center = np.asarray([0, 0, 0])
-        self.update_angles_translation()
-
         self.display = Display(self)
 
     def add_rigid(self):
@@ -273,19 +283,27 @@ class Rigid(object):
         icp.compute_vtk(distance=distance, iterations=iterations, landmarks=landmarks, com_matching=com_matching,
                         inverse=inverse)
         self.matrix = icp.get_matrix()
-        self.update_angles_translation()
 
     def pre_alignment(self, superior=False, center=False, origin=False):
         if superior:
             pass
         elif center:
             self.matrix[:3, 3] = Data.images[self.source_name].origin - Data.images[self.target_name].origin
-            self.rotation_center = np.asarray(Data.images[self.target_name].origin)
         elif origin:
             pass
 
-    def retrieve_array_plane(self, slice_plane):
+    def retrieve_array_plane(self, slice_plane, solo=None, position=None):
+        if self.display.array is None:
+            self.display.compute_reslice()
+            self.display.compute_scroll_max()
+
+        if solo is None:
+            self.display.compute_slice_location(position=position)
+
         return self.display.compute_array_slice(slice_plane=slice_plane)
+
+    def retrieve_offset(self, slice_plane):
+        return self.display.offset[slice_plane]
 
     def update_rotation(self, t_x=0, t_y=0, t_z=0, r_x=0, r_y=0, r_z=0):
         new_matrix = np.identity(4)
@@ -310,11 +328,15 @@ class Rigid(object):
             self.matrix[2, 3] = self.matrix[2, 3] + t_z
 
         self.matrix = new_matrix @ self.matrix
+        self.display.compute_reslice()
+        self.display.compute_scroll_max()
 
-    def update_angles_translation(self):
+    def retrieve_angles(self, order='ZXY'):
         rotation = Rotation.from_matrix(self.matrix[:3, :3])
-        self.angles = rotation.as_euler("ZXY", degrees=True)
-        self.translation = self.matrix[:3, 3]
+        return rotation.as_euler(order, degrees=True)
+
+    def retrieve_translation(self):
+        return self.matrix[:3, 3]
 
     def update_mesh(self, roi_name, base=True):
         if self.combo_name is None:
