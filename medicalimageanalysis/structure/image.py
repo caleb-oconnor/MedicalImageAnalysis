@@ -77,7 +77,7 @@ class Display(object):
 
     def compute_array(self, slice_plane):
         if slice_plane == 'Axial':
-            array = np.flip(self.image.array[self.slice_location[0], :, :], 0)
+            array = self.image.array[self.slice_location[0], :, :]
         elif slice_plane == 'Coronal':
             array = self.image.array[:, self.slice_location[1], :]
         else:
@@ -106,17 +106,17 @@ class Display(object):
             location = np.asarray([0, 0, self.slice_location[0], 1])
             array_slice = self.image.array[self.slice_location[0], :, :]
             array_shape = array_slice.shape
-            dim = [array_shape[0], array_shape[1], 1]
+            dim = [array_shape[1], array_shape[0], 1]
         elif slice_plane == 'Coronal':
             location = np.asarray([0, self.slice_location[1], 0, 1])
             array_slice = self.image.array[:, self.slice_location[1], :]
             array_shape = array_slice.shape
-            dim = [array_shape[0], 1, array_shape[1]]
+            dim = [array_shape[1], 1, array_shape[0]]
         else:
             location = np.asarray([self.slice_location[2], 0, 0, 1])
             array_slice = self.image.array[:, :, self.slice_location[2]]
             array_shape = array_slice.shape
-            dim = [1, array_shape[0], array_shape[1]]
+            dim = [1, array_shape[1], array_shape[0]]
 
         slice_origin = location.dot(pixel_to_position_matrix.T)[:3]
 
@@ -199,8 +199,9 @@ class Image(object):
                 self.pois[poi_name] = Poi(self, position=rtstruct.points[ii], name=poi_name,
                                           color=rtstruct.poi_colors[ii], visible=False, filepaths=rtstruct.filepaths)
 
-    def add_roi(self, roi_name=None, color=None, visible=False, path=None, contour=None):
-        self.rois[roi_name] = Roi(self, position=contour, name=roi_name, color=color, visible=visible, filepaths=path)
+    def add_roi(self, roi_name=None, color=None, visible=False, path=None, contour=None, plane='Axial'):
+        self.rois[roi_name] = Roi(self, position=contour, name=roi_name, color=color, visible=visible, filepaths=path,
+                                  plane=plane)
 
     def add_poi(self, poi_name=None, color=None, visible=False, path=None, point=None):
         self.pois[poi_name] = Poi(self, position=point, name=poi_name, color=color, visible=visible, filepaths=path)
