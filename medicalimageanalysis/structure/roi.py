@@ -48,8 +48,10 @@ class Roi(object):
         self.com = None
         self.bounds = None
 
+        self.opacity = None
         self.rotated_mesh = None
         self.multi_color = None
+        self.fixed_name = False
 
     def add_mesh(self, mesh):
         self.mesh = mesh
@@ -70,8 +72,6 @@ class Roi(object):
         self.multi_color = None
 
     def convert_position_to_pixel(self, position=None):
-        if self.plane == 'Coronal':
-            print(1)
         position_to_pixel_matrix = self.image.display.compute_matrix_position_to_pixel()
 
         pixel = []
@@ -83,7 +83,7 @@ class Roi(object):
         return pixel
 
     def convert_pixel_to_position(self, pixel=None):
-        pixel_to_position_matrix = self.image.display.compute_matrix_pixel_to_position(base=False)
+        pixel_to_position_matrix = self.image.display.compute_matrix_pixel_to_position()
 
         position = []
         for ii, pix in enumerate(pixel):
@@ -92,16 +92,16 @@ class Roi(object):
 
         return position
 
-    def create_mesh(self, smoothing_num_iterations=20, smoothing_relaxation_factor=.5, smoothing_constraint_distance=1):
+    def create_mesh(self, smoothing_iterations=20, smoothing_relaxation=.5, smoothing_distance=1):
         meshing = ContourToDiscreteMesh(contour_pixel=self.contour_pixel,
                                         spacing=self.image.spacing,
                                         origin=self.image.origin,
                                         dimensions=self.image.dimensions,
                                         matrix=self.image.matrix,
                                         plane=self.plane)
-        self.mesh = meshing.compute_mesh(smoothing_num_iterations=smoothing_num_iterations,
-                                         smoothing_relaxation_factor=smoothing_relaxation_factor,
-                                         smoothing_constraint_distance=smoothing_constraint_distance)
+        self.mesh = meshing.compute_mesh(smoothing_iterations=smoothing_iterations,
+                                         smoothing_relaxation=smoothing_relaxation,
+                                         smoothing_distance=smoothing_distance)
         self.volume = self.mesh.volume
         self.com = self.mesh.center
         self.bounds = self.mesh.bounds
@@ -123,17 +123,24 @@ class Roi(object):
         refine = Refinement(self.mesh)
         self.mesh = refine.smooth(iterations=iterations, angle=angle, passband=passband)
 
-    def create_decimate_mesh(self, percent=None):
+    def create_decimate_mesh(self, percent=None, set_mesh=False):
         if percent is None:
             points = np.round(10 * np.sqrt(self.mesh.number_of_points))
             percent = 1 - (points / self.mesh.number_of_points)
 
-        return self.mesh.decimate(percent)
+        mesh = self.mesh.decimate(percent)
+        if set_mesh:
+            self.mesh = mesh
 
-    def create_cluster_mesh(self, points=None):
+        return mesh
+
+    def create_cluster_mesh(self, points=None, set_mesh=False):
         refine = Refinement(self.mesh)
+        mesh = refine.cluster(points=points)
+        if set_mesh:
+            self.mesh = mesh
 
-        return refine.cluster(points=points)
+        return mesh
 
     def compute_contour(self, slice_location):
         contour_list = []
@@ -146,7 +153,6 @@ class Roi(object):
                     for ii, idx in enumerate(keep_idx):
                         contour_corrected = np.vstack((self.contour_pixel[idx[0]][:, 0:2],
                                                        self.contour_pixel[idx[0]][0, 0:2]))
-                        contour_corrected[:, 1] = self.image.dimensions[1] - contour_corrected[:, 1]
                         contour_list += [contour_corrected]
 
             elif self.plane == 'Coronal':
@@ -317,8 +323,7 @@ class Roi(object):
 
             if plane in 'Axial':
                 pixel_reshape = pixel[:, :2]
-                pixel_corrected += [np.asarray([pixel_reshape[:, 0],
-                                                self.image.dimensions[1] - pixel_reshape[:, 1]]).T]
+                pixel_corrected += [np.asarray([pixel_reshape[:, 0], pixel_reshape[:, 1]]).T]
 
             elif plane == 'Coronal':
                 pixel_reshape = np.column_stack((pixel[:, 0], pixel[:, 2]))
