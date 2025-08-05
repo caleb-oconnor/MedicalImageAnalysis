@@ -142,7 +142,7 @@ class Roi(object):
 
         return mesh
 
-    def compute_contour(self, slice_location):
+    def compute_contour(self, slice_location, offset=.5):
         contour_list = []
         if self.contour_pixel is not None:
             if self.plane == 'Axial':
@@ -151,8 +151,8 @@ class Roi(object):
 
                 if len(keep_idx) > 0:
                     for ii, idx in enumerate(keep_idx):
-                        contour_corrected = np.vstack((self.contour_pixel[idx[0]][:, 0:2],
-                                                       self.contour_pixel[idx[0]][0, 0:2]))
+                        contour_corrected = np.vstack((self.contour_pixel[idx[0]][:, 0:2] + offset,
+                                                       self.contour_pixel[idx[0]][0, 0:2] + offset))
                         contour_list += [contour_corrected]
 
             elif self.plane == 'Coronal':
@@ -161,8 +161,8 @@ class Roi(object):
 
                 if len(keep_idx) > 0:
                     for ii, idx in enumerate(keep_idx):
-                        pixel_reshape = np.column_stack((self.contour_pixel[idx[0]][:, 0],
-                                                         self.contour_pixel[idx[0]][:, 2]))
+                        pixel_reshape = np.column_stack((self.contour_pixel[idx[0]][:, 0] + offset,
+                                                         self.contour_pixel[idx[0]][:, 2] + offset))
                         stack = np.asarray([self.contour_pixel[idx[0]][0, 0], self.contour_pixel[idx[0]][0, 2]])
                         contour_corrected = np.vstack((pixel_reshape, stack))
                         contour_list += [contour_corrected]
@@ -173,8 +173,8 @@ class Roi(object):
 
                 if len(keep_idx) > 0:
                     for ii, idx in enumerate(keep_idx):
-                        contour_corrected = np.vstack((self.contour_pixel[idx[0]][:, 1:],
-                                                       self.contour_pixel[idx[0]][0, 1:]))
+                        contour_corrected = np.vstack((self.contour_pixel[idx[0]][:, 1:] + offset,
+                                                       self.contour_pixel[idx[0]][0, 1:] + offset))
                         contour_list += [contour_corrected]
 
         return contour_list
@@ -189,7 +189,7 @@ class Roi(object):
 
         return mask.mask
 
-    def compute_mesh_slice(self, location=None, slice_plane=None, return_pixel=False):
+    def compute_mesh_slice(self, location=None, slice_plane=None, offset=.5, return_pixel=False):
         matrix = self.image.display.matrix
         if slice_plane == 'Axial':
             normal = matrix[:3, 2]
@@ -202,138 +202,32 @@ class Roi(object):
 
         if return_pixel:
             if roi_slice.number_of_points > 0:
-                roi_strip = roi_slice.strip()
+                roi_strip = roi_slice.strip(max_length=10000000)
+
                 position = [np.asarray(c.points) for c in roi_strip.cell]
-                lines = roi_strip.lines
+                pixels = self.convert_position_to_pixel(position=position)
+                pixel_corrected = []
+                for pixel in pixels:
 
-                if len(position) > 1:
-                    position_correction = self.line_deconstruction(lines, position)
+                    if slice_plane in 'Axial':
+                        pixel_reshape = pixel[:, :2] + offset
+                        pixel_corrected += [np.asarray([pixel_reshape[:, 0], pixel_reshape[:, 1]]).T]
 
-                else:
-                    position_correction = position
+                    elif slice_plane == 'Coronal':
+                        pixel_reshape = np.column_stack((pixel[:, 0] + offset, pixel[:, 2] + offset))
+                        pixel_corrected += [pixel_reshape]
 
-                pixels = self.convert_position_to_pixel(position=position_correction)
-                pixel_correct = self.pixel_slice_correction(pixels, slice_plane)
+                    else:
+                        pixel_reshape = pixel[:, 1:] + offset
+                        pixel_corrected += [pixel_reshape]
 
-                return pixel_correct
+                return pixel_corrected
 
             else:
                 return []
 
         else:
             return roi_slice
-
-    @staticmethod
-    def line_deconstruction(lines, position):
-        n = 0
-        line_values = []
-        for ii, p in enumerate(position):
-            if ii == 0:
-                n = len(p)
-                line_splits = [1, len(p)]
-            else:
-                line_idx = n + 2
-                n = line_idx + len(p) - 1
-                line_splits = [line_idx, line_idx + len(p) - 1]
-            line_values += [[lines[line_splits[0]], lines[line_splits[1]]]]
-
-        line_values = np.vstack(line_values)
-
-        order_idx = []
-        m = 0
-        while m >= 0:
-            if line_values[m, 0] == line_values[m, 1]:
-                order_idx += [[m]]
-
-                combined_idx = np.sort(np.abs([item for sublist in order_idx for item in sublist]))
-                mm = [ii for ii in range(line_values.shape[0]) if ii not in combined_idx]
-                if len(mm) > 0:
-                    m = mm[0]
-                else:
-                    m = -100
-
-            else:
-                hold_idx = [m]
-                initial_value = line_values[m, 0]
-                value = line_values[m, 1]
-                n = 0
-                while n >= 0:
-                    check_1 = [idx for idx in np.where(line_values[:, 0] == value)[0] if idx != m and idx != n]
-                    check_2 = [idx for idx in np.where(line_values[:, 1] == value)[0] if idx != m and idx != n]
-
-                    if len(check_1) > 0:
-                        hold_idx += [check_1[0]]
-                        if line_values[check_1[0], 1] == initial_value:
-                            order_idx += [hold_idx]
-                            n = -100
-
-                            combined_idx = np.sort(np.abs([item for sublist in order_idx for item in sublist]))
-                            mm = [ii for ii in range(line_values.shape[0]) if ii not in combined_idx]
-                            if len(mm) > 0:
-                                m = mm[0]
-                            else:
-                                m = -100
-
-                        else:
-                            n = check_1[0]
-                            value = line_values[n, 1]
-
-                    elif len(check_2) > 0:
-                        hold_idx += [-check_2[0]]
-                        if line_values[check_2[0], 0] == initial_value:
-                            order_idx += [hold_idx]
-                            n = -100
-
-                            combined_idx = np.sort(np.abs([item for sublist in order_idx for item in sublist]))
-                            mm = [ii for ii in range(line_values.shape[0]) if ii not in combined_idx]
-                            if len(mm) > 0:
-                                m = mm[0]
-                            else:
-                                m = -100
-
-                        else:
-                            n = check_2[0]
-                            value = line_values[n, 0]
-
-                    else:
-                        print('fail')
-                        n = -100
-                        m = -100
-
-        position_correction = []
-        for idx in order_idx:
-            if isinstance(idx, int):
-                position_correction += [position[idx]]
-
-            else:
-                position_hold = []
-                for ii in idx:
-                    if ii >= 0:
-                        position_hold += [position[ii]]
-                    else:
-                        position_hold += [np.flip(position[np.abs(ii)], axis=0)]
-
-                position_correction += [np.vstack(position_hold)]
-
-        return position_correction
-
-    def pixel_slice_correction(self, pixels, plane):
-        pixel_corrected = []
-        for pixel in pixels:
-
-            if plane in 'Axial':
-                pixel_reshape = pixel[:, :2]
-                pixel_corrected += [np.asarray([pixel_reshape[:, 0], pixel_reshape[:, 1]]).T]
-
-            elif plane == 'Coronal':
-                pixel_reshape = np.column_stack((pixel[:, 0], pixel[:, 2]))
-                pixel_corrected += [pixel_reshape]
-
-            else:
-                pixel_reshape = pixel[:, 1:]
-                pixel_corrected += [pixel_reshape]
-
-        return pixel_corrected
 
     def update_pixel(self, pixel, plane='Axial'):
         self.plane = plane
