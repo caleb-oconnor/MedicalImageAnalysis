@@ -53,17 +53,14 @@ class Display(object):
         return array_slice
 
     def compute_offset(self):
-        bx = self.bounds[0]
-        by = self.bounds[2]
-        bz = self.bounds[4]
-        pos = Data.images[self.rigid.source_name].display.origin
+        pos = Data.images[self.rigid.source_name].origin
 
-        self.offset['Axial'][0] = (bx - pos[0]) / self.spacing[0]
-        self.offset['Axial'][1] = (by - pos[1]) / self.spacing[1]
-        self.offset['Coronal'][0] = (bx - pos[0]) / self.spacing[0]
-        self.offset['Coronal'][1] = (bz - pos[2]) / self.spacing[2]
-        self.offset['Sagittal'][0] = (by - pos[1]) / self.spacing[1]
-        self.offset['Sagittal'][1] = (bz - pos[2]) / self.spacing[2]
+        self.offset['Axial'][0] = (self.origin[0] - pos[0]) / self.spacing[0]
+        self.offset['Axial'][1] = (self.origin[1] - pos[1]) / self.spacing[1]
+        self.offset['Coronal'][0] = (self.origin[0] - pos[0]) / self.spacing[0]
+        self.offset['Coronal'][1] = (self.origin[2] - pos[2]) / self.spacing[2]
+        self.offset['Sagittal'][0] = (self.origin[1] - pos[1]) / self.spacing[1]
+        self.offset['Sagittal'][1] = (self.origin[2] - pos[2]) / self.spacing[2]
 
     def compute_matrix_pixel_to_position(self):
         matrix = copy.deepcopy(Data.images[self.rigid.target_name].matrix)
@@ -89,6 +86,46 @@ class Display(object):
         position_to_pixel_matrix[:3, 3] = np.asarray(self.origin).dot(-hold_matrix.T)
 
         return position_to_pixel_matrix
+
+    def compute_mesh_slice(self, roi_name=None, location=None, slice_plane=None, return_pixel=False):
+        matrix = np.identity(4)
+        if slice_plane == 'Axial':
+            normal = matrix[:3, 2]
+        elif slice_plane == 'Coronal':
+            normal = matrix[:3, 1]
+        else:
+            normal = matrix[:3, 0]
+
+        roi_slice = self.rigid.rois[roi_name].slice(normal=normal, origin=location)
+
+        if return_pixel:
+            if roi_slice.number_of_points > 0:
+                roi_strip = roi_slice.strip(max_length=10000000)
+
+                position = [np.asarray(c.points) for c in roi_strip.cell]
+                pixels = self.convert_position_to_pixel(position=position)
+                pixel_corrected = []
+                for pixel in pixels:
+
+                    if slice_plane in 'Axial':
+                        pixel_reshape = pixel[:, :2]
+                        pixel_corrected += [np.asarray([pixel_reshape[:, 0], pixel_reshape[:, 1]]).T]
+
+                    elif slice_plane == 'Coronal':
+                        pixel_reshape = np.column_stack((pixel[:, 0], pixel[:, 2]))
+                        pixel_corrected += [pixel_reshape]
+
+                    else:
+                        pixel_reshape = pixel[:, 1:]
+                        pixel_corrected += [pixel_reshape]
+
+                return pixel_corrected
+
+            else:
+                return []
+
+        else:
+            return roi_slice
 
     def compute_slice_location(self, position=None):
         bounds = np.asarray([self.bounds[0], self.bounds[2], self.bounds[4]])
@@ -189,7 +226,7 @@ class Display(object):
         vtk_reslice.Update()
 
         reslice_data = vtk_reslice.GetOutput()
-        self.origin = reslice_data.GetOrigin()
+        self.origin = np.asarray(reslice_data.GetOrigin())
         self.spacing = reslice_data.GetSpacing()
         self.bounds = reslice_data.GetBounds()
         dimensions = reslice_data.GetDimensions()
@@ -229,6 +266,17 @@ class Display(object):
             scalars = reslice_data.GetPointData().GetScalars()
             self.array = numpy_support.vtk_to_numpy(scalars).reshape(dimensions[2], dimensions[1], dimensions[0])
 
+    def convert_position_to_pixel(self, position=None):
+        position_to_pixel_matrix = Data.images[self.rigid.source_name].display.compute_matrix_position_to_pixel()
+
+        pixel = []
+        for ii, pos in enumerate(position):
+            p_concat = np.concatenate((pos, np.ones((pos.shape[0], 1))), axis=1)
+            pixel_3_axis = p_concat.dot(position_to_pixel_matrix.T)[:, :3]
+            pixel += [np.vstack((pixel_3_axis, pixel_3_axis[0, :]))]
+
+        return pixel
+
 
 class Rigid(object):
     def __init__(self, source_name, target_name, rigid_name=None, roi_names=None, matrix=None, combo_matrix=None,
@@ -236,6 +284,7 @@ class Rigid(object):
         self.source_name = source_name
         self.target_name = target_name
         self.combo_name = combo_name
+        self.rois = dict.fromkeys(Data.roi_list)
 
         if rigid_name is None:
             self.rigid_name = self.source_name + '_' + self.target_name
@@ -257,25 +306,29 @@ class Rigid(object):
         else:
             self.combo_matrix = combo_matrix
 
+        self.rigid_name = self.add_rigid(rigid_name)
         self.rotation_center = np.asarray([0, 0, 0])
         self.display = Display(self)
 
-    def add_rigid(self):
-        if np.array_equal(self.combo_matrix, np.identity(4)):
-            name = self.source_name + '_' + self.target_name
-        else:
-            name = self.source_name + '_' + self.target_name + '_combo'
+    def add_rigid(self, rigid_name):
+        if rigid_name is None:
+            if np.array_equal(self.combo_matrix, np.identity(4)):
+                rigid_name = self.source_name + '_' + self.target_name
+            else:
+                rigid_name = self.source_name + '_' + self.target_name + '_combo'
 
-        if name in Data.rigid_list:
-            n = 0
-            while n > -1:
-                n += 1
-                name = name + '_' + str(n)
-                if name not in Data.rigid_list:
-                    n = -100
+            if rigid_name in Data.rigid_list:
+                n = 0
+                while n > -1:
+                    n += 1
+                    rigid_name = rigid_name + '_' + str(n)
+                    if rigid_name not in Data.rigid_list:
+                        n = -100
 
-        Data.rigid[name] = self
-        Data.rigid_list += [name]
+        Data.rigid[rigid_name] = self
+        Data.rigid_list += [rigid_name]
+
+        return rigid_name
 
     def compute_icp_vtk(self, source_mesh, target_mesh, distance=1e-5, iterations=1000, landmarks=None,
                         com_matching=True, inverse=False):
@@ -283,6 +336,7 @@ class Rigid(object):
         icp.compute_vtk(distance=distance, iterations=iterations, landmarks=landmarks, com_matching=com_matching,
                         inverse=inverse)
         self.matrix = icp.get_matrix()
+        self.update_mesh(all_rois=True)
 
     def pre_alignment(self, superior=False, center=False, origin=False):
         if superior:
@@ -305,7 +359,7 @@ class Rigid(object):
     def retrieve_offset(self, slice_plane):
         return self.display.offset[slice_plane]
 
-    def update_rotation(self, t_x=0, t_y=0, t_z=0, r_x=0, r_y=0, r_z=0):
+    def update_rotation(self, r_x=0, r_y=0, r_z=0):
         new_matrix = np.identity(4)
         if r_x:
             radians = np.deg2rad(r_x)
@@ -318,18 +372,23 @@ class Rigid(object):
             radians = np.deg2rad(r_z)
             new_matrix[:3, :3] = Rotation.from_euler('z', radians).as_matrix()
 
-        if t_x:
-            self.matrix[0, 3] = self.matrix[0, 3] + t_x
-
-        if t_y:
-            self.matrix[1, 3] = self.matrix[1, 3] + t_y
-
-        if t_z:
-            self.matrix[2, 3] = self.matrix[2, 3] + t_z
-
         self.matrix = new_matrix @ self.matrix
         self.display.compute_reslice()
         self.display.compute_scroll_max()
+        self.update_mesh(all_rois=True)
+
+    def update_translation(self, t_x=0, t_y=0, t_z=0):
+        self.matrix[0, 3] = self.matrix[0, 3] + t_x
+        self.matrix[1, 3] = self.matrix[1, 3] + t_y
+        self.matrix[2, 3] = self.matrix[2, 3] + t_z
+
+        self.display.origin[0] = self.display.origin[0] + t_x
+        self.display.origin[1] = self.display.origin[1] + t_y
+        self.display.origin[2] = self.display.origin[2] + t_z
+
+        self.display.compute_offset()
+        self.display.compute_scroll_max()
+        self.update_mesh(all_rois=True)
 
     def retrieve_angles(self, order='ZXY'):
         rotation = Rotation.from_matrix(self.matrix[:3, :3])
@@ -338,15 +397,19 @@ class Rigid(object):
     def retrieve_translation(self):
         return self.matrix[:3, 3]
 
-    def update_mesh(self, roi_name, base=True):
-        if self.combo_name is None:
+    def update_mesh(self, roi_name=None, all_rois=False):
+        if all_rois:
+            for roi_name in Data.roi_list:
+                roi = Data.images[self.target_name].rois[roi_name]
+                if roi.mesh is not None:
+                    self.rois[roi_name] = roi.mesh.translate(-self.rotation_center, inplace=False)
+                    self.rois[roi_name].transform(np.linalg.inv(self.matrix), inplace=True)
+                    self.rois[roi_name].translate(self.rotation_center, inplace=True)
+
+        else:
             roi = Data.images[self.target_name].rois[roi_name]
             if roi.mesh is not None and roi.visible:
-                mesh = roi.mesh.translate(-self.rotation_center, inplace=False)
-                mesh.transform(self.matrix, inplace=True)
-                mesh.translate(self.rotation_center, inplace=True)
+                self.rois[roi_name] = roi.mesh.translate(-self.rotation_center, inplace=False)
+                self.rois[roi_name].transform(np.linalg.inv(self.matrix), inplace=True)
+                self.rois[roi_name].translate(self.rotation_center, inplace=True)
 
-                return mesh
-
-            else:
-                return None
