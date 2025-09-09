@@ -24,11 +24,9 @@ def external(array, threshold=-250, min_volume=100, only_mask=True, less_than=Fa
     region_areas = [region.area for region in label_regions]
     max_idx = np.argmax(region_areas)
     bounds = label_regions[max_idx].bbox
-
     box_image = label_regions[max_idx].image
 
     mask = np.zeros(array.shape)
-    reduce_mask = np.zeros(box_image.shape)
     centroid_external = np.zeros((box_image.shape[0], 2))
     external_components = np.zeros((box_image.shape[0], 1))
     for ii in range(box_image.shape[0]):
@@ -38,10 +36,9 @@ def external(array, threshold=-250, min_volume=100, only_mask=True, less_than=Fa
         external_components[ii] = len([region.area for region in fill_regions if region.area > min_volume])
 
         centroid_external[ii, :] = np.round(np.mean(np.argwhere(filled_image), axis=0))
-        reduce_mask[ii, :, :] = filled_image * array[ii + bounds[0], bounds[1]:bounds[4], bounds[2]:bounds[5]]
         mask[ii + bounds[0], bounds[1]:bounds[4], bounds[2]:bounds[5]] = 1 * filled_image
 
     if only_mask:
         return mask
     else:
-        return mask, reduce_mask, centroid_external, external_components, bounds
+        return mask, centroid_external, external_components, bounds
