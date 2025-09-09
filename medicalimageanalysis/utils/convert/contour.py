@@ -15,10 +15,11 @@ from matplotlib import path
 
 
 class ContourToMesh(object):
-    def __init__(self, contour, plane='Axial', existing_mesh=None):
+    def __init__(self, contour, plane='Axial', existing_mesh=None, slice_idx=None):
         self.contour = contour
         self.plane = plane
         self.existing_mesh = existing_mesh
+        self.slice_idx = slice_idx
 
         self.contour_2d = self.convert_to_2d()
         self.slice_locations = self.get_slice_locations()
@@ -26,17 +27,18 @@ class ContourToMesh(object):
         self.slice_info = [np.where(self.slice_locations == s)[0] for s in list(self.slice_dict.keys())]
 
         self.mesh = None
+        self.grids = None
         self.contour_dist = None
 
     def convert_to_2d(self):
         if self.plane == 'Axial':
-            return [np.vstack((c[:, :2], c[0, :2])) for c in self.contour]
+            return [c[:, :2] for c in self.contour]
 
         elif self.plane == 'Coronal':
-            return [np.vstack((np.hstack((c[:, 0], c[:, 2])), np.hstack((c[0, 0], c[0, 2])))) for c in self.contour]
+            return [np.hstack((c[:, 0], c[:, 2])) for c in self.contour]
 
         else:
-            return [np.vstack((c[:, 1:], c[0, 1:])) for c in self.contour]
+            return [c[:, 1:] for c in self.contour]
 
     def get_slice_locations(self):
         if self.plane == 'Axial':
@@ -66,10 +68,20 @@ class ContourToMesh(object):
         return slice_dict
 
     def run(self):
+        self.create_grids()
         print(1)
 
-    def distance(self, slice_idx=None):
-        if slice_idx is None:
+    def create_grids(self):
+        if self.slice_idx is None:
+            self.grids = [] * len(self.slice_locations)
+            # for ii in range(len(self.slice_locations)):
+            #     if ii == 0 or ii == len(self.slice_locations) - 1:
+            #
+            #         if self.slice_dict in ['Solo', 'Before', 'After'] or
+
+    def distance(self):
+        if self.slice_idx is None:
+            # for ii in range(len(self.contour_2d)):
             c_next = [cdist(contour_loop[idx], contour_loop[idx + 1]) for idx in range(len(contour_loop) - 1)]
 
 
