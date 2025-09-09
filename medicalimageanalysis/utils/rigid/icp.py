@@ -54,7 +54,8 @@ class ICP(object):
             self.icp.SetMaximumNumberOfLandmarks(landmarks)
         self.icp.SetMaximumMeanDistance(distance)
         self.icp.SetMaximumNumberOfIterations(iterations)
-        self.icp.SetStartByMatchingCentroids(com_matching)
+        if com_matching:
+            self.icp.SetStartByMatchingCentroids(com_matching)
         self.icp.Modified()
         self.icp.Update()
 
