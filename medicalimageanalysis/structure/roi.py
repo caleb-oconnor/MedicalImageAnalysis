@@ -49,9 +49,9 @@ class Roi(object):
         self.bounds = None
 
         self.opacity = None
-        self.rotated_mesh = None
         self.multi_color = None
         self.fixed_name = False
+        self.misc = {}
 
     def add_mesh(self, mesh):
         self.mesh = mesh
@@ -69,7 +69,10 @@ class Roi(object):
         self.com = None
         self.bounds = None
 
+        self.opacity = None
         self.multi_color = None
+        self.fixed_name = False
+        self.misc = {}
 
     def convert_position_to_pixel(self, position=None):
         position_to_pixel_matrix = self.image.display.compute_matrix_position_to_pixel()
@@ -142,7 +145,7 @@ class Roi(object):
 
         return mesh
 
-    def compute_contour(self, slice_location, offset=.5):
+    def compute_contour(self, slice_location, offset=0):
         contour_list = []
         if self.contour_pixel is not None:
             if self.plane == 'Axial':
@@ -189,8 +192,8 @@ class Roi(object):
 
         return mask.mask
 
-    def compute_mesh_slice(self, location=None, slice_plane=None, offset=.5, return_pixel=False):
-        matrix = self.image.display.matrix
+    def compute_mesh_slice(self, location=None, slice_plane=None, offset=0, return_pixel=False):
+        matrix = np.linalg.inv(self.image.display.matrix)
         if slice_plane == 'Axial':
             normal = matrix[:3, 2]
         elif slice_plane == 'Coronal':
@@ -233,4 +236,6 @@ class Roi(object):
         self.plane = plane
         self.contour_pixel = pixel
         self.contour_position = self.convert_pixel_to_position(pixel=pixel)
-        self.create_mesh()
+
+        self.create_discrete_mesh()
+        self.create_display_mesh()
