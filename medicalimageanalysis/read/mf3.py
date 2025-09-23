@@ -32,18 +32,23 @@ class ThreeMfReader(object):
     """
     Converts 3mf file to pyvista polydata mesh.
     """
-    def __init__(self, reader, create_image=False):
+    def __init__(self, reader, roi_names=None):
         self.reader = reader
-        self.create_image = create_image
+        self.roi_names = roi_names
 
     def input_files(self, files):
         self.reader.files['3mf'] = files
 
     def load(self):
-        for file_path in self.reader.files['3mf']:
-            self.read(file_path)
+        for ii, file_path in enumerate(self.reader.files['3mf']):
+            if len(self.roi_names) > 0 and self.roi_names[ii] is not None:
+                roi_name = self.roi_names[ii]
+            else:
+                roi_name = self.reader.files['3mf'][ii].split('/')[-1].split('.3mf')[0]
 
-    def read(self, path):
+            self.read(file_path, roi_name)
+
+    def read(self, path, roi_name):
         """
         Loads in the 3mf file, gets the vertices/vertice colors/triangles and creates a polydata 3D model using pyvista.
 
@@ -84,26 +89,22 @@ class ThreeMfReader(object):
 
         mesh = pv.PolyData(np.float64(np.asarray(vertex_list)), triangle_list[0, :].astype(int))
         mesh['colors'] = np.abs(255-vertices_color)
-        if self.create_image:
 
-            decimate_mesh = mesh.decimate_pro(1 - (50000 / len(mesh.points)))
+        decimate_mesh = mesh.decimate_pro(1 - (50000 / len(mesh.points)))
 
-            image_name = 'CT ' + '0' + str(len(Data.image_list) + 1)
+        image_name = 'CT ' + '0' + str(len(Data.image_list) + 1)
 
-            model_to_mask = ModelToMask([decimate_mesh])
-            mask = model_to_mask.mask.T
+        model_to_mask = ModelToMask([decimate_mesh])
+        mask = model_to_mask.mask
 
-            new_image = CreateImageFromMask(mask, model_to_mask.origin, model_to_mask.spacing, image_name)
-            Data.images[image_name] = Image(new_image)
-            Data.image_list += [image_name]
+        new_image = CreateImageFromMask(mask, model_to_mask.origin, model_to_mask.spacing, image_name)
+        Data.images[image_name] = Image(new_image)
+        Data.image_list += [image_name]
 
-            Data.images[image_name].create_roi(name='mandible', visible=True, filepath=self.reader.files['3mf'])
-            Data.images[image_name].rois['mandible'].add_mesh(decimate_mesh)
-            Data.images[image_name].rois['mandible'].multi_color = True
-            Data.match_rois()
-
-        else:
-            Data.meshes += [mesh]
+        Data.images[image_name].create_roi(name=roi_name, visible=True, filepath=self.reader.files['3mf'])
+        Data.images[image_name].rois[roi_name].add_mesh(decimate_mesh)
+        Data.images[image_name].rois[roi_name].color = [128, 128, 128]
+        Data.images[image_name].rois[roi_name].multi_color = True
 
     @staticmethod
     def color_avg(color_list, p1, p2, p3):

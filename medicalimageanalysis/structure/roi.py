@@ -43,13 +43,13 @@ class Roi(object):
             self.contour_pixel = None
 
         self.mesh = None
-
         self.volume = None
         self.com = None
         self.bounds = None
 
-        self.rotated_mesh = None
-        self.multi_color = None
+        self.fixed_name = False
+        self.visual = {'2d': None, '3d': None, 'opacity': None, 'multicolor': None}
+        self.misc = {}
 
     def add_mesh(self, mesh):
         self.mesh = mesh
@@ -67,11 +67,12 @@ class Roi(object):
         self.com = None
         self.bounds = None
 
+        self.opacity = None
         self.multi_color = None
+        self.fixed_name = False
+        self.misc = {}
 
     def convert_position_to_pixel(self, position=None):
-        if self.plane == 'Coronal':
-            print(1)
         position_to_pixel_matrix = self.image.display.compute_matrix_position_to_pixel()
 
         pixel = []
@@ -83,7 +84,7 @@ class Roi(object):
         return pixel
 
     def convert_pixel_to_position(self, pixel=None):
-        pixel_to_position_matrix = self.image.display.compute_matrix_pixel_to_position(base=False)
+        pixel_to_position_matrix = self.image.display.compute_matrix_pixel_to_position()
 
         position = []
         for ii, pix in enumerate(pixel):
@@ -92,16 +93,16 @@ class Roi(object):
 
         return position
 
-    def create_mesh(self, smoothing_num_iterations=20, smoothing_relaxation_factor=.5, smoothing_constraint_distance=1):
+    def create_mesh(self, smoothing_iterations=20, smoothing_relaxation=.5, smoothing_distance=1):
         meshing = ContourToDiscreteMesh(contour_pixel=self.contour_pixel,
                                         spacing=self.image.spacing,
                                         origin=self.image.origin,
                                         dimensions=self.image.dimensions,
                                         matrix=self.image.matrix,
                                         plane=self.plane)
-        self.mesh = meshing.compute_mesh(smoothing_num_iterations=smoothing_num_iterations,
-                                         smoothing_relaxation_factor=smoothing_relaxation_factor,
-                                         smoothing_constraint_distance=smoothing_constraint_distance)
+        self.mesh = meshing.compute_mesh(smoothing_iterations=smoothing_iterations,
+                                         smoothing_relaxation=smoothing_relaxation,
+                                         smoothing_distance=smoothing_distance)
         self.volume = self.mesh.volume
         self.com = self.mesh.center
         self.bounds = self.mesh.bounds
@@ -123,19 +124,26 @@ class Roi(object):
         refine = Refinement(self.mesh)
         self.mesh = refine.smooth(iterations=iterations, angle=angle, passband=passband)
 
-    def create_decimate_mesh(self, percent=None):
+    def create_decimate_mesh(self, percent=None, set_mesh=False):
         if percent is None:
             points = np.round(10 * np.sqrt(self.mesh.number_of_points))
             percent = 1 - (points / self.mesh.number_of_points)
 
-        return self.mesh.decimate(percent)
+        mesh = self.mesh.decimate(percent)
+        if set_mesh:
+            self.mesh = mesh
 
-    def create_cluster_mesh(self, points=None):
+        return mesh
+
+    def create_cluster_mesh(self, points=None, set_mesh=False):
         refine = Refinement(self.mesh)
+        mesh = refine.cluster(points=points)
+        if set_mesh:
+            self.mesh = mesh
 
-        return refine.cluster(points=points)
+        return mesh
 
-    def compute_contour(self, slice_location):
+    def compute_contour(self, slice_location, offset=0):
         contour_list = []
         if self.contour_pixel is not None:
             if self.plane == 'Axial':
@@ -144,9 +152,8 @@ class Roi(object):
 
                 if len(keep_idx) > 0:
                     for ii, idx in enumerate(keep_idx):
-                        contour_corrected = np.vstack((self.contour_pixel[idx[0]][:, 0:2],
-                                                       self.contour_pixel[idx[0]][0, 0:2]))
-                        contour_corrected[:, 1] = self.image.dimensions[1] - contour_corrected[:, 1]
+                        contour_corrected = np.vstack((self.contour_pixel[idx[0]][:, 0:2] + offset,
+                                                       self.contour_pixel[idx[0]][0, 0:2] + offset))
                         contour_list += [contour_corrected]
 
             elif self.plane == 'Coronal':
@@ -155,8 +162,8 @@ class Roi(object):
 
                 if len(keep_idx) > 0:
                     for ii, idx in enumerate(keep_idx):
-                        pixel_reshape = np.column_stack((self.contour_pixel[idx[0]][:, 0],
-                                                         self.contour_pixel[idx[0]][:, 2]))
+                        pixel_reshape = np.column_stack((self.contour_pixel[idx[0]][:, 0] + offset,
+                                                         self.contour_pixel[idx[0]][:, 2] + offset))
                         stack = np.asarray([self.contour_pixel[idx[0]][0, 0], self.contour_pixel[idx[0]][0, 2]])
                         contour_corrected = np.vstack((pixel_reshape, stack))
                         contour_list += [contour_corrected]
@@ -167,8 +174,8 @@ class Roi(object):
 
                 if len(keep_idx) > 0:
                     for ii, idx in enumerate(keep_idx):
-                        contour_corrected = np.vstack((self.contour_pixel[idx[0]][:, 1:],
-                                                       self.contour_pixel[idx[0]][0, 1:]))
+                        contour_corrected = np.vstack((self.contour_pixel[idx[0]][:, 1:] + offset,
+                                                       self.contour_pixel[idx[0]][0, 1:] + offset))
                         contour_list += [contour_corrected]
 
         return contour_list
@@ -183,8 +190,8 @@ class Roi(object):
 
         return mask.mask
 
-    def compute_mesh_slice(self, location=None, slice_plane=None, return_pixel=False):
-        matrix = self.image.display.matrix
+    def compute_mesh_slice(self, location=None, slice_plane=None, offset=0, return_pixel=False):
+        matrix = np.linalg.inv(self.image.display.matrix)
         if slice_plane == 'Axial':
             normal = matrix[:3, 2]
         elif slice_plane == 'Coronal':
@@ -196,20 +203,26 @@ class Roi(object):
 
         if return_pixel:
             if roi_slice.number_of_points > 0:
-                roi_strip = roi_slice.strip()
+                roi_strip = roi_slice.strip(max_length=10000000)
+
                 position = [np.asarray(c.points) for c in roi_strip.cell]
-                lines = roi_strip.lines
+                pixels = self.convert_position_to_pixel(position=position)
+                pixel_corrected = []
+                for pixel in pixels:
 
-                if len(position) > 1:
-                    position_correction = self.line_deconstruction(lines, position)
+                    if slice_plane in 'Axial':
+                        pixel_reshape = pixel[:, :2] + offset
+                        pixel_corrected += [np.asarray([pixel_reshape[:, 0], pixel_reshape[:, 1]]).T]
 
-                else:
-                    position_correction = position
+                    elif slice_plane == 'Coronal':
+                        pixel_reshape = np.column_stack((pixel[:, 0] + offset, pixel[:, 2] + offset))
+                        pixel_corrected += [pixel_reshape]
 
-                pixels = self.convert_position_to_pixel(position=position_correction)
-                pixel_correct = self.pixel_slice_correction(pixels, slice_plane)
+                    else:
+                        pixel_reshape = pixel[:, 1:] + offset
+                        pixel_corrected += [pixel_reshape]
 
-                return pixel_correct
+                return pixel_corrected
 
             else:
                 return []
@@ -217,121 +230,19 @@ class Roi(object):
         else:
             return roi_slice
 
-    @staticmethod
-    def line_deconstruction(lines, position):
-        n = 0
-        line_values = []
-        for ii, p in enumerate(position):
-            if ii == 0:
-                n = len(p)
-                line_splits = [1, len(p)]
-            else:
-                line_idx = n + 2
-                n = line_idx + len(p) - 1
-                line_splits = [line_idx, line_idx + len(p) - 1]
-            line_values += [[lines[line_splits[0]], lines[line_splits[1]]]]
-
-        line_values = np.vstack(line_values)
-
-        order_idx = []
-        m = 0
-        while m >= 0:
-            if line_values[m, 0] == line_values[m, 1]:
-                order_idx += [[m]]
-
-                combined_idx = np.sort(np.abs([item for sublist in order_idx for item in sublist]))
-                mm = [ii for ii in range(line_values.shape[0]) if ii not in combined_idx]
-                if len(mm) > 0:
-                    m = mm[0]
-                else:
-                    m = -100
-
-            else:
-                hold_idx = [m]
-                initial_value = line_values[m, 0]
-                value = line_values[m, 1]
-                n = 0
-                while n >= 0:
-                    check_1 = [idx for idx in np.where(line_values[:, 0] == value)[0] if idx != m and idx != n]
-                    check_2 = [idx for idx in np.where(line_values[:, 1] == value)[0] if idx != m and idx != n]
-
-                    if len(check_1) > 0:
-                        hold_idx += [check_1[0]]
-                        if line_values[check_1[0], 1] == initial_value:
-                            order_idx += [hold_idx]
-                            n = -100
-
-                            combined_idx = np.sort(np.abs([item for sublist in order_idx for item in sublist]))
-                            mm = [ii for ii in range(line_values.shape[0]) if ii not in combined_idx]
-                            if len(mm) > 0:
-                                m = mm[0]
-                            else:
-                                m = -100
-
-                        else:
-                            n = check_1[0]
-                            value = line_values[n, 1]
-
-                    elif len(check_2) > 0:
-                        hold_idx += [-check_2[0]]
-                        if line_values[check_2[0], 0] == initial_value:
-                            order_idx += [hold_idx]
-                            n = -100
-
-                            combined_idx = np.sort(np.abs([item for sublist in order_idx for item in sublist]))
-                            mm = [ii for ii in range(line_values.shape[0]) if ii not in combined_idx]
-                            if len(mm) > 0:
-                                m = mm[0]
-                            else:
-                                m = -100
-
-                        else:
-                            n = check_2[0]
-                            value = line_values[n, 0]
-
-                    else:
-                        print('fail')
-                        n = -100
-                        m = -100
-
-        position_correction = []
-        for idx in order_idx:
-            if isinstance(idx, int):
-                position_correction += [position[idx]]
-
-            else:
-                position_hold = []
-                for ii in idx:
-                    if ii >= 0:
-                        position_hold += [position[ii]]
-                    else:
-                        position_hold += [np.flip(position[np.abs(ii)], axis=0)]
-
-                position_correction += [np.vstack(position_hold)]
-
-        return position_correction
-
-    def pixel_slice_correction(self, pixels, plane):
-        pixel_corrected = []
-        for pixel in pixels:
-
-            if plane in 'Axial':
-                pixel_reshape = pixel[:, :2]
-                pixel_corrected += [np.asarray([pixel_reshape[:, 0],
-                                                self.image.dimensions[1] - pixel_reshape[:, 1]]).T]
-
-            elif plane == 'Coronal':
-                pixel_reshape = np.column_stack((pixel[:, 0], pixel[:, 2]))
-                pixel_corrected += [pixel_reshape]
-
-            else:
-                pixel_reshape = pixel[:, 1:]
-                pixel_corrected += [pixel_reshape]
-
-        return pixel_corrected
-
     def update_pixel(self, pixel, plane='Axial'):
         self.plane = plane
         self.contour_pixel = pixel
         self.contour_position = self.convert_pixel_to_position(pixel=pixel)
-        self.create_mesh()
+
+        self.create_discrete_mesh()
+        self.create_display_mesh()
+
+    def update_mesh(self, mesh):
+        self.mesh = mesh
+        self.volume = mesh.volume
+        self.com = mesh.center
+        self.bounds = mesh.bounds
+
+        self.contour_pixel = None
+        self.contour_position = None
