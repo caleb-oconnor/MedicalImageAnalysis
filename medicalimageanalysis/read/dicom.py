@@ -118,11 +118,6 @@ class DicomReader(object):
                     for image in images_in_modality:
                         self.ds_modality[modality] += [image]
 
-                elif modality == 'RTSTRUCT':
-                    for image in images_in_modality:
-                        if 'StructureSetROISequence' in image and 'ROIContourSequence' in image:
-                            self.ds_modality[modality] += [image]
-
                 else:
                     sorting_tags = []
                     for img in images_in_modality:
@@ -287,12 +282,11 @@ class DicomReader(object):
 
         for modality in ['RTSTRUCT']:
             for image_set in self.ds_modality[modality]:
-                if modality == 'RTSTRUCT':
-                    read_rtstruct = ReadRTStruct(image_set, self.reader.only_tags)
-                    if read_rtstruct.match_image_name is not None:
-                        Data.images[read_rtstruct.match_image_name].input_rtstruct(read_rtstruct)
-                    else:
-                        print('dicom: rtstruct has no matching image')
+                read_rtstruct = ReadRTStruct(image_set, self.reader.only_tags)
+                if read_rtstruct.match_image_name is not None:
+                    Data.images[read_rtstruct.match_image_name].input_rtstruct(read_rtstruct)
+                else:
+                    print('dicom: rtstruct has no matching image')
 
 
 class Read3D(object):
@@ -636,13 +630,13 @@ class ReadXRay(object):
 
     def _compute_dimensions(self):
         if self.plane == 'Axial':
-            return np.asarray([self.image_set[0]['Columns'].value, self.image_set[0]['Rows'].value, 1])
+            return np.asarray([1, self.image_set[0]['Rows'].value, self.image_set[0]['Columns'].value])
 
         elif self.plane == 'Coronal':
-            return np.asarray([self.image_set[0]['Columns'].value, 1, self.image_set[0]['Rows'].value])
+            return np.asarray([self.image_set[0]['Rows'].value, 1, self.image_set[0]['Columns'].value])
 
         else:
-            return np.asarray([1, self.image_set[0]['Columns'].value, self.image_set[0]['Rows'].value])
+            return np.asarray([self.image_set[0]['Rows'].value, self.image_set[0]['Columns'].value, 1])
 
     def _compute_spacing(self):
         """
@@ -695,9 +689,9 @@ class ReadXRay(object):
         if self.plane == 'Axial':
             self.array = self.array.reshape((1, self.array.shape[0], self.array.shape[1]))
         elif self.plane == 'Coronal':
-            self.array = self.array.reshape((self.array.shape[0], 1, self.array.shape[1]))
+            self.array = np.flip(np.flip(self.array.reshape((self.array.shape[0], 1, self.array.shape[1])), axis=0), axis=1)
         else:
-            self.array = self.array.reshape((self.array.shape[0], self.array.shape[1], 1))
+            self.array = np.flip(self.array.reshape((self.array.shape[0], self.array.shape[1], 1)), axis=0)
 
 
 class ReadRF(object):
@@ -832,7 +826,7 @@ class ReadUS(object):
         self.orientation = [1, 0, 0, 0, 1, 0]
         self.origin = np.asarray([0, 0, 0])
         self.image_matrix = np.identity(3, dtype=np.float32)
-        self.dimensions = np.asarray([self.image_set[0]['Columns'].value, self.image_set[0]['Rows'].value, 1])
+        self.dimensions = np.asarray([1, self.image_set[0]['Rows'].value, self.image_set[0]['Columns'].value])
 
         self.array = None
         if not self.only_tags:
@@ -855,13 +849,15 @@ class ReadUS(object):
         if len(us_data.shape) == 3:
             us_binary = (1 * (np.std(us_data, axis=2) == 0) == 1)
             self.array = (us_binary * us_data[:, :, 0]).astype('uint8')
+            if len(self.array.shape) == 2:
+                self.array = np.expand_dims(self.array, axis=0)
 
         else:
             us_binary = (1 * (np.std(us_data, axis=3) == 0) == 1)
             self.array = (us_binary * us_data[:, :, :, 0]).astype('uint8')
 
-        if len(self.array.shape) > 3:
-            self.dimensions[2] = self.array.shape[0]
+        if len(self.array.shape) == 3:
+            self.dimensions[0] = self.array.shape[0]
 
     def _compute_spacing(self):
         inplane_spacing = [1, 1]
