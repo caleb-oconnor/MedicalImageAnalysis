@@ -118,24 +118,28 @@ class DicomReader(object):
                     for image in images_in_modality:
                         self.ds_modality[modality] += [image]
 
-                elif modality == 'RTSTRUCT':
-                    for image in images_in_modality:
-                        if 'StructureSetROISequence' in image and 'ROIContourSequence' in image:
-                            self.ds_modality[modality] += [image]
-
                 else:
-                    sorting_tags = np.asarray([[img['SeriesInstanceUID'].value, img['AcquisitionNumber'].value] if
-                                               'AcquisitionNumber' in img and img['AcquisitionNumber'].value is not None
-                                               else [img['SeriesInstanceUID'].value, 1] for img in images_in_modality])
+                    sorting_tags = []
+                    for img in images_in_modality:
+                        orient = np.asarray(img['ImageOrientationPatient'].value)
+                        pos = np.asarray(img['ImagePositionPatient'].value)
+                        if 'AcquisitionNumber' in img and img['AcquisitionNumber'].value is not None:
+                            acq = np.int64(img['AcquisitionNumber'].value)
+                        else:
+                            acq = 1
 
-                    unique_tags = np.unique(sorting_tags, axis=0)
-                    for tag in unique_tags:
-                        sorted_idx = np.where((sorting_tags[:, 0] == tag[0]) & (sorting_tags[:, 1] == tag[1]))
-                        image_tags = [images_in_modality[idx] for idx in sorted_idx[0] if 'ImageOrientationPatient' in images_in_modality[idx] and 'ImagePositionPatient' in images_in_modality[idx]]
+                        sorting_tags += [[img['SeriesInstanceUID'].value, acq, orient[0], orient[1], orient[2],
+                                         orient[3], orient[4], orient[5], pos[0], pos[1], pos[2]]]
+                    sorting_tags = np.asarray(sorting_tags)
+                    unique_series = np.unique(np.asarray(sorting_tags[:, 0]), axis=0)
+                    for series in unique_series:
+                        idx = np.where(sorting_tags[:, 0] == series)
+                        series_tags = sorting_tags[idx[0], :]
+                        series_image = [images_in_modality[ii] for ii in idx[0]]
 
-                        orientations = np.asarray([img['ImageOrientationPatient'].value for img in image_tags])
+                        orientations = series_tags[:, 2:8].astype(np.float64)
                         _, indices = np.unique(np.round(orientations, 3), axis=0, return_index=True)
-                        unique_orientations = [orientations[ind] for ind in indices]
+                        unique_orientations = [orientations[ind].astype(np.float64) for ind in indices]
                         for orient in unique_orientations:
                             orient_idx = np.where((np.round(orientations[:, 0], 3) == np.round(orient[0], 3)) &
                                                   (np.round(orientations[:, 1], 3) == np.round(orient[1], 3)) &
@@ -144,10 +148,9 @@ class DicomReader(object):
                                                   (np.round(orientations[:, 4], 3) == np.round(orient[4], 3)) &
                                                   (np.round(orientations[:, 5], 3) == np.round(orient[5], 3)))
 
-                            orient_tags = [image_tags[idx] for idx in orient_idx[0]]
-                            correct_orientation = orient_tags[0]['ImageOrientationPatient'].value
-
-                            position_tags = np.asarray([t['ImagePositionPatient'].value for t in orient_tags])
+                            orient_tags = np.asarray([series_tags[orient] for orient in orient_idx[0]])
+                            orient_image = [series_image[orient] for orient in orient_idx[0]]
+                            correct_orientation = orient_tags[0, 2:8].astype(np.float64)
 
                             x = np.abs(correct_orientation[0]) + np.abs(correct_orientation[3])
                             y = np.abs(correct_orientation[1]) + np.abs(correct_orientation[4])
@@ -156,23 +159,104 @@ class DicomReader(object):
                             row_direction = correct_orientation[:3]
                             column_direction = correct_orientation[3:]
                             slice_direction = np.cross(row_direction, column_direction)
-                            if x < y and x < z:
-                                if slice_direction[0] > 0:
-                                    slice_idx = np.argsort(position_tags[:, 0])
-                                else:
-                                    slice_idx = np.argsort(position_tags[:, 0])[::-1]
-                            elif y < x and y < z:
-                                if slice_direction[1] > 0:
-                                    slice_idx = np.argsort(position_tags[:, 1])
-                                else:
-                                    slice_idx = np.argsort(position_tags[:, 1])[::-1]
-                            else:
-                                if slice_direction[2] > 0:
-                                    slice_idx = np.argsort(position_tags[:, 2])
-                                else:
-                                    slice_idx = np.argsort(position_tags[:, 2])[::-1]
 
-                            self.ds_modality[modality] += [[orient_tags[idx] for idx in slice_idx]]
+                            unique_acq = np.unique(orient_tags[:, 1])
+
+                            acq_plane = []
+                            acq_images = []
+                            acq_positions = []
+                            for acq in unique_acq:
+                                orient_idx = np.where(orient_tags == acq)[0]
+                                acq_tags = orient_tags[orient_idx]
+                                acq_image = [orient_image[ii] for ii in orient_idx]
+                                position_tags = np.asarray([np.asarray(t[8:]).astype(np.double) for t in acq_tags])
+
+                                if x < y and x < z:
+                                    acq_plane += ['Sagittal']
+                                    if slice_direction[0] > 0:
+                                        slice_idx = np.argsort(position_tags[:, 0])
+                                    else:
+                                        slice_idx = np.argsort(position_tags[:, 0])[::-1]
+                                elif y < x and y < z:
+                                    acq_plane += ['Coronal']
+                                    if slice_direction[1] > 0:
+                                        slice_idx = np.argsort(position_tags[:, 1])
+                                    else:
+                                        slice_idx = np.argsort(position_tags[:, 1])[::-1]
+                                else:
+                                    acq_plane += ['Axial']
+                                    if slice_direction[2] > 0:
+                                        slice_idx = np.argsort(position_tags[:, 2])
+                                    else:
+                                        slice_idx = np.argsort(position_tags[:, 2])[::-1]
+
+                                acq_images += [np.asarray([acq_image[idx] for idx in slice_idx])]
+                                acq_positions += [np.asarray([acq_tags[idx] for idx in slice_idx])]
+
+                            if len(acq_positions) > 1:
+                                exclude_images = np.zeros((len(acq_positions), 1))
+                                for ii in range(len(acq_positions)):
+                                    for jj in range(len(acq_positions)):
+                                        if ii != jj:
+                                            if acq_plane[0] == 'Sagittal':
+                                                base_first = acq_positions[ii][0, 8]
+                                                base_last = acq_positions[ii][-1, 8]
+                                                check_first = acq_positions[jj][0, 8]
+                                                check_last = acq_positions[jj][-1, 8]
+                                            elif acq_plane[0] == 'Coronal':
+                                                base_first = acq_positions[ii][0, 9]
+                                                base_last = acq_positions[ii][-1, 9]
+                                                check_first = acq_positions[jj][0, 9]
+                                                check_last = acq_positions[jj][-1, 9]
+                                            else:
+                                                base_first = acq_positions[ii][0, 10]
+                                                base_last = acq_positions[ii][-1, 10]
+                                                check_first = acq_positions[jj][0, 10]
+                                                check_last = acq_positions[jj][-1, 10]
+
+                                            base_first = np.float64(base_first)
+                                            base_last = np.float64(base_last)
+                                            check_first = np.float64(check_first)
+                                            check_last = np.float64(check_last)
+
+                                            if base_first > check_first and base_first > check_last:
+                                                pass
+
+                                            elif base_last < check_first and base_last < check_last:
+                                                pass
+
+                                            else:
+                                                exclude_images[ii] = 1
+
+                                if np.sum(exclude_images) == 0:
+                                    if acq_plane[0] == 'Sagittal':
+                                        pos = np.asarray([[p[0, 8], p[-1, 8]] for p in acq_positions])
+                                    elif acq_plane[0] == 'Coronal':
+                                        pos = np.asarray([[p[0, 9], p[-1, 9]] for p in acq_positions])
+                                    else:
+                                        pos = np.asarray([[p[0, 10], p[-1, 10]] for p in acq_positions]).astype(np.float64)
+
+                                    pos_idx = np.argsort(pos[:, 0])
+                                    pos_sort = pos[pos_idx]
+                                    pos_diff = [pos_sort[ii + 1, 0] - pos_sort[ii, 1] for ii in range(len(pos) - 1)]
+                                    if len(np.unique(np.round(pos_diff, 2))) == 1:
+                                        img = []
+                                        for ii in pos_idx:
+                                            for acq in acq_images[ii]:
+                                                img += [acq]
+                                        self.ds_modality[modality] += [img]
+
+                                    else:
+                                        for img in acq_images:
+                                            self.ds_modality[modality] += [img.tolist()]
+
+                                else:
+                                    for img in acq_images:
+                                        self.ds_modality[modality] += [img.tolist()]
+
+                            else:
+                                for img in acq_images:
+                                    self.ds_modality[modality] += [img.tolist()]
 
     def image_creation(self):
         """
@@ -198,12 +282,11 @@ class DicomReader(object):
 
         for modality in ['RTSTRUCT']:
             for image_set in self.ds_modality[modality]:
-                if modality == 'RTSTRUCT':
-                    read_rtstruct = ReadRTStruct(image_set, self.reader.only_tags)
-                    if read_rtstruct.match_image_name is not None:
-                        Data.images[read_rtstruct.match_image_name].input_rtstruct(read_rtstruct)
-                    else:
-                        print('dicom: rtstruct has no matching image')
+                read_rtstruct = ReadRTStruct(image_set, self.reader.only_tags)
+                if read_rtstruct.match_image_name is not None:
+                    Data.images[read_rtstruct.match_image_name].input_rtstruct(read_rtstruct)
+                else:
+                    print('dicom: rtstruct has no matching image')
 
 
 class Read3D(object):
@@ -547,13 +630,13 @@ class ReadXRay(object):
 
     def _compute_dimensions(self):
         if self.plane == 'Axial':
-            return np.asarray([self.image_set[0]['Columns'].value, self.image_set[0]['Rows'].value, 1])
+            return np.asarray([1, self.image_set[0]['Rows'].value, self.image_set[0]['Columns'].value])
 
         elif self.plane == 'Coronal':
-            return np.asarray([self.image_set[0]['Columns'].value, 1, self.image_set[0]['Rows'].value])
+            return np.asarray([self.image_set[0]['Rows'].value, 1, self.image_set[0]['Columns'].value])
 
         else:
-            return np.asarray([1, self.image_set[0]['Columns'].value, self.image_set[0]['Rows'].value])
+            return np.asarray([self.image_set[0]['Rows'].value, self.image_set[0]['Columns'].value, 1])
 
     def _compute_spacing(self):
         """
@@ -606,9 +689,9 @@ class ReadXRay(object):
         if self.plane == 'Axial':
             self.array = self.array.reshape((1, self.array.shape[0], self.array.shape[1]))
         elif self.plane == 'Coronal':
-            self.array = self.array.reshape((self.array.shape[0], 1, self.array.shape[1]))
+            self.array = np.flip(np.flip(self.array.reshape((self.array.shape[0], 1, self.array.shape[1])), axis=0), axis=1)
         else:
-            self.array = self.array.reshape((self.array.shape[0], self.array.shape[1], 1))
+            self.array = np.flip(self.array.reshape((self.array.shape[0], self.array.shape[1], 1)), axis=0)
 
 
 class ReadRF(object):
@@ -743,7 +826,7 @@ class ReadUS(object):
         self.orientation = [1, 0, 0, 0, 1, 0]
         self.origin = np.asarray([0, 0, 0])
         self.image_matrix = np.identity(3, dtype=np.float32)
-        self.dimensions = np.asarray([self.image_set[0]['Columns'].value, self.image_set[0]['Rows'].value, 1])
+        self.dimensions = np.asarray([1, self.image_set[0]['Rows'].value, self.image_set[0]['Columns'].value])
 
         self.array = None
         if not self.only_tags:
@@ -766,13 +849,15 @@ class ReadUS(object):
         if len(us_data.shape) == 3:
             us_binary = (1 * (np.std(us_data, axis=2) == 0) == 1)
             self.array = (us_binary * us_data[:, :, 0]).astype('uint8')
+            if len(self.array.shape) == 2:
+                self.array = np.expand_dims(self.array, axis=0)
 
         else:
             us_binary = (1 * (np.std(us_data, axis=3) == 0) == 1)
             self.array = (us_binary * us_data[:, :, :, 0]).astype('uint8')
 
-        if len(self.array.shape) > 3:
-            self.dimensions[2] = self.array.shape[0]
+        if len(self.array.shape) == 3:
+            self.dimensions[0] = self.array.shape[0]
 
     def _compute_spacing(self):
         inplane_spacing = [1, 1]

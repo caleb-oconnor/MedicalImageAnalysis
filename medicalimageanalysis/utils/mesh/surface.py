@@ -163,12 +163,26 @@ class Refinement(object):
         return midpoint_unique, midline_unique
 
 
+def clean_mesh(mesh):
+    mesh = mesh.copy()
+
+    meshfix = pymeshfix.PyTMesh()
+    meshfix.load_array(mesh.points, mesh.faces.reshape((-1, 4))[:, 1:])
+    meshfix.clean()
+
+    verts, faces = meshfix.return_arrays()
+    new_faces = np.insert(faces, 0, 3, axis=1)
+    corrected_mesh = pv.PolyData(verts, new_faces)
+
+    return corrected_mesh
+
+
 def expansion(mesh, dist):
     mesh = mesh.copy()
     mesh.points += mesh.point_normals * dist
 
     meshfix = pymeshfix.PyTMesh()
-    meshfix.load_array(expanded_mesh.points, expanded_mesh.faces.reshape((-1, 4))[:, 1:])
+    meshfix.load_array(mesh.points, mesh.faces.reshape((-1, 4))[:, 1:])
     meshfix.clean()
 
     verts, faces = meshfix.return_arrays()
