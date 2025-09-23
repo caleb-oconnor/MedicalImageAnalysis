@@ -88,6 +88,9 @@ class Display(object):
         return position_to_pixel_matrix
 
     def compute_mesh_slice(self, roi_name=None, location=None, slice_plane=None, return_pixel=False):
+        if self.rigid.rois[roi_name] is None:
+            self.rigid.update_rois(roi_name=roi_name)
+
         matrix = np.identity(4)
         if slice_plane == 'Axial':
             normal = matrix[:3, 2]
@@ -259,6 +262,9 @@ class Rigid(object):
         else:
             self.combo_matrix = combo_matrix
 
+        self.slices = {'reference': ['All'], 'moving': ['All']}
+        self.visual = {'reference': None, 'moving': None, 'opacity': 0.5, 'multicolor': None}
+
         self.misc = {}
         self.rotation_center = np.asarray([0, 0, 0])
         self.rigid_name = self.add_rigid(rigid_name)
@@ -287,21 +293,32 @@ class Rigid(object):
 
     def compute_icp_vtk(self, source_mesh, target_mesh, distance=1e-5, iterations=1000, landmarks=None,
                         com_matching=True, inverse=True):
-        mov.transform(self.matrix @ self.combo_matrix, inplace=True)
+        target_mesh.transform(self.matrix @ self.combo_matrix, inplace=True)
 
         icp = ICP(source_mesh, target_mesh)
         icp.compute_vtk(distance=distance, iterations=iterations, landmarks=landmarks, com_matching=com_matching,
                         inverse=inverse)
         self.matrix = icp.get_matrix()
-        self.update_mesh(all_rois=True)
+        self.update_rois(all_rois=True)
+
+    def copy_roi(self, roi_name=None, inverse=False):
+        if roi_name in list(self.rois.keys()):
+            reference_roi = Data.images[self.reference_name].rois[roi_name]
+            moving_roving = Data.images[self.moving_name].rois[roi_name]
+            if inverse and self.rois[roi_name] is not None:
+                reference_roi.mesh = self.rois[roi_name].transform(self.matrix @ self.combo_matrix, inplace=False)
+            elif reference_roi.mesh is not None:
+                moving_roving.mesh = reference_roi.mesh.transform(np.linalg.inv(self.matrix @ self.combo_matrix),
+                                                                  inplace=False)
+                self.update_rois(roi_name=roi_name)
 
     def pre_alignment(self, superior=False, center=False, origin=False):
         if superior:
             pass
         elif center:
-            self.matrix[:3, 3] = Data.images[self.reference_name].origin - Data.images[self.moving_name].origin
-        elif origin:
             pass
+        elif origin:
+            self.matrix[:3, 3] = Data.images[self.reference_name].origin - Data.images[self.moving_name].origin
 
     def retrieve_angles(self, order='ZXY'):
         rotation = Rotation.from_matrix(self.matrix[:3, :3])
@@ -341,7 +358,7 @@ class Rigid(object):
         self.matrix = new_matrix @ self.matrix
         self.display.compute_reslice()
         self.display.compute_scroll_max()
-        self.update_mesh(all_rois=True)
+        self.update_rois(all_rois=True)
 
     def update_translation(self, t_x=0, t_y=0, t_z=0):
         new_matrix = np.identity(4)
@@ -356,17 +373,24 @@ class Rigid(object):
 
         self.display.compute_offset()
         self.display.compute_scroll_max()
-        self.update_mesh(all_rois=True)
+        self.update_rois(all_rois=True)
 
-    def update_mesh(self, roi_name=None, all_rois=False):
+    def update_rois(self, roi_name=None, all_rois=False):
+        for name in list(self.rois.keys()):
+            if name not in Data.roi_list:
+                del self.rois[name]
+
+        for name in Data.roi_list:
+            if name not in list(self.rois.keys()):
+                self.rois[name] = None
+
         if all_rois:
             for roi_name in Data.roi_list:
                 roi = Data.images[self.moving_name].rois[roi_name]
-                if roi.mesh is not None:
-                    self.rois[roi_name].transform(self.matrix @ self.combo_matrix, inplace=True)
+                if roi.mesh is not None and roi.visible:
+                    self.rois[roi_name] = roi.mesh.transform(self.matrix @ self.combo_matrix, inplace=False)
 
         else:
             roi = Data.images[self.moving_name].rois[roi_name]
             if roi.mesh is not None and roi.visible:
-                self.rois[roi_name].transform(self.matrix @ self.combo_matrix, inplace=True)
-
+                self.rois[roi_name] = roi.mesh.transform(self.matrix @ self.combo_matrix, inplace=False)
