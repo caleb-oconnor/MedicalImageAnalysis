@@ -242,7 +242,8 @@ class ModelToMask:
     Converts a 3D model/s into a mask. The mask can either be an empty array (default) or a binary mask of the model/s.
     The mask is given a spacing buffer of 5 indexes on each side x, y, z.
     """
-    def __init__(self, models, empty_array=True, convert=True):
+    def __init__(self, models, origin=None, spacing=None, dims=None, slice_locations=None, matrix=None,
+                 empty_array=True, convert=True):
         """
 
         Parameters
@@ -254,25 +255,25 @@ class ModelToMask:
         self.models = models
         self.empty_array = empty_array
 
+        self.spacing = spacing
+        self.origin = origin
+        self.dims = dims
+        self.slice_locations = slice_locations
+
+        if matrix is None:
+            self.matrix = np.identity(4)
+        else:
+            self.matrix = matrix
+
         self.bounds = None
-        self.spacing = None
-        self.dims = None
-        self.slice_locations = None
 
         self.contours = []
         self.mask = None
-        self.origin = None
 
         if convert:
             self.compute_bounds()
             self.compute_contours()
             self.compute_mask()
-
-    def set_bounds(self, bounds):
-        self.bounds = bounds
-
-    def set_spacing(self, spacing):
-        self.spacing = spacing
 
     def compute_bounds(self):
         """
@@ -330,7 +331,7 @@ class ModelToMask:
 
     def compute_mask(self):
         """
-        Default is an empty array. Use the computed contours to fill the mask, not needed if the user wants a empty
+        Default is an empty array. Use the computed contours to fill the mask, not needed if the user wants an empty
         array.
         Returns
         -------
@@ -344,7 +345,6 @@ class ModelToMask:
                 for jj, s in enumerate(self.slice_locations):
                     if len(model_contours[jj]) > 0:
                         frame = np.zeros((self.dims[1], self.dims[2]))
-                        # noinspection PyTypeChecker
                         cv2.fillPoly(frame, np.array([model_contours[jj]], dtype=np.int32), 1)
                         self.mask[jj, :, :] = self.mask[jj, :, :] + frame
 
