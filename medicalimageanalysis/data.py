@@ -4,7 +4,6 @@ class Data(object):
     rigid = {}
     deformable = []
     dose = []
-    meshes = []
 
     image_list = []
     roi_list = []
@@ -16,7 +15,6 @@ class Data(object):
         cls.rigid = {}
         cls.deformable = []
         cls.dose = []
-        cls.meshes = []
 
         cls.image_list = []
         cls.roi_list = []
