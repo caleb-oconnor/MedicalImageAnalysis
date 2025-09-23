@@ -43,14 +43,12 @@ class Roi(object):
             self.contour_pixel = None
 
         self.mesh = None
-
         self.volume = None
         self.com = None
         self.bounds = None
 
-        self.opacity = None
-        self.multi_color = None
         self.fixed_name = False
+        self.visual = {'2d': None, '3d': None, 'opacity': None, 'multicolor': None}
         self.misc = {}
 
     def add_mesh(self, mesh):
@@ -239,3 +237,12 @@ class Roi(object):
 
         self.create_discrete_mesh()
         self.create_display_mesh()
+
+    def update_mesh(self, mesh):
+        self.mesh = mesh
+        self.volume = mesh.volume
+        self.com = mesh.center
+        self.bounds = mesh.bounds
+
+        self.contour_pixel = None
+        self.contour_position = None
