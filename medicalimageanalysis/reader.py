@@ -211,11 +211,12 @@ class Reader(Data):
             vtk_reader.input_files(files)
         vtk_reader.load()
 
-    def read_3mf(self, files=None, create_image=False, match_image=None):
-        mf3_reader = ThreeMfReader(self, create_image=create_image)
+    def read_3mf(self, files=None, roi_names=None):
+        mf3_reader = ThreeMfReader(self, roi_names=roi_names)
         if files is not None:
             mf3_reader.input_files(files)
         mf3_reader.load()
+        Data.match_rois()
 
 
 if __name__ == '_main__':
