@@ -232,7 +232,7 @@ class Image(object):
 
         self.plane = image.plane
         self.spacing = image.spacing
-        self.dimensions = np.asarray(self.array.shape)
+        self.dimensions = image.dimensions
         self.orientation = image.orientation
         self.origin = image.origin
         self.matrix = image.image_matrix
