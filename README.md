@@ -6,7 +6,7 @@ It can read unorganized DICOM and RTSTRUCTs files, automatically organizing them
 The platform supports both 2D and 3D modalities, with the ability to convert 2D contours to 3D surface meshes and 
 vice versa. It also provides rigid registration between images, along with a variety of standard image processing 
 techniques, enabling seamless integration into research and clinical workflows. There are additional reader file
-types for nifti, mhd, stl, and 3mf. For stl/3mf a fake image is generated based on the boundary of the input mesh.
+types for stl and 3mf, where a fake image is generated based on the boundary of the input mesh.
 
 The module currently imports 6 different modalities:
 1. CT
