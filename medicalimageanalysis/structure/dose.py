@@ -13,14 +13,16 @@ Structure:
 
 import os
 
+import numpy as np
+
 
 class Dose(object):
-    def __init__(self, image):
-        self.tags = image.image_set
-        self.array = image.array
+    def __init__(self, dose):
+        self.tags = dose.image_set
+        self.array = dose.array
 
-        self.image_name = image.image_name
-        self.modality = image.modality
+        self.dose_name = dose.dose_name
+        self.modality = dose.modality
 
         self.patient_name = self.get_patient_name()
         self.mrn = self.get_mrn()
@@ -32,20 +34,18 @@ class Dose(object):
         self.frame_ref = self.get_frame_ref()
         self.window = self.get_window()
 
-        self.filepaths = image.filepaths
-        self.sops = image.sops
+        self.filepaths = dose.filepaths
+        self.sops = dose.sops
 
-        self.plane = image.plane
-        self.spacing = image.spacing
-        self.dimensions = image.dimensions
-        self.orientation = image.orientation
-        self.origin = image.origin
-        self.matrix = image.image_matrix
+        self.plane = dose.plane
+        self.spacing = dose.spacing
+        self.dimensions = dose.dimensions
+        self.orientation = dose.orientation
+        self.origin = dose.origin
+        self.matrix = dose.image_matrix
 
         self.camera_position = None
         self.misc = {}
-
-        self.display = Display(self)
 
     def get_patient_name(self):
         if 'PatientName' in self.tags[0]:
