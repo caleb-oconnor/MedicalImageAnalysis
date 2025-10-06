@@ -67,9 +67,8 @@ class Roi(object):
         self.com = None
         self.bounds = None
 
-        self.opacity = None
-        self.multi_color = None
         self.fixed_name = False
+        self.visual = {'2d': None, '3d': None, 'opacity': None, 'multicolor': None}
         self.misc = {}
 
     def convert_position_to_pixel(self, position=None):
@@ -205,6 +204,22 @@ class Roi(object):
             if roi_slice.number_of_points > 0:
                 roi_strip = roi_slice.strip(max_length=10000000)
 
+                # colors = None
+                # if self.multi_color:
+                #     strip_colors = roi_strip['colors']
+                #
+                #     position = []
+                #     colors = []
+                #     for cell in roi_strip.cell:
+                #         position += [np.asarray(roi_strip.points[cell.point_ids])]
+                #         colors += [np.asarray(strip_colors[cell.point_ids])]
+                #
+                # else:
+                #     position = []
+                #     for cell in roi_strip.cell:
+                #         position += [np.asarray(roi_strip.points[cell.point_ids])]
+
+                colors = None
                 position = [np.asarray(c.points) for c in roi_strip.cell]
                 pixels = self.convert_position_to_pixel(position=position)
                 pixel_corrected = []
@@ -222,13 +237,17 @@ class Roi(object):
                         pixel_reshape = pixel[:, 1:] + offset
                         pixel_corrected += [pixel_reshape]
 
-                return pixel_corrected
+                return pixel_corrected, colors
 
             else:
-                return []
+                return [], None
 
         else:
-            return roi_slice
+            colors = None
+            if self.multi_color:
+                colors = roi_slice['colors']
+
+            return roi_slice, colors
 
     def update_pixel(self, pixel, plane='Axial'):
         self.plane = plane

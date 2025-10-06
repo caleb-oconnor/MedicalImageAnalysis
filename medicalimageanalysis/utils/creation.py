@@ -1,3 +1,15 @@
+"""
+Morfeus lab
+The University of Texas
+MD Anderson Cancer Center
+Author - Caleb O'Connor
+Email - csoconnor@mdanderson.org
+
+Description:
+
+Structure:
+
+"""
 
 import os
 import datetime
@@ -202,7 +214,7 @@ class CreateImageFromMask(object):
         self.image_set = [ds]
 
     def add_mesh_roi(self, mesh, roi_name):
-        Data.images[self.image_name].create_roi(self, name=roi_name, color=[0, 0, 255], visible=False, filepath=None)
+        Data.image[self.image_name].create_roi(self, name=roi_name, color=[0, 0, 255], visible=False, filepath=None)
         self.rois[roi_name].mesh = mesh
         
         self.rois[roi_name].volume = mesh.volume
