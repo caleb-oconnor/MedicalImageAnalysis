@@ -101,7 +101,7 @@ class ThreeMfReader(object):
         Data.images[image_name] = Image(new_image)
         Data.image_list += [image_name]
 
-        Data.images[image_name].create_roi(name=roi_name, visible=True, filepath=self.reader.files['3mf'])
+        Data.images[image_name].create_roi(name=roi_name, visible=False, filepath=self.reader.files['3mf'])
         Data.images[image_name].rois[roi_name].add_mesh(decimate_mesh)
         Data.images[image_name].rois[roi_name].color = [128, 128, 128]
         Data.images[image_name].rois[roi_name].multi_color = True
