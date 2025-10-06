@@ -31,11 +31,11 @@ from ..data import Data
 
 
 def sort_images_by_datetime():
-    date_time = [str(Data.images[name].date) + str(Data.images[name].time) for name in Data.image_list]
+    date_time = [str(Data.image[name].date) + str(Data.image[name].time) for name in Data.image_list]
     new_key_order = [Data.image_list[idx] for idx in np.argsort(date_time)]
 
-    Data.images = {key: Data.images[key] for key in new_key_order}
-    Data.image_list = list(Data.images.keys())
+    Data.image = {key: Data.image[key] for key in new_key_order}
+    Data.image_list = list(Data.image.keys())
 
 
 def thread_process_dicom(path, stop_before_pixels=False):
@@ -285,7 +285,7 @@ class DicomReader(object):
             for image_set in self.ds_modality[modality]:
                 read_rtstruct = ReadRTStruct(image_set, self.reader.only_tags)
                 if read_rtstruct.match_image_name is not None:
-                    Data.images[read_rtstruct.match_image_name].input_rtstruct(read_rtstruct)
+                    Data.image[read_rtstruct.match_image_name].input_rtstruct(read_rtstruct)
                 else:
                     print('dicom: rtstruct has no matching image')
 
@@ -332,7 +332,7 @@ class Read3D(object):
         self.image_name = create_image_name(self.modality)
 
         image = Image(self)
-        Data.images[self.image_name] = image
+        Data.image[self.image_name] = image
         Data.image_list += [self.image_name]
 
     def _compute_array(self):
@@ -618,7 +618,7 @@ class ReadXRay(object):
         self.image_name = create_image_name(self.modality)
 
         image = Image(self)
-        Data.images[self.image_name] = image
+        Data.image[self.image_name] = image
         Data.image_list += [self.image_name]
 
     def _compute_plane(self):
@@ -734,7 +734,7 @@ class ReadRF(object):
         self.image_name = create_image_name(self.modality)
 
         image = Image(self)
-        Data.images[self.image_name] = image
+        Data.image[self.image_name] = image
         Data.image_list += [self.image_name]
 
     def _compute_plane(self):
@@ -844,7 +844,7 @@ class ReadUS(object):
         self.image_name = create_image_name(self.modality)
 
         image = Image(self)
-        Data.images[self.image_name] = image
+        Data.image[self.image_name] = image
         Data.image_list += [self.image_name]
 
     def _compute_array(self):
@@ -958,9 +958,9 @@ class ReadRTStruct(object):
     def _match_with_image(self):
         match_image_name = None
 
-        for image_name in Data.images:
-            if self.series_uid == Data.images[image_name].series_uid:
-                if self._properties[0][4][0] in Data.images[image_name].sops:
+        for image_name in Data.image:
+            if self.series_uid == Data.image[image_name].series_uid:
+                if self._properties[0][4][0] in Data.image[image_name].sops:
                     match_image_name = image_name
 
         return match_image_name
@@ -1012,8 +1012,8 @@ class ReadRTDose(object):
         self.image_matrix = self._compute_image_matrix()
         self.dose_name = create_image_name(self.modality)
 
-        image = Dose(self)
-        Data.dose[self.dose_name] = image
+        dose = Dose(self)
+        Data.dose[self.dose_name] = dose
         Data.dose_list += [self.dose_name]
 
     def _compute_array(self):
