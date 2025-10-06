@@ -305,7 +305,7 @@ class ModelToMask:
             self.origin = [self.bounds[0], self.bounds[2], self.bounds[4]]
 
             self.slice_locations = [i for i in range(self.bounds[4], self.bounds[5], self.spacing[2])]
-            self.dims = [len(self.slice_locations), self.bounds[1] - self.bounds[0] + 1, self.bounds[3] - self.bounds[2] + 1]
+            self.dims = [len(self.slice_locations), self.bounds[3] - self.bounds[2] + 1, self.bounds[1] - self.bounds[0] + 1]
 
     def compute_contours(self):
         """
