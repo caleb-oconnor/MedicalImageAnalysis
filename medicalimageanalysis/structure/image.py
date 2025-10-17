@@ -609,6 +609,36 @@ class Image(object):
 
         return pv.PolyData(points, faces)
 
+    def compute_pixel(self, position):
+        matrix = copy.deepcopy(self.matrix)
+
+        hold_matrix = np.identity(3, dtype=np.float32)
+        hold_matrix[0, :] = matrix[0, :] / self.spacing[0]
+        hold_matrix[1, :] = matrix[1, :] / self.spacing[1]
+        hold_matrix[2, :] = matrix[2, :] / self.spacing[2]
+
+        position_to_pixel_matrix = np.identity(4, dtype=np.float32)
+        position_to_pixel_matrix[:3, :3] = hold_matrix
+        position_to_pixel_matrix[:3, 3] = np.asarray(self.origin).dot(-hold_matrix.T)
+
+        location = np.asarray([position[0], position[1], position[2], 1])
+
+        return (np.round(location.dot(position_to_pixel_matrix.T)[:3])).astype(np.int32)
+
+    def compute_position(self, xyz):
+        matrix = copy.deepcopy(self.matrix)
+
+        pixel_to_position_matrix = np.identity(4, dtype=np.float32)
+        pixel_to_position_matrix[:3, 0] = matrix[0, :] * self.spacing[0]
+        pixel_to_position_matrix[:3, 1] = matrix[1, :] * self.spacing[1]
+        pixel_to_position_matrix[:3, 2] = matrix[2, :] * self.spacing[2]
+        pixel_to_position_matrix[:3, 3] = self.origin
+
+        pixel_to_position_matrix = self.compute_matrix_pixel_to_position()
+        location = np.asarray([xyz[0], xyz[1], xyz[2], 1])
+
+        return location.dot(pixel_to_position_matrix.T)[:3]
+
     def reset_array(self):
         self.display.secondary_array = None
         self.display.matrix = copy.deepcopy(self.matrix)
