@@ -32,23 +32,11 @@ class ThreeMfReader(object):
     """
     Converts 3mf file to pyvista polydata mesh.
     """
-    def __init__(self, reader, roi_names=None):
-        self.reader = reader
-        self.roi_names = roi_names
-
-    def input_files(self, files):
-        self.reader.files['3mf'] = files
+    def __init__(self, file, roi_name=None):
+        self.file = file
+        self.roi_name = roi_name
 
     def load(self):
-        for ii, file_path in enumerate(self.reader.files['3mf']):
-            if len(self.roi_names) > 0 and self.roi_names[ii] is not None:
-                roi_name = self.roi_names[ii]
-            else:
-                roi_name = self.reader.files['3mf'][ii].split('/')[-1].split('.3mf')[0]
-
-            self.read(file_path, roi_name)
-
-    def read(self, path, roi_name):
         """
         Loads in the 3mf file, gets the vertices/vertice colors/triangles and creates a polydata 3D model using pyvista.
 
@@ -56,10 +44,15 @@ class ThreeMfReader(object):
         -------
 
         """
+        if self.roi_name is not None:
+            roi_name = self.roi_name
+        else:
+            roi_name = self.file.split('/')[-1].split('.3mf')[0]
+
         namespace = {"3mf": "http://schemas.microsoft.com/3dmanufacturing/core/2015/02",
                      "m": "http://schemas.microsoft.com/3dmanufacturing/material/2015/02"}
 
-        archive = zipfile.ZipFile(path, "r")
+        archive = zipfile.ZipFile(self.file, "r")
         root = ET.parse(archive.open("3D/3dmodel.model"))
         color_list = list()
         colors = root.findall('.//m:color', namespace)
@@ -98,13 +91,14 @@ class ThreeMfReader(object):
         mask = model_to_mask.mask
 
         new_image = CreateImageFromMask(mask, model_to_mask.origin, model_to_mask.spacing, image_name)
-        Data.images[image_name] = Image(new_image)
+        Data.image[image_name] = Image(new_image)
         Data.image_list += [image_name]
 
-        Data.images[image_name].create_roi(name=roi_name, visible=False, filepath=self.reader.files['3mf'])
-        Data.images[image_name].rois[roi_name].add_mesh(decimate_mesh)
-        Data.images[image_name].rois[roi_name].color = [128, 128, 128]
-        Data.images[image_name].rois[roi_name].multi_color = True
+        Data.image[image_name].create_roi(name=roi_name, visible=False, filepath=self.file)
+        Data.image[image_name].rois[roi_name].add_mesh(decimate_mesh)
+        Data.image[image_name].rois[roi_name].color = [128, 128, 128]
+        Data.image[image_name].rois[roi_name].multi_color = True
+        Data.match_rois()
 
     @staticmethod
     def color_avg(color_list, p1, p2, p3):
