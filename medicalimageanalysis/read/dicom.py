@@ -48,28 +48,19 @@ def thread_process_dicom(path, stop_before_pixels=False):
 
 
 class DicomReader(object):
-    def __init__(self, reader):
-        """
-        Takes in reader parent, which will be used to add to image list variable.
+    def __init__(self, files, only_tags, only_modality, only_load_roi_names, clear):
+        self.files = files
+        self.only_tags = only_tags
+        self.only_modality = only_modality
+        self.only_load_roi_names = only_load_roi_names
 
-        :param reader:
-        :type reader: object
-        """
-        self.reader = reader
+        if clear:
+            Data.clear()
 
         self.ds = []
-        self.ds_modality = {key: [] for key in ['CT', 'MR', 'PT', 'US', 'DX', 'RF', 'CR', 'RTSTRUCT', 'RTDOSE']}
+        self.ds_modality = {key: [] for key in ['CT', 'MR', 'PT', 'US', 'DX', 'RF', 'CR', 'RTSTRUCT', 'REG', 'RTDOSE']}
 
     def load(self, display_time=False):
-        """
-        Reads in the dicom files, separates the images by modality, lasty adds each image to the reader image list
-        variable.
-
-        :param display_time: prints the total read in time in seconds
-        :type display_time: bool
-        :return:
-        :rtype:
-        """
         t1 = time.time()
         self.read()
         self.separate_modalities_and_images()
@@ -89,9 +80,9 @@ class DicomReader(object):
         threads = []
 
         def read_file_thread(file_path):
-            self.ds.append(thread_process_dicom(file_path, stop_before_pixels=self.reader.only_tags))
+            self.ds.append(thread_process_dicom(file_path, stop_before_pixels=self.only_tags))
 
-        for file_path in self.reader.files['Dicom']:
+        for file_path in self.files['Dicom']:
             thread = threading.Thread(target=read_file_thread, args=(file_path,))
             threads.append(thread)
             thread.start()
@@ -114,8 +105,8 @@ class DicomReader(object):
         """
         for modality in list(self.ds_modality.keys()):
             images_in_modality = [d for d in self.ds if (0x0008, 0x0060) in d and d['Modality'].value == modality]
-            if len(images_in_modality) > 0 and modality in self.reader.only_modality:
-                if modality in ['US', 'DX', 'RF', 'CR', 'RTSTRUCT', 'RTDOSE']:
+            if len(images_in_modality) > 0 and modality in self.only_modality:
+                if modality in ['US', 'DX', 'RF', 'CR', 'RTSTRUCT', 'REG', 'RTDOSE']:
                     for image in images_in_modality:
                         self.ds_modality[modality] += [image]
 
@@ -261,8 +252,9 @@ class DicomReader(object):
 
     def image_creation(self):
         """
-        Currently only reading in 5 modalities (CT, MR, DX, US, RTSTRUCT) and using specific modality class readers.
-        First the image volume modalities are created, then RTSTRUCT is added to the image that it associates with.
+        Currently only reading in 5 modalities (CT, MR, DX, US, RTSTRUCT, REG, RTDOSE) and using specific modality class
+        readers. First the image volume modalities are created, then RTSTRUCT is added to the image that it associates
+        with.
 
         :return:
         :rtype:
@@ -270,20 +262,20 @@ class DicomReader(object):
         for modality in ['CT', 'MR', 'PT', 'DX', 'RF', 'CR', 'US']:
             for image_set in self.ds_modality[modality]:
                 if modality in ['CT', 'MR', 'PT']:
-                    Read3D(image_set, self.reader.only_tags)
+                    Read3D(image_set, self.only_tags)
 
                 elif modality in ['DX', 'CR']:
-                    ReadXRay(image_set, self.reader.only_tags)
+                    ReadXRay(image_set, self.only_tags)
 
                 elif modality == 'RF':
-                    ReadRF(image_set, self.reader.only_tags)
+                    ReadRF(image_set, self.only_tags)
 
                 elif modality == 'US':
-                    ReadUS(image_set, self.reader.only_tags)
+                    ReadUS(image_set, self.only_tags)
 
         for modality in ['RTSTRUCT']:
             for image_set in self.ds_modality[modality]:
-                read_rtstruct = ReadRTStruct(image_set, self.reader.only_tags)
+                read_rtstruct = ReadRTStruct(image_set, self.only_tags)
                 if read_rtstruct.match_image_name is not None:
                     Data.image[read_rtstruct.match_image_name].input_rtstruct(read_rtstruct)
                 else:
@@ -292,9 +284,12 @@ class DicomReader(object):
             Data.match_rois()
             Data.match_pois()
 
+        for modality in ['REG']:
+            pass
+
         for modality in ['RTDOSE']:
             for image_set in self.ds_modality[modality]:
-                ReadRTDose(image_set, self.reader.only_tags)
+                ReadRTDose(image_set, self.only_tags)
 
 
 class Read3D(object):
