@@ -18,7 +18,6 @@ import time
 import gdcm
 import threading
 
-import vtk
 import numpy as np
 import pandas as pd
 import pydicom as dicom
@@ -121,7 +120,7 @@ class DicomReader(object):
                             acq = 1
 
                         sorting_tags += [[img['SeriesInstanceUID'].value, acq, orient[0], orient[1], orient[2],
-                                         orient[3], orient[4], orient[5], pos[0], pos[1], pos[2]]]
+                                          orient[3], orient[4], orient[5], pos[0], pos[1], pos[2]]]
                     sorting_tags = np.asarray(sorting_tags)
                     unique_series = np.unique(np.asarray(sorting_tags[:, 0]), axis=0)
                     for series in unique_series:
@@ -226,7 +225,8 @@ class DicomReader(object):
                                     elif acq_plane[0] == 'Coronal':
                                         pos = np.asarray([[p[0, 9], p[-1, 9]] for p in acq_positions])
                                     else:
-                                        pos = np.asarray([[p[0, 10], p[-1, 10]] for p in acq_positions]).astype(np.float64)
+                                        pos = np.asarray([[p[0, 10], p[-1, 10]] for p in acq_positions]).astype(
+                                            np.float64)
 
                                     pos_idx = np.argsort(pos[:, 0])
                                     pos_sort = pos[pos_idx]
@@ -285,7 +285,8 @@ class DicomReader(object):
             Data.match_pois()
 
         for modality in ['REG']:
-            pass
+            for image_set in self.ds_modality[modality]:
+                ReadRTDose(image_set, self.only_tags)
 
         for modality in ['RTDOSE']:
             for image_set in self.ds_modality[modality]:
@@ -296,6 +297,7 @@ class Read3D(object):
     """
     This is currently for CT and MR modalities.
     """
+
     def __init__(self, image_set, only_tags):
         if isinstance(image_set, list):
             self.image_set = image_set
@@ -349,7 +351,7 @@ class Read3D(object):
             else:
                 slope = 1
 
-            image_slices.append(((_slice.pixel_array*slope)+intercept).astype('int16'))
+            image_slices.append(((_slice.pixel_array * slope) + intercept).astype('int16'))
 
             del _slice.PixelData
 
@@ -582,6 +584,7 @@ class ReadXRay(object):
     This is X-ray images, modalities are DX or MG (mammograms). Mammograms can also be tomosynthesis which are not read
     in this class.
     """
+
     def __init__(self, image_set, only_tags):
         if isinstance(image_set, list):
             self.image_set = image_set
@@ -692,7 +695,8 @@ class ReadXRay(object):
         if self.plane == 'Axial':
             self.array = self.array.reshape((1, self.array.shape[0], self.array.shape[1]))
         elif self.plane == 'Coronal':
-            self.array = np.flip(np.flip(self.array.reshape((self.array.shape[0], 1, self.array.shape[1])), axis=0), axis=1)
+            self.array = np.flip(np.flip(self.array.reshape((self.array.shape[0], 1, self.array.shape[1])), axis=0),
+                                 axis=1)
         else:
             self.array = np.flip(self.array.reshape((self.array.shape[0], self.array.shape[1], 1)), axis=0)
 
@@ -808,6 +812,7 @@ class ReadUS(object):
     This is Ultrasound images, modality is US. Similar to DX modality, except US can have stacks of "slices". Not slices
     in the traditional because they don't correlate to one another.
     """
+
     def __init__(self, image_set, only_tags):
         if isinstance(image_set, list):
             self.image_set = image_set
@@ -936,7 +941,8 @@ class ReadRTStruct(object):
                         for seq in s['ContourSequence']:
                             slice_sop += [seq['ContourImageSequence'][0]['ReferencedSOPInstanceUID'].value]
                     else:
-                        slice_sop = [s['ContourSequence'][0]['ContourImageSequence'][0]['ReferencedSOPInstanceUID'].value]
+                        slice_sop = [
+                            s['ContourSequence'][0]['ContourImageSequence'][0]['ReferencedSOPInstanceUID'].value]
                     sop += [slice_sop]
 
                     if hasattr(s, 'ROIDisplayColor'):
@@ -975,6 +981,111 @@ class ReadRTStruct(object):
                 self.contours += [contour_list]
             else:
                 self.points += contour_list
+
+
+class ReadREG(object):
+    def __init__(self, image_set, only_tags):
+        if isinstance(image_set, list):
+            self.image_set = image_set
+        else:
+            self.image_set = [image_set]
+        self.only_tags = only_tags
+
+        self.reference_series = self.image_set[0].ReferencedSeriesSequence[0].SeriesInstanceUID
+        self.moving_series = self.image_set[0].ReferencedSeriesSequence[0].SeriesInstanceUID
+        self.reference_sops = [sop.ReferencedSOPInstanceUID for sop in
+                               self.image_set[0].ReferencedSeriesSequence[0].ReferencedInstanceSequence]
+        self.moving_sops = [sop.ReferencedSOPInstanceUID for sop in
+                            self.image_set[0].ReferencedSeriesSequence[1].ReferencedInstanceSequence]
+
+        self.spacing = None
+        self.dimensions = None
+        self.origin = None
+
+        self.reference_matrix = None
+        self.moving_matrix = None
+        self.dvf_matrix = None
+        self.dvf = None
+
+        self.registration_name = None
+        if 'DeformableRegistrationSequence' in self.image_set[0]:
+            self._compute_rigid(deformable=True)
+            self._compute_dvf()
+            self._create_name()
+            self._create_registration(deformable=True)
+        else:
+            self._compute_rigid(deformable=True)
+            self._create_name()
+            self._create_registration(deformable=True)
+
+    def _compute_rigid(self, deformable=False):
+        if deformable:
+            self.dvf_matrix = ds_dvf.DeformableRegistrationSequence[0].PreDeformationMatrixRegistrationSequence[0][
+                0x3006, 0x00C6].value
+            matrix = ds_dvf.DeformableRegistrationSequence[0].DeformableRegistrationGridSequence[
+                0].ImageOrientationPatient
+            self.moving_matrix = np.linalg.inv(np.asarray(matrix).reshape(4, 4))
+        else:
+            self.reference_matrix = \
+            ds_rigid.RegistrationSequence[1]['MatrixRegistrationSequence'][0]['MatrixSequence'][0][0x3006, 0x00C6].value
+            self.moving_matrix = ds_rigid.RegistrationSequence[1]['MatrixRegistrationSequence'][0]['MatrixSequence'][0][
+                0x3006, 0x00C6].value
+
+    def _compute_dvf(self):
+        self.origin = ds_dvf.DeformableRegistrationSequence[0].DeformableRegistrationGridSequence[
+            0].ImagePositionPatient
+        self.dimensions = np.flip(
+            ds_dvf.DeformableRegistrationSequence[0].DeformableRegistrationGridSequence[0].GridDimensions)
+        self.spacing = ds_dvf.DeformableRegistrationSequence[0].DeformableRegistrationGridSequence[0].GridResolution
+
+        dvf_raw = self.image_set[0].DeformableRegistrationSequence[0].DeformableRegistrationGridSequence[
+            0].VectorGridData
+        dvf_unstructured = unpack(f"<{len(dvf_raw) // 4}f", dvf_raw)
+        self.dvf = np.reshape(dvf_unstructured, list(dimensions) + [3, ])
+
+        del self.image_set[0].DeformableRegistrationSequence[0].DeformableRegistrationGridSequence[0].VectorGridData
+
+    def _create_name(self, deformable=False):
+        reference_name = None
+        moving_name = None
+        for image_name in Data.image_list:
+            if self.reference_sops[0] in Data.image[image_name].sops:
+                reference_name = image_name
+
+            elif self.moving_sops[0] in Data.image[image_name].sops:
+                moving_name = image_name
+
+        if deformable:
+            registration = 'dvf_'
+        else:
+            registration = 'rigid_'
+
+        if reference_name is None and moving_name is None:
+            registration_name = 'Unknown_' + registration
+        else:
+            registration_name = registration + reference_name + '_' + moving_name
+
+        if deformable:
+            if registration_name in Data.deformable_list:
+                n = 0
+                while n > -1:
+                    n += 1
+                    new_name = copy.deepcopy(registration_name + '_' + str(n))
+                    if new_name not in Data.deformable_list:
+                        self.registration_name = new_name
+                        n = -100
+        else:
+            if registration_name in Data.rigid_list:
+                n = 0
+                while n > -1:
+                    n += 1
+                    new_name = copy.deepcopy(registration_name + '_' + str(n))
+                    if new_name not in Data.rigid_list:
+                        self.registration_name = new_name
+                        n = -100
+
+    def _create_registration(self, deformable=False):
+        pass
 
 
 class ReadRTDose(object):
