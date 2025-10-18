@@ -8,6 +8,7 @@ class Data(object):
     image_list = []
     roi_list = []
     rigid_list = []
+    deformable_list = []
     dose_list = []
 
     @classmethod
