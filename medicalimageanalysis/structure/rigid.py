@@ -241,8 +241,8 @@ class Display(object):
 
 
 class Rigid(object):
-    def __init__(self, reference_name, moving_name, rigid_name=None, roi_names=None, matrix=None, combo_matrix=None,
-                 combo_name=None):
+    def __init__(self, reference_name, moving_name, rigid_name=None, roi_names=None, reference_sops=None,
+                 moving_sops=None, reference_matrix=None, matrix=None, combo_matrix=None, combo_name=None):
         self.reference_name = reference_name
         self.moving_name = moving_name
         self.combo_name = combo_name
@@ -252,6 +252,11 @@ class Rigid(object):
             self.roi_names = ['Unknown']
         else:
             self.roi_names = roi_names
+
+        if reference_matrix is None:
+            self.reference_matrix = np.identity(4)
+        else:
+            self.reference_matrix = reference_matrix
 
         if matrix is None:
             self.matrix = np.identity(4)
@@ -263,7 +268,8 @@ class Rigid(object):
         else:
             self.combo_matrix = combo_matrix
 
-        self.slices = {'reference': ['All'], 'moving': ['All']}
+        self.slices = {'reference': ['All'], 'moving': ['All'], 'reference_sops': reference_sops,
+                       'moving_sops': moving_sops}
         self.visual = {'reference': None, 'moving': None, 'opacity': 0.5, 'multicolor': None}
 
         self.misc = {}
@@ -283,7 +289,7 @@ class Rigid(object):
                 n = 0
                 while n > -1:
                     n += 1
-                    new_name = rigid_name + '_' + str(n)
+                    new_name = copy.deepcopy(rigid_name + '_' + str(n))
                     if new_name not in Data.rigid_list:
                         n = -100
 
