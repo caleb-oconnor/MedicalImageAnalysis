@@ -17,14 +17,18 @@ import copy
 import time
 import gdcm
 import threading
+from struct import unpack
 
 import numpy as np
 import pandas as pd
 import pydicom as dicom
+from openpyxl.descriptors import NoneSet
 from pydicom.uid import generate_uid
 
+from ..structure.deformable import Deformable
 from ..structure.dose import Dose
 from ..structure.image import Image
+from ..structure.rigid import Rigid
 
 from ..data import Data
 
@@ -286,7 +290,7 @@ class DicomReader(object):
 
         for modality in ['REG']:
             for image_set in self.ds_modality[modality]:
-                ReadRTDose(image_set, self.only_tags)
+                ReadREG(image_set, self.only_tags)
 
         for modality in ['RTDOSE']:
             for image_set in self.ds_modality[modality]:
@@ -991,10 +995,13 @@ class ReadREG(object):
             self.image_set = [image_set]
         self.only_tags = only_tags
 
+        self.reference_name = None
         self.reference_series = self.image_set[0].ReferencedSeriesSequence[0].SeriesInstanceUID
-        self.moving_series = self.image_set[0].ReferencedSeriesSequence[0].SeriesInstanceUID
         self.reference_sops = [sop.ReferencedSOPInstanceUID for sop in
                                self.image_set[0].ReferencedSeriesSequence[0].ReferencedInstanceSequence]
+
+        self.moving_name = None
+        self.moving_series = self.image_set[0].ReferencedSeriesSequence[0].SeriesInstanceUID
         self.moving_sops = [sop.ReferencedSOPInstanceUID for sop in
                             self.image_set[0].ReferencedSeriesSequence[1].ReferencedInstanceSequence]
 
@@ -1014,56 +1021,60 @@ class ReadREG(object):
             self._create_name()
             self._create_registration(deformable=True)
         else:
-            self._compute_rigid(deformable=True)
+            self._compute_rigid()
             self._create_name()
-            self._create_registration(deformable=True)
+            self._create_registration()
 
     def _compute_rigid(self, deformable=False):
         if deformable:
-            self.dvf_matrix = ds_dvf.DeformableRegistrationSequence[0].PreDeformationMatrixRegistrationSequence[0][
+            matrix = self.image_set[0].DeformableRegistrationSequence[0].PreDeformationMatrixRegistrationSequence[0][
                 0x3006, 0x00C6].value
-            matrix = ds_dvf.DeformableRegistrationSequence[0].DeformableRegistrationGridSequence[
-                0].ImageOrientationPatient
+            orientation = self.image_set[0].DeformableRegistrationSequence[0].DeformableRegistrationGridSequence[0].ImageOrientationPatient
+            row_direction = orientation[:3]
+            column_direction = orientation[3:]
+            slice_direction = np.cross(row_direction, column_direction)
+
+            self.dvf_matrix = np.identity(3, dtype=np.float32)
+            self.dvf_matrix[0, :3] = row_direction
+            self.dvf_matrix[1, :3] = column_direction
+            self.dvf_matrix[2, :3] = slice_direction
             self.moving_matrix = np.linalg.inv(np.asarray(matrix).reshape(4, 4))
         else:
-            self.reference_matrix = \
-            ds_rigid.RegistrationSequence[1]['MatrixRegistrationSequence'][0]['MatrixSequence'][0][0x3006, 0x00C6].value
-            self.moving_matrix = ds_rigid.RegistrationSequence[1]['MatrixRegistrationSequence'][0]['MatrixSequence'][0][
+            self.reference_matrix = self.image_set[0].RegistrationSequence[1]['MatrixRegistrationSequence'][0]['MatrixSequence'][0][0x3006, 0x00C6].value
+            self.moving_matrix = self.image_set[0].RegistrationSequence[1]['MatrixRegistrationSequence'][0]['MatrixSequence'][0][
                 0x3006, 0x00C6].value
 
     def _compute_dvf(self):
-        self.origin = ds_dvf.DeformableRegistrationSequence[0].DeformableRegistrationGridSequence[
+        self.origin = self.image_set[0].DeformableRegistrationSequence[0].DeformableRegistrationGridSequence[
             0].ImagePositionPatient
         self.dimensions = np.flip(
-            ds_dvf.DeformableRegistrationSequence[0].DeformableRegistrationGridSequence[0].GridDimensions)
-        self.spacing = ds_dvf.DeformableRegistrationSequence[0].DeformableRegistrationGridSequence[0].GridResolution
+            self.image_set[0].DeformableRegistrationSequence[0].DeformableRegistrationGridSequence[0].GridDimensions)
+        self.spacing = self.image_set[0].DeformableRegistrationSequence[0].DeformableRegistrationGridSequence[0].GridResolution
 
         dvf_raw = self.image_set[0].DeformableRegistrationSequence[0].DeformableRegistrationGridSequence[
             0].VectorGridData
         dvf_unstructured = unpack(f"<{len(dvf_raw) // 4}f", dvf_raw)
-        self.dvf = np.reshape(dvf_unstructured, list(dimensions) + [3, ])
+        self.dvf = np.reshape(dvf_unstructured, list(self.dimensions) + [3, ])
 
         del self.image_set[0].DeformableRegistrationSequence[0].DeformableRegistrationGridSequence[0].VectorGridData
 
     def _create_name(self, deformable=False):
-        reference_name = None
-        moving_name = None
         for image_name in Data.image_list:
             if self.reference_sops[0] in Data.image[image_name].sops:
-                reference_name = image_name
+                self.reference_name = image_name
 
             elif self.moving_sops[0] in Data.image[image_name].sops:
-                moving_name = image_name
+                self.moving_name = image_name
 
         if deformable:
-            registration = 'dvf_'
+            registration = 'DVF_'
         else:
-            registration = 'rigid_'
+            registration = ''
 
-        if reference_name is None and moving_name is None:
-            registration_name = 'Unknown_' + registration
+        if self.reference_name is None and self.moving_name is None:
+            registration_name = registration + '_Unknown'
         else:
-            registration_name = registration + reference_name + '_' + moving_name
+            registration_name = registration + self.reference_name + '_' + self.moving_name
 
         if deformable:
             if registration_name in Data.deformable_list:
@@ -1085,7 +1096,16 @@ class ReadREG(object):
                         n = -100
 
     def _create_registration(self, deformable=False):
-        pass
+        if deformable:
+            Deformable(self.dvf, self.origin, self.spacing, self.dimensions, rigid_matrix=self.moving_matrix,
+                       dvf_matrix=self.dvf_matrix, registration_name=self.registration_name,
+                       reference_name=self.reference_name, moving_name=self.moving_name,
+                       reference_sops=self.reference_sops, moving_sops=self.moving_sops)
+
+        elif self.reference_name is not None and self.moving_name is not None:
+            Rigid(self.reference_name, self.moving_name, rigid_name=self.registration_name,
+                  reference_sops=self.reference_sops, moving_sops=self.moving_sops,
+                  reference_matrix=self.reference_matrix, matrix=self.moving_matrix)
 
 
 class ReadRTDose(object):
