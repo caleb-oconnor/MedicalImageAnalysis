@@ -18,14 +18,16 @@ import numpy as np
 import SimpleITK as sitk
 
 from ..data import Data
+from ..structure.deformable import Deformable
 from ..utils.creation import CreateImageFromMask
 
 
 class MhdReader(object):
-    def __init__(self, file, modality=None, reference_name=None, roi_name=None, dose=None, dvf=None):
+    def __init__(self, file, modality=None, reference_name=None, moving_name=None, roi_name=None, dose=None, dvf=None):
         self.file = file
         self.modality = modality
         self.reference_name = reference_name
+        self.moving_name = moving_name
         self.roi_name = roi_name
         self.dose = dose
         self.dvf = dvf
@@ -36,17 +38,14 @@ class MhdReader(object):
         self.mhd = sitk.ReadImage(self.file)
 
         if self.reference_name is not None:
-            if self.dvf is not None:
-                pass
+            if self.dvf is not None and self.moving_name is not None:
+                self.create_dvf()
 
             elif self.dose is not None:
                 pass
 
             elif self.roi_name is not None:
                 pass
-
-            else:
-                self.create_image()
 
         else:
             self.create_image()
@@ -74,8 +73,6 @@ class MhdReader(object):
                                      plane='Axial', description='Mhd to Image', modality=self.modality)
         create.add_image()
 
-        print(1)
-
     def create_roi(self):
         pass
 
@@ -83,4 +80,22 @@ class MhdReader(object):
         pass
 
     def create_dvf(self):
-        pass
+        registration_name = 'DVF_' + self.reference_name + '_' + self.moving_name
+        if registration_name in Data.deformable_list:
+            n = 0
+            while n > -1:
+                n += 1
+                new_name = copy.deepcopy(registration_name + '_' + str(n))
+                if new_name not in Data.deformable_list:
+                    registration_name = new_name
+                    n = -100
+
+        dimensions = np.flip(np.asarray(self.mhd.GetSize()))
+        dvf_matrix = np.asarray(self.mhd.GetDirection()).reshape(3, 3)
+        origin = np.asarray(self.mhd.GetOrigin())
+        spacing = np.asarray(self.mhd.GetSpacing())
+
+        array = sitk.GetArrayFromImage(self.mhd)
+
+        Deformable(array, origin, spacing, dimensions, dvf_matrix=dvf_matrix, registration_name=registration_name,
+                   reference_name=self.reference_name, moving_name=self.moving_name)
