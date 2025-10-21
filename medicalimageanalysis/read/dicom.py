@@ -1001,9 +1001,14 @@ class ReadREG(object):
                                self.image_set[0].ReferencedSeriesSequence[0].ReferencedInstanceSequence]
 
         self.moving_name = None
-        self.moving_series = self.image_set[0].ReferencedSeriesSequence[0].SeriesInstanceUID
-        self.moving_sops = [sop.ReferencedSOPInstanceUID for sop in
-                            self.image_set[0].ReferencedSeriesSequence[1].ReferencedInstanceSequence]
+        if len(self.image_set[0].ReferencedSeriesSequence) == 2:
+            self.moving_series = self.image_set[0].ReferencedSeriesSequence[1].SeriesInstanceUID
+            self.moving_sops = [sop.ReferencedSOPInstanceUID for sop in
+                                self.image_set[0].ReferencedSeriesSequence[1].ReferencedInstanceSequence]
+        else:
+            sequence = self.image_set[0].StudiesContainingOtherReferencedInstancesSequence[0].ReferencedSeriesSequence[0]
+            self.moving_series = sequence.SeriesInstanceUID
+            self.moving_sops = [sop.ReferencedSOPInstanceUID for sop in sequence.ReferencedInstanceSequence]
 
         self.spacing = None
         self.dimensions = None
@@ -1018,7 +1023,7 @@ class ReadREG(object):
         if 'DeformableRegistrationSequence' in self.image_set[0]:
             self._compute_rigid(deformable=True)
             self._compute_dvf()
-            self._create_name()
+            self._create_name(deformable=True)
             self._create_registration(deformable=True)
         else:
             self._compute_rigid()
@@ -1085,6 +1090,8 @@ class ReadREG(object):
                     if new_name not in Data.deformable_list:
                         self.registration_name = new_name
                         n = -100
+            else:
+                self.registration_name = registration_name
         else:
             if registration_name in Data.rigid_list:
                 n = 0
@@ -1094,6 +1101,8 @@ class ReadREG(object):
                     if new_name not in Data.rigid_list:
                         self.registration_name = new_name
                         n = -100
+            else:
+                self.registration_name = registration_name
 
     def _create_registration(self, deformable=False):
         if deformable:
@@ -1136,7 +1145,7 @@ class ReadRTDose(object):
         self._verify_axial_orientation()
 
         self.image_matrix = self._compute_image_matrix()
-        self.dose_name = create_image_name(self.modality)
+        self.dose_name = create_dose_name(self.modality)
 
         dose = Dose(self)
         Data.dose[self.dose_name] = dose
@@ -1386,6 +1395,16 @@ class ReadRTDose(object):
 
 def create_image_name(modality):
     idx = len(Data.image_list)
+    if idx < 9:
+        image_name = modality + ' 0' + str(1 + idx)
+    else:
+        image_name = modality + ' ' + str(1 + idx)
+
+    return image_name
+
+
+def create_dose_name(modality):
+    idx = len(Data.dose_list)
     if idx < 9:
         image_name = modality + ' 0' + str(1 + idx)
     else:
