@@ -79,16 +79,14 @@ class Spline(object):
         fixed = sitk.Cast(self.reference_image, sitk.sitkFloat32)
         moving = sitk.Cast(self.moving_image, sitk.sitkFloat32)
 
-        # Initialize BSpline transform
         if control_spacing is None:
-            control_spacing = [50.0, 50.0, 50.0]  # Approximate spacing between control points in mm
-        image_physical_size = [size * spacing for size, spacing in zip(fixed_image.GetSize(), fixed_image.GetSpacing())]
+            control_spacing = [25.0, 25.0, 25.0]
 
         if mesh_size is None:
+            image_physical_size = [size * spacing for size, spacing in zip(fixed.GetSize(), fixed.GetSpacing())]
             mesh_size = [int(sz / sp) for sz, sp in zip(image_physical_size, control_spacing)]
-        bspline_transform = sitk.BSplineTransformInitializer(fixed_image, mesh_size)
+        bspline_transform = sitk.BSplineTransformInitializer(fixed, mesh_size)
 
-        # Set up registration
         bspline = sitk.ImageRegistrationMethod()
         bspline.SetMetricAsMeanSquares()
         if self.reference_mask:
@@ -99,7 +97,7 @@ class Spline(object):
         bspline.SetInitialTransform(bspline_transform, inPlace=True)
         bspline.SetInterpolator(sitk.sitkLinear)
 
-        final_transform = bspline.Execute(fixed_image, moving)
+        final_transform = bspline.Execute(fixed, moving)
 
         return sitk.TransformToDisplacementField(final_transform, sitk.sitkVectorFloat32, fixed.GetSize(),
                                                  fixed.GetOrigin(), fixed.GetSpacing(), fixed.GetDirection())
