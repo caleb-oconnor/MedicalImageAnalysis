@@ -12,7 +12,7 @@ import numpy as np
 import SimpleITK as sitk
 
 
-class Spline(object):
+class DeformableITK(object):
     def __init__(self, reference_image=None, moving_image=None, reference_mask=None, moving_mask=None):
         self.reference_image = reference_image
         self.reference_mask = reference_mask
@@ -75,12 +75,15 @@ class Spline(object):
                                              0.0,
                                              self.moving_mask.GetPixelIDValue())
 
-    def bspline(self, control_spacing=None, mesh_size=None, gradient=1e-5, iterations=100):
+    def bspline(self, control_spacing=None, mesh_size=None, gradient=1e-5, iterations=100, crop=True):
+        if crop:
+            self.mask_crop()
+
         fixed = sitk.Cast(self.reference_image, sitk.sitkFloat32)
         moving = sitk.Cast(self.moving_image, sitk.sitkFloat32)
 
         if control_spacing is None:
-            control_spacing = [25.0, 25.0, 25.0]
+            control_spacing = [50.0, 50.0, 50.0]
 
         if mesh_size is None:
             image_physical_size = [size * spacing for size, spacing in zip(fixed.GetSize(), fixed.GetSpacing())]
@@ -99,10 +102,16 @@ class Spline(object):
 
         final_transform = bspline.Execute(fixed, moving)
 
-        return sitk.TransformToDisplacementField(final_transform, sitk.sitkVectorFloat32, fixed.GetSize(),
-                                                 fixed.GetOrigin(), fixed.GetSpacing(), fixed.GetDirection())
+        dvf_image = sitk.TransformToDisplacementField(final_transform, sitk.sitkVectorFloat32, fixed.GetSize(),
+                                                      fixed.GetOrigin(), fixed.GetSpacing(), fixed.GetDirection())
 
-    def elastix(self, parameter=None, metric='Intensity', bins=6, resolution=4, spacing=10, iterations=2000, order=3):
+        return dvf_image
+
+    def elastix(self, parameter=None, metric='Intensity', bins=6, resolution=4, spacing=10, iterations=2000, order=3,
+                crop=True):
+        if crop:
+            self.mask_crop()
+
         fixed = sitk.Cast(self.reference_image, sitk.sitkFloat32)
         moving = sitk.Cast(self.moving_image, sitk.sitkFloat32)
 
@@ -141,3 +150,96 @@ class Spline(object):
         transformix.Execute()
 
         return transformix.GetDeformationField()
+
+    def demons(self, smooth=True, std=1, iterations=50, intensity_threshold=0.001, crop=True):
+        if crop:
+            self.mask_crop()
+
+        fixed = sitk.Cast(self.reference_image, sitk.sitkFloat32)
+        moving = sitk.Cast(self.moving_image, sitk.sitkFloat32)
+
+        if self.reference_mask is not None:
+            fixed = fixed * sitk.Cast(self.reference_mask, sitk.sitkFloat32)
+        if self.moving_mask is not None:
+            moving = moving * sitk.Cast(self.moving_mask, sitk.sitkFloat32)
+
+        demons = sitk.DemonsRegistrationFilter()
+        demons.SetNumberOfIterations(iterations)
+        demons.SetStandardDeviations(std)
+        demons.SetIntensityDifferenceThreshold(intensity_threshold)
+        if smooth:
+            demons.SmoothDisplacementFieldOn()
+        else:
+            demons.SmoothDisplacementFieldOff()
+
+        return demons.Execute(fixed, moving)
+
+    def fast_demons(self, smooth=True, std=1, iterations=50, intensity_threshold=0.001, step=2.0, crop=True):
+        if crop:
+            self.mask_crop()
+
+        fixed = sitk.Cast(self.reference_image, sitk.sitkFloat32)
+        moving = sitk.Cast(self.moving_image, sitk.sitkFloat32)
+
+        if self.reference_mask is not None:
+            fixed = fixed * sitk.Cast(self.reference_mask, sitk.sitkFloat32)
+        if self.moving_mask is not None:
+            moving = moving * sitk.Cast(self.moving_mask, sitk.sitkFloat32)
+
+        demons = sitk.FastSymmetricForcesDemonsRegistrationFilter()
+        demons.SetNumberOfIterations(iterations)
+        demons.SetStandardDeviations(std)
+        demons.SetIntensityDifferenceThreshold(intensity_threshold)
+        demons.SetMaximumUpdateStepLength(step)
+        if smooth:
+            demons.SmoothDisplacementFieldOn()
+        else:
+            demons.SmoothDisplacementFieldOff()
+
+        return demons.Execute(fixed, moving)
+
+    def diffeomorphic(self, smooth=True, std=1, iterations=50, intensity_threshold=0.001, step=2.0, crop=True):
+        if crop:
+            self.mask_crop()
+
+        fixed = sitk.Cast(self.reference_image, sitk.sitkFloat32)
+        moving = sitk.Cast(self.moving_image, sitk.sitkFloat32)
+
+        if self.reference_mask is not None:
+            fixed = fixed * sitk.Cast(self.reference_mask, sitk.sitkFloat32)
+        if self.moving_mask is not None:
+            moving = moving * sitk.Cast(self.moving_mask, sitk.sitkFloat32)
+
+        demons = sitk.DiffeomorphicDemonsRegistrationFilter()
+        demons.SetNumberOfIterations(iterations)
+        demons.SetStandardDeviations(std)
+        demons.SetIntensityDifferenceThreshold(intensity_threshold)
+        demons.SetMaximumUpdateStepLength(step)
+        if smooth:
+            demons.SmoothDisplacementFieldOn()
+        else:
+            demons.SmoothDisplacementFieldOff()
+
+        return demons.Execute(fixed, moving)
+
+    def mask_crop(self, margin=5):
+        if self.reference_mask is not None and self.moving_mask is not None:
+            combined_mask = sitk.Cast((self.reference_mask > 0) | (self.moving_mask > 0), sitk.sitkUInt8)
+            label_stats = sitk.LabelShapeStatisticsImageFilter()
+            label_stats.Execute(combined_mask)
+            bbox = label_stats.GetBoundingBox(1)
+
+            margin = 5
+            start = np.array(bbox[:3])
+            size = np.array(bbox[3:])
+            end = start + size
+
+            start_padded = np.maximum(start - margin, 0)
+            end_padded = np.minimum(np.array(self.reference_image.GetSize()), end + margin)
+            size_padded = end_padded - start_padded
+
+            self.reference_image = sitk.RegionOfInterest(self.reference_image, size_padded.tolist(), start_padded.tolist())
+            self.moving_image = sitk.RegionOfInterest(self.moving_image, size_padded.tolist(), start_padded.tolist())
+
+            self.reference_mask = sitk.RegionOfInterest(self.reference_mask, size_padded.tolist(), start_padded.tolist())
+            self.moving_mask = sitk.RegionOfInterest(self.moving_mask, size_padded.tolist(), start_padded.tolist())
