@@ -1,8 +1,9 @@
 
-from .reader import Reader
+from .reader import read_3mf, read_dicoms, read_mhd
 
-from .read import DicomReader, StlReader, VtkReader, ThreeMfReader
+from .read import DicomReader, MhdReader, StlReader, ThreeMfReader, VtkReader
 from .structure import Rigid, Deformable
+from .utils import *
 
 from .data import Data
 
