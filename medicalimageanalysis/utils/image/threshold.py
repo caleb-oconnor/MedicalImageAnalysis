@@ -15,6 +15,11 @@ from skimage.measure import label, regionprops
 
 
 def external(array, threshold=-250, min_volume=100, only_mask=True, less_than=False):
+    """
+    Identifies the largest connected component in a 3D array (e.g., CT/MRI volume) above or below a threshold,
+    optionally returning its mask, centroid positions per slice, number of external components per slice, and bounding
+    box. Useful for isolating external anatomy or dominant structures.
+    """
     if less_than:
         binary = array < threshold
     else:
