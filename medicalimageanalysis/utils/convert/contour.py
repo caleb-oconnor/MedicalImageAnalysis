@@ -1,3 +1,16 @@
+"""
+Morfeus lab
+The University of Texas
+MD Anderson Cancer Center
+Author - Caleb O'Connor
+Email - csoconnor@mdanderson.org
+
+
+Description:
+
+Functions:
+
+"""
 
 import os
 import sys
@@ -18,8 +31,19 @@ from matplotlib import path
 
 
 class ContourToDiscreteMesh(object):
+    """
+    Converts 2D contour points into a 3D discrete or smoothed surface mesh, optionally generating a volumetric mask
+    along the way. It supports multiple anatomical planes (Axial, Coronal, Sagittal).
+    """
     def __init__(self, contour_position=None, contour_pixel=None, spacing=None, origin=None, dimensions=None,
                  matrix=None, plane='Axial', mask=None):
+        """
+        contour_position: Original contour points in physical coordinates.
+        contour_pixel: Contours converted to voxel coordinates.
+        spacing, origin, dimensions: Image geometry information.
+        matrix: Transformation matrix for voxel conversion.
+        plane: Plane along which slices are defined (Axial, Coronal, Sagittal).
+        """
         self.contour_position = contour_position
         self.contour_pixel = contour_pixel
         self.spacing = spacing
@@ -41,6 +65,9 @@ class ContourToDiscreteMesh(object):
             self.compute_mask()
 
     def convert_to_pixel_spacing(self):
+        """
+        Converts physical contour points to voxel coordinates using a 4x4 conversion matrix.
+        """
         matrix = np.identity(3, dtype=np.float32)
         matrix[0, :] = self.matrix[0, :] / self.spacing[0]
         matrix[1, :] = self.matrix[1, :] / self.spacing[1]
@@ -56,6 +83,9 @@ class ContourToDiscreteMesh(object):
             self.contour_pixel += [p_concat.dot(conversion_matrix.T)[:, :3]]
 
     def compute_mask(self):
+        """
+        Generates a 3D binary mask slice-by-slice.
+        """
         hold_mask = np.zeros([self.dimensions[0], self.dimensions[1], self.dimensions[2]], dtype=np.uint8)
         if self.plane == 'Axial':
             slice_check = np.zeros(self.dimensions[0])
@@ -108,6 +138,9 @@ class ContourToDiscreteMesh(object):
             self.mask = (hold_mask > 0).astype(np.uint8)
 
     def compute_mesh(self, discrete=False, smoothing_iterations=20, smoothing_relaxation=.5, smoothing_distance=1):
+        """
+        Converts the mask into a 3D mesh.
+        """
         label = numpy_support.numpy_to_vtk(num_array=self.mask.ravel(),
                                            deep=True,
                                            array_type=vtk.VTK_FLOAT)
@@ -143,88 +176,28 @@ class ContourToDiscreteMesh(object):
             # Uses VTK surface nets 3d
             img = pv.ImageData(pad_image)
             mesh = img.contour_labels(smoothing=True,
-                                       output_mesh_type='triangles',
-                                       smoothing_iterations=smoothing_iterations,
-                                       smoothing_relaxation=smoothing_relaxation,
-                                       smoothing_distance=smoothing_distance)
+                                      output_mesh_type='triangles',
+                                      smoothing_iterations=smoothing_iterations,
+                                      smoothing_relaxation=smoothing_relaxation,
+                                      smoothing_distance=smoothing_distance)
 
             return mesh
 
 
-# class ContourToMesh(object):
-#     def __init__(self, contour, plane='Axial', existing_mesh=None, slice_idx=None):
-#         self.contour = contour
-#         self.plane = plane
-#         self.existing_mesh = existing_mesh
-#         self.slice_idx = slice_idx
-#
-#         self.contour_2d = self.convert_to_2d()
-#         self.slice_locations = self.get_slice_locations()
-#         self.slice_dict = self.create_slice_dictionary()
-#         self.slice_info = [np.where(self.slice_locations == s)[0] for s in list(self.slice_dict.keys())]
-#
-#         self.mesh = None
-#         self.grids = None
-#         self.contour_dist = None
-#
-#     def convert_to_2d(self):
-#         if self.plane == 'Axial':
-#             return [c[:, :2] for c in self.contour]
-#
-#         elif self.plane == 'Coronal':
-#             return [np.hstack((c[:, 0], c[:, 2])) for c in self.contour]
-#
-#         else:
-#             return [c[:, 1:] for c in self.contour]
-#
-#     def get_slice_locations(self):
-#         if self.plane == 'Axial':
-#             return [int(np.round(c[0, 2])) for c in self.contour]
-#
-#         elif self.plane == 'Coronal':
-#             return [int(np.round(c[0, 1])) for c in self.contour]
-#
-#         else:
-#             return [int(np.round(c[0, 0])) for c in self.contour]
-#
-#     def create_slice_dictionary(self):
-#         unique_slices = np.unique(self.slice_locations)
-#         slice_dict = dict.fromkeys(unique_slices)
-#         for s in unique_slices:
-#             pre = np.where(unique_slices == s - 1)[0]
-#             post = np.where(unique_slices == s + 1)[0]
-#             if len(pre) == 0 and len(post) == 0:
-#                 slice_dict[s] = 'Solo'
-#             elif len(pre) > 0 and len(post) > 0:
-#                 slice_dict[s] = 'Both'
-#             elif len(pre) > 0:
-#                 slice_dict[s] = 'Before'
-#             else:
-#                 slice_dict[s] = 'After'
-#
-#         return slice_dict
-#
-#     def run(self):
-#         self.create_grids()
-#         print(1)
-#
-#     def create_grids(self):
-#         if self.slice_idx is None:
-#             self.grids = [] * len(self.slice_locations)
-#             # for ii in range(len(self.slice_locations)):
-#             #     if ii == 0 or ii == len(self.slice_locations) - 1:
-#             #
-#             #         if self.slice_dict in ['Solo', 'Before', 'After'] or
-#
-#     def distance(self):
-#         if self.slice_idx is None:
-#             # for ii in range(len(self.contour_2d)):
-#             c_next = [cdist(contour_loop[idx], contour_loop[idx + 1]) for idx in range(len(contour_loop) - 1)]
-
-
 class ContourToMask(object):
+    """
+    Converts 2D contour points (from medical images or 3D scans) into a 3D volumetric mask, supporting multiple planes
+    (Axial, Coronal, Sagittal).
+    """
     def __init__(self, contour_position=None, contour_pixel=None, spacing=None, origin=None, dimensions=None,
                  matrix=None, plane='Axial'):
+        """
+        contour_position: Original contour points in physical coordinates.
+        contour_pixel: Contours converted to pixel indices (voxel coordinates).
+        spacing, origin, dimensions: Image geometry information.
+        matrix: Transformation matrix to map physical coordinates to pixel space.
+        plane: Axis along which slices are interpreted (Axial/Coronal/Sagittal).
+        """
         self.contour_position = contour_position
         self.contour_pixel = contour_pixel
         self.spacing = spacing
@@ -236,12 +209,18 @@ class ContourToMask(object):
         self.mask = None
 
     def create_mask(self):
+        """
+        Converts contours to pixel space if necessary, then computes the 3D mask.
+        """
         if self.contour_pixel is None:
             self.convert_to_pixel_spacing()
 
         self.compute_mask()
 
     def convert_to_pixel_spacing(self):
+        """
+        Converts physical contour coordinates to voxel indices using SimpleITK.
+        """
         sitk_image = sitk.Image([int(dim) for dim in self.dimensions], sitk.sitkUInt8)
         matrix_flat = self.matrix[0:3, 0:3].flatten(order='F')
         sitk_image.SetDirection([float(mat) for mat in matrix_flat])
@@ -253,6 +232,9 @@ class ContourToMask(object):
             self.contour_pixel[ii] = [sitk_image.TransformPhysicalPointToContinuousIndex(contour) for contour in contours]
 
     def compute_mask(self):
+        """
+        Generates a 3D mask array from the pixel contours.
+        """
         hold_mask = np.zeros([self.dimensions[0], self.dimensions[1], self.dimensions[2]], dtype=np.uint8)
         if self.plane == 'Axial':
             slice_check = np.zeros(self.dimensions[0])
@@ -305,20 +287,35 @@ class ContourToMask(object):
             self.mask = (hold_mask > 0).astype(np.uint8)
 
 
-class ModelToMask:
+class ModelToMask(object):
     """
-    Converts a 3D model/s into a mask. The mask can either be an empty array (default) or a binary mask of the model/s.
-    The mask is given a spacing buffer of 5 indexes on each side x, y, z.
+    Converts 3D model(s) into a volumetric mask. The mask can either be:
+        - an empty array (default)
+        - a binary mask representing the models.
+
+    The mask is padded with a spacing buffer of 5 units along each axis (x, y, z) to ensure the model fits comfortably.
     """
     def __init__(self, models, origin=None, spacing=None, dims=None, slice_locations=None, matrix=None,
                  empty_array=True, convert=True):
         """
-
         Parameters
         ----------
-        models - List of all models
-        empty_array -
-        convert
+        models : list
+            List of 3D models to convert into a mask.
+        origin : list or None
+            The origin of the mask in x, y, z coordinates.
+        spacing : list or None
+            Voxel spacing along x, y, z axes.
+        dims : list or None
+            Dimensions of the mask array.
+        slice_locations : list or None
+            Z-axis slice locations at which contours are computed.
+        matrix : np.array or None
+            Transformation matrix for the models. Defaults to identity if None.
+        empty_array : bool
+            If True, only an empty mask is created. If False, the mask is filled with model contours.
+        convert : bool
+            If True, automatically computes bounds, contours, and mask during initialization.
         """
         self.models = models
         self.empty_array = empty_array
@@ -345,13 +342,8 @@ class ModelToMask:
 
     def compute_bounds(self):
         """
-        Computes the boundary for the mask using the model/s bounds. The boundary is the min/max x, y, z combination of
-        all the model/s bounds. Default spacing options are [1, 1, 3] or [1, 1, 5] depending on the z axis bound. If
-        the bounds are too large then nothing is computed with the assumption that the models are not from the same
-        image and the models should have their own independent mask.
-        Returns
-        -------
-
+        Computes the bounding box for all models combined. Adds a buffer of 5 units multiplied by the spacing on each
+        axis. Sets default spacing based on model size if spacing is not provided.
         """
         model_bounds = [model.GetBounds() for model in self.models]
         model_min = np.min(model_bounds, axis=0)
@@ -377,10 +369,8 @@ class ModelToMask:
 
     def compute_contours(self):
         """
-        Compute the contours along the z-axis for all models.
-        Returns
-        -------
-
+        Computes 2D contours along the z-axis for each model at the pre-defined slice locations. These contours are
+        later used to fill the mask.
         """
         for model in self.models:
             com = model.center
@@ -399,11 +389,7 @@ class ModelToMask:
 
     def compute_mask(self):
         """
-        Default is an empty array. Use the computed contours to fill the mask, not needed if the user wants an empty
-        array.
-        Returns
-        -------
-
+        Creates a 3D mask. Default is an empty array. If empty_array=False, fills mask using computed contours.
         """
         self.mask = np.zeros((self.dims[0], self.dims[1], self.dims[2]))
         if not self.empty_array:
@@ -418,61 +404,17 @@ class ModelToMask:
 
         self.mask = self.mask.astype(np.int8)
 
-    def save_image(self, path):
+    def save_image(self, export_path):
         """
-        Uses SimpleITK to write out the mask.
+        Saves the mask as an image file using SimpleITK.
 
-        Returns
-        -------
+        Parameters
+        ----------
+        export_path : str
+            Output file path to save the mask.
 
         """
         image = sitk.GetImageFromArray(self.mask)
         image.SetSpacing(self.spacing)
         image.SetOrigin([self.bounds[0], self.bounds[2], self.bounds[4]])
-        sitk.WriteImage(image, path)
-
-
-def dist_time(contour):
-    t1 = time.time()
-    contour_loop = [np.vstack((c[:, :2], c[0, :2])) for c in contour]
-    if len(contour_loop) > 1:
-        c_next = [cdist(contour_loop[idx], contour_loop[idx + 1]) for idx in range(len(contour_loop) - 1)]
-
-    print(np.round(time.time() - t1, 3))
-
-
-def mask_time():
-    t1 = time.time()
-    mask = mia.Data.images['CT 01'].rois['liver'].compute_mask()
-    print(np.round(time.time() - t1, 3))
-
-
-def grid_time(contour):
-    t1 = time.time()
-    for kk, c in enumerate(contour):
-        if 20 < kk < 30:
-            c = c[:-1, :2]
-            c_idx = np.repeat(np.arange(len(c)), 2)[1:-1]
-            c_idx = c_idx.reshape(int(len(c_idx) / 2), 2)
-            c_lines = np.vstack((c_idx, [c_idx[-1, 1], c_idx[0, 0]]))
-
-            c_lines_stacked = np.hstack((2 * np.ones((int(c_lines.shape[0]), 1)), c_lines)).astype(np.int64)
-            points = pv.PolyData(np.hstack((c, np.zeros((len(c_lines_stacked), 1)))), lines=c_lines_stacked)
-
-            b = points.bounds
-
-            grid_interval = 5
-            grid_x, grid_y, grid_z = np.mgrid[b[0]:b[1]:grid_interval, b[2]:b[3]:grid_interval, 0:1:1]
-            # grid_x, grid_y, grid_z = np.mgrid[b[0]:b[1]:1, b[2]:b[3]:1, 0:1:1]
-            structured_grid = pv.StructuredGrid(grid_x, grid_y, grid_z)
-            grid_points = np.asarray(structured_grid.points)[:, :2]
-            q = path.Path(c)
-            a = q.contains_points(grid_points)
-            inside_points = grid_points[np.where(a == 1)[0]]
-            grid_idx = np.where(np.sort(cdist(inside_points, c))[:, 0] > grid_interval)[0]
-            inside_points_2 = np.asarray(inside_points)[grid_idx, :2]
-            inside_pv = pv.PolyData(np.hstack((inside_points_2, np.zeros((int(inside_points_2.shape[0]), 1)))))
-            a = np.vstack((points.points, inside_pv.points))
-            aa = pv.PolyData(a)
-            # test = aa.delaunay_2d()
-    print(np.round(time.time() - t1, 3))
+        sitk.WriteImage(image, export_path)
