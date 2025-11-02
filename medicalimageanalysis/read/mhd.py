@@ -23,7 +23,22 @@ from ..utils.creation import CreateImageFromMask
 
 
 class MhdReader(object):
+    """
+    Class for reading .mhd (MetaImage) files and optionally creating images, ROIs, doses, or deformable vector fields.
+    """
     def __init__(self, file, modality=None, reference_name=None, moving_name=None, roi_name=None, dose=None, dvf=None):
+        """
+        Initialize the reader.
+
+        Parameters:
+        - file: path to the .mhd file
+        - modality: type of image (e.g., 'CT', 'MR')
+        - reference_name: reference image name for DVF registration
+        - moving_name: moving image name for DVF registration
+        - roi_name: name of ROI to create
+        - dose: dose object (optional)
+        - dvf: deformable vector field (optional)
+        """
         self.file = file
         self.modality = modality
         self.reference_name = reference_name
@@ -35,6 +50,9 @@ class MhdReader(object):
         self.mhd = None
 
     def load(self):
+        """
+        Load the .mhd file and decide what to create based on provided attributes.
+        """
         self.mhd = sitk.ReadImage(self.file)
 
         if self.reference_name is not None:
@@ -51,6 +69,9 @@ class MhdReader(object):
             self.create_image()
 
     def create_image(self):
+        """
+        Converts the loaded .mhd file into an internal Image object and registers it in the Data structure.
+        """
         if self.modality is None:
             filename = os.path.basename(self.file)
             image_name = os.path.splitext(filename)[0]
@@ -80,6 +101,10 @@ class MhdReader(object):
         pass
 
     def create_dvf(self):
+        """
+        Create a deformable vector field (DVF) from the loaded .mhd file. Handles naming conflicts and registers the
+        DVF in the Data structure.
+        """
         registration_name = 'DVF_' + self.reference_name + '_' + self.moving_name
         if registration_name in Data.deformable_list:
             n = 0
