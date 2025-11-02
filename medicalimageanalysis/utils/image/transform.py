@@ -13,6 +13,10 @@ import SimpleITK as sitk
 
 
 def euler_transform(matrix=None, angles=None, translation=None, rotation_center=None, zyx=False):
+    """
+    Creates a 3D Euler transformation that can combine rotation, translation, and a rotation center. Useful for rigid or
+    semi-rigid registration in 3D.
+    """
     transform = sitk.Euler3DTransform()
 
     if angles is not None:
