@@ -23,6 +23,10 @@ from scipy.spatial import distance
 
 
 class Refinement(object):
+    """
+    Provides tools for refining and processing surface meshes, including smoothing, clustering, decimation, and advanced
+    face splitting for mesh quality improvement.
+    """
     def __init__(self, mesh):
         self.mesh = mesh
 
@@ -35,6 +39,23 @@ class Refinement(object):
         self.face_lines = np.unique(self.face_lines_sort, axis=0)
 
     def smooth(self, iterations=20, angle=60, passband=0.001):
+        """
+        Smooths the mesh geometry using a windowed sinc filter.
+
+        Parameters
+        ----------
+        iterations : int
+            Number of smoothing iterations.
+        angle : float
+            Feature angle in degrees for smoothing sharp edges.
+        passband : float
+            Passband for the filter (controls smoothness).
+
+        Returns
+        -------
+        mesh : pyvista.PolyData
+            Smoothed mesh.
+        """
         smoother = vtk.vtkWindowedSincPolyDataFilter()
         smoother.SetInputData(self.mesh)
         smoother.SetNumberOfIterations(iterations)
@@ -51,6 +72,19 @@ class Refinement(object):
         return self.mesh
 
     def cluster(self, points=None):
+        """
+        Reduces the number of points on the mesh using clustering.
+
+        Parameters
+        ----------
+        points : int, optional
+            Number of target points. If None, computed automatically.
+
+        Returns
+        -------
+        mesh : pyvista.PolyData
+            Mesh after clustering.
+        """
         if points is None:
             points = self.compute_points()
         clus = pyacvd.Clustering(self.mesh)
@@ -60,6 +94,19 @@ class Refinement(object):
         return self.mesh
 
     def decimate(self, percent=None):
+        """
+        Decimates (reduces) mesh complexity by removing points and faces.
+
+        Parameters
+        ----------
+        percent : float, optional
+            Fraction of the mesh to remove. If None, computed automatically.
+
+        Returns
+        -------
+        mesh : pyvista.PolyData
+            Decimated mesh.
+        """
         if percent is None:
             percent = self.compute_point_percentage()
 
@@ -68,14 +115,38 @@ class Refinement(object):
         return self.mesh
 
     def compute_points(self):
+        """
+        Computes a target number of points based on the mesh size.
+
+        Returns
+        -------
+        int
+            Approximate number of points for clustering/decimation.
+        """
         return np.round(10 * np.sqrt(self.mesh.number_of_points))
 
     def compute_point_percentage(self):
+        """
+                Computes the fraction of points to remove for decimation.
+
+                Returns
+                -------
+                float
+                    Percentage of points to remove.
+                """
         points = self.compute_points()
 
         return 1 - (points / self.mesh.number_of_points)
 
     def tri_split(self):
+        """
+        Splits selected faces into smaller triangles by adding face centroids.
+
+        Returns
+        -------
+        pyvista.PolyData
+            Mesh with refined triangular faces.
+        """
         self.find_face_correction()
 
         base_faces = [f for ii, f in enumerate(self.face) if ii not in self.correct_faces]
@@ -96,6 +167,10 @@ class Refinement(object):
         return pv.PolyData(total_points, face_syntax)
 
     def advanced_split(self):
+        """
+        Advanced face splitting using midpoints of edges and face corrections. Intended for complex mesh refinement
+        where tri_split is insufficient.
+        """
         self.find_face_correction()
 
         midpoint, midline = self.compute_midpoints()
@@ -120,6 +195,9 @@ class Refinement(object):
                 print(1)
 
     def find_face_correction(self):
+        """
+        Identifies faces that require splitting based on distance between face centers.
+        """
         dist = distance.cdist(self.face_centers, self.face_centers, metric='euclidean')
         dist_sort = np.sort(dist, axis=1)
         dist_sum = np.sum(dist_sort[:, :6], axis=1)
@@ -127,6 +205,16 @@ class Refinement(object):
         self.correct_faces = dist_sum_sort[:int(len(self.points) / 4)]
 
     def compute_midpoints(self):
+        """
+        Computes midpoints of mesh edges for advanced splitting.
+
+        Returns
+        -------
+        midpoint_unique : np.ndarray
+            Unique midpoint coordinates.
+        midline_unique : np.ndarray
+            Corresponding edge indices for midpoints.
+        """
         line_midpoints = np.vstack([[(self.points[line[0]] + self.points[line[1]]) / 2] for line in self.face_lines])
 
         midpoint_list = []
@@ -164,6 +252,19 @@ class Refinement(object):
 
 
 def clean_mesh(mesh):
+    """
+    Cleans a mesh by removing holes, duplicate vertices, and other inconsistencies.
+
+    Parameters
+    ----------
+    mesh : pyvista.PolyData
+        Input mesh to be cleaned.
+
+    Returns
+    -------
+    corrected_mesh : pyvista.PolyData
+        Cleaned mesh.
+    """
     mesh = mesh.copy()
 
     meshfix = pymeshfix.PyTMesh()
@@ -178,6 +279,21 @@ def clean_mesh(mesh):
 
 
 def expansion(mesh, dist):
+    """
+    Expands a mesh along its vertex normals by a given distance and cleans the resulting mesh.
+
+    Parameters
+    ----------
+    mesh : pyvista.PolyData
+        Input mesh to be expanded.
+    dist : float
+        Distance to expand along vertex normals.
+
+    Returns
+    -------
+    corrected_mesh : pyvista.PolyData
+        Expanded and cleaned mesh.
+    """
     mesh = mesh.copy()
     mesh.points += mesh.point_normals * dist
 
@@ -193,6 +309,26 @@ def expansion(mesh, dist):
 
 
 def surface_boundary(source_meshes, target_meshes, points, matrix=None):
+    """
+    Aligns source and target meshes using point clustering to ensure that both meshes
+    have the same number of points along corresponding boundaries.
+
+    Parameters
+    ----------
+    source_meshes : list of pyvista.PolyData
+        List of source meshes.
+    target_meshes : list of pyvista.PolyData
+        List of target meshes.
+    points : list of arrays
+        Reference points for clustering each mesh.
+    matrix : np.array, optional
+        Transformation matrix to apply to target meshes.
+
+    Returns
+    -------
+    new_sources, new_targets : lists of pyvista.PolyData
+        Lists of aligned and transformed meshes.
+    """
     if matrix is None:
         matrix = np.identity(4)
 
@@ -219,6 +355,19 @@ def surface_boundary(source_meshes, target_meshes, points, matrix=None):
 
 
 def only_main_component(mesh):
+    """
+    Extracts only the largest connected component of a mesh.
+
+    Parameters
+    ----------
+    mesh : pyvista.PolyData
+        Input mesh which may contain multiple disconnected components.
+
+    Returns
+    -------
+    new_mesh : pyvista.PolyData
+        The largest connected component, returned as a surface mesh.
+    """
     multi_block = mesh.split_bodies()
 
     if len(multi_block) == 1:

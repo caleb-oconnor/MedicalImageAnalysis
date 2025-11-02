@@ -19,11 +19,23 @@ import pyvista as pv
 
 
 class Volume(object):
+    """
+    Converts a surface mesh into a volumetric tetrahedral mesh using PyTetWild and PyVista.
+    Provides methods to create the volumetric mesh and save it to a file.
+    """
     def __init__(self, surface_mesh):
         self.surface_mesh = surface_mesh
         self.mesh = None
 
     def create(self, edge_length=.02):
+        """
+        Generates a tetrahedral volumetric mesh from the surface mesh.
+
+        Parameters
+        ----------
+        edge_length : float
+            Target edge length factor for tetrahedralization. Smaller values yield finer meshes.
+        """
         base_mesh = pytetwild.tetrahedralize_pv(self.surface_mesh, edge_length_fac=edge_length, optimize=True)
         tetra_connect = base_mesh.cell_connectivity.reshape(int(len(base_mesh.cell_connectivity) / 4), 4)
         tetra_reshape = np.asarray([4 * np.ones((tetra_connect.shape[0])),
@@ -37,4 +49,12 @@ class Volume(object):
         self.mesh = pv.UnstructuredGrid(tetra_reformat, cell_types, np.asarray(base_mesh.points))
 
     def write(self, path):
+        """
+        Saves the tetrahedral mesh to a file.
+
+        Parameters
+        ----------
+        path : str
+            Path to save the mesh file. Can be .vtu or other PyVista-supported formats.
+        """
         self.mesh.save(path, binary=False)
