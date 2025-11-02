@@ -34,6 +34,9 @@ from ..data import Data
 
 
 def sort_images_by_datetime():
+    """
+    Reorders the global Data.image dictionary and Data.image_list based on the DICOM image acquisition date and time.
+    """
     date_time = [str(Data.image[name].date) + str(Data.image[name].time) for name in Data.image_list]
     new_key_order = [Data.image_list[idx] for idx in np.argsort(date_time)]
 
@@ -42,6 +45,9 @@ def sort_images_by_datetime():
 
 
 def thread_process_dicom(path, stop_before_pixels=False):
+    """
+    Reads a DICOM file from the given path, optionally stopping before loading pixel data.
+    """
     try:
         datasets = dicom.dcmread(str(path), stop_before_pixels=stop_before_pixels)
     except:
@@ -51,7 +57,24 @@ def thread_process_dicom(path, stop_before_pixels=False):
 
 
 class DicomReader(object):
+    """
+    Main class to read, organize, and process a collection of DICOM files.
+    - Multithreaded reading of DICOMs
+    - Sorting by modality and orientation
+    - Image creation and registration
+    - Associating RTSTRUCT/RTDOSE data with corresponding images
+    """
     def __init__(self, files, only_tags, only_modality, only_load_roi_names, clear):
+        """
+        Initializes DICOM reading parameters.
+
+        Arguments:
+            files: dictionary containing DICOM file paths.
+            only_tags: if True, reads only metadata (no pixel arrays).
+            only_modality: list of modalities to process (CT, MR, etc.).
+            only_load_roi_names: if True, loads only ROI names (not contours).
+            clear: if True, clears the global Data structure before loading.
+        """
         self.files = files
         self.only_tags = only_tags
         self.only_modality = only_modality
@@ -64,6 +87,9 @@ class DicomReader(object):
         self.ds_modality = {key: [] for key in ['CT', 'MR', 'PT', 'US', 'DX', 'RF', 'CR', 'RTSTRUCT', 'REG', 'RTDOSE']}
 
     def load(self, display_time=False):
+        """
+        Main entry point to read and organize all DICOM data.
+        """
         t1 = time.time()
         self.read()
         self.separate_modalities_and_images()
@@ -76,9 +102,7 @@ class DicomReader(object):
 
     def read(self):
         """
-        Reads in the dicom files using a threading process, and the user input "only_tags" determines if only the tags
-        are loaded or the tags and array.
-
+        Reads all DICOM files in parallel threads.
         """
         threads = []
 
@@ -95,16 +119,18 @@ class DicomReader(object):
 
     def separate_modalities_and_images(self):
         """
-        The files are first sorted by Modality with these options:
-            CT, MR, PT, US, DX, MG, NM, XA, CR, RTSTRUCT, REG, RTDose
+        Purpose:
+        Sorts all loaded DICOM datasets (self.ds) into groups by modality, series, orientation, and slice position.
 
-        Then the files are separated into images using the SeriesInstanceUID and AcquisitionNumber. The image
-        orientation and image position is used to determine how the slices are sorted incase they are read in out of
-        order. However, for 2d images or non image files (US, DX, MG, XA, CR, RTSTRUCT, REG, RTDose), sorting is not
-        required.
-        Returns
-        -------
+        Divides DICOMs by Modality (e.g., CT, MR, RTSTRUCT).
+            For 3D modalities (CT, MR, PT):
+                Groups by SeriesInstanceUID and AcquisitionNumber.
+                Sorts slices by spatial position and image orientation.
+                Determines the acquisition plane (Axial, Coronal, Sagittal).
+            For 2D or non-image modalities (US, CR, RTSTRUCT, etc.):
+                Simply groups without sorting.
 
+        Populates self.ds_modality[modality] with properly ordered image sets.
         """
         for modality in list(self.ds_modality.keys()):
             images_in_modality = [d for d in self.ds if (0x0008, 0x0060) in d and d['Modality'].value == modality]
@@ -256,12 +282,17 @@ class DicomReader(object):
 
     def image_creation(self):
         """
-        Currently only reading in 5 modalities (CT, MR, DX, US, RTSTRUCT, REG, RTDOSE) and using specific modality class
-        readers. First the image volume modalities are created, then RTSTRUCT is added to the image that it associates
-        with.
+        Converts grouped DICOM datasets into actual image/structure objects and integrates them into the global Data structure.
 
-        :return:
-        :rtype:
+        Image Modalities:
+            Uses specialized readers (Read3D, ReadXRay, ReadRF, ReadUS) for CT/MR/PT, DX/CR, RF, US images.
+
+        RTSTRUCT (contours):
+            Reads using ReadRTStruct, associates to matching image via Data.image[...].
+            Calls Data.match_rois() and Data.match_pois().
+
+        Registration and Dose:
+            Reads REG and RTDOSE modalities using their specific readers (ReadREG, ReadRTDose).
         """
         for modality in ['CT', 'MR', 'PT', 'DX', 'RF', 'CR', 'US']:
             for image_set in self.ds_modality[modality]:
@@ -299,10 +330,18 @@ class DicomReader(object):
 
 class Read3D(object):
     """
-    This is currently for CT and MR modalities.
+    Handles reading and constructing 3D medical image volumes (specifically CT/MR/PT modalities) from a list of DICOM
+    slices. It extracts geometry, orientation, and pixel data to create a volumetric representation of the image and
+    registers it in the global Data structure.
     """
 
     def __init__(self, image_set, only_tags):
+        """
+        image_set: list of DICOM slices (or a single slice).
+        only_tags: if True, loads only DICOM header data (no pixel array).
+
+        Creates an Image object and adds it to Data.image and Data.image_list.
+        """
         if isinstance(image_set, list):
             self.image_set = image_set
         else:
@@ -338,9 +377,8 @@ class Read3D(object):
 
     def _compute_array(self):
         """
-        Combines all the slice arrays into a 3D array.
-        :return:
-        :rtype:
+        Applies rescale slope/intercept for intensity normalization, then stacks slices. Deletes PixelData from each
+        DICOM object to free memory.
         """
 
         image_slices = []
@@ -363,9 +401,7 @@ class Read3D(object):
 
     def _compute_orientation(self):
         """
-        Looks in the tags for image orientation, typically exist in ImageOrientationPatient.
-        :return:
-        :rtype:
+        Extracts the image’s directional cosines (row/column orientation).
         """
         orientation = np.asarray([1, 0, 0, 0, 1, 0])
         if 'ImageOrientationPatient' in self.image_set[0]:
@@ -389,9 +425,7 @@ class Read3D(object):
 
     def _compute_plane(self):
         """
-        Computes the image plane for the slices
-        :return:
-        :rtype:
+        Determines the anatomical plane (Axial, Coronal, or Sagittal) based on the orientation vectors.
         """
         x = np.abs(self.orientation[0]) + np.abs(self.orientation[3])
         y = np.abs(self.orientation[1]) + np.abs(self.orientation[4])
@@ -407,8 +441,6 @@ class Read3D(object):
     def _compute_spacing(self):
         """
         Creates 3 axis spacing by inplane pixel spacing the slice thickness
-        :return:
-        :rtype:
         """
         inplane_spacing = [1, 1]
         slice_thickness = np.double(self.image_set[0].SliceThickness)
@@ -454,8 +486,6 @@ class Read3D(object):
     def _compute_dimensions(self):
         """
         Creates dimensions by columns, rows, and number of slices.
-        :return:
-        :rtype:
         """
         shape = self.array.shape
         if self.plane == 'Axial':
@@ -470,8 +500,6 @@ class Read3D(object):
     def _compute_image_matrix(self):
         """
         Computes the image matrix using the image orientation.
-        :return:
-        :rtype:
         """
         row_direction = self.orientation[:3]
         column_direction = self.orientation[3:]
@@ -485,6 +513,12 @@ class Read3D(object):
         return mat
 
     def _verify_axial_orientation(self):
+        """
+        Ensures that the 3D volume is oriented correctly in physical space.
+            - Computes all 8 corner coordinates of the image volume using orientation and spacing.
+            - Identifies the physical origin and corrects rotations or flips via np.rot90 and transpositions.
+            - Adjusts orientation vectors based on corrected axes.
+        """
         shape = self.array.shape
         if self.plane == 'Axial':
             spacing = self.spacing
@@ -572,6 +606,9 @@ class Read3D(object):
             self.origin = origin
 
     def _find_skipped_slices(self, slice_direction):
+        """
+        Detects missing slices by checking irregular gaps in slice positions.
+        """
         base_spacing = None
         for ii in range(len(self.image_set) - 1):
             position_1 = np.dot(slice_direction, self.image_set[ii].ImagePositionPatient)
@@ -585,11 +622,17 @@ class Read3D(object):
 
 class ReadXRay(object):
     """
-    This is X-ray images, modalities are DX or MG (mammograms). Mammograms can also be tomosynthesis which are not read
-    in this class.
+    Reads and constructs 2D X-ray images (modalities DX and MG) from DICOM files. Tomosynthesis mammograms (3D MG) are
+    not handled by this class.
     """
 
     def __init__(self, image_set, only_tags):
+        """
+        image_set: single DICOM image or list of DICOM datasets.
+        only_tags: if True, loads only metadata without pixel data.
+
+
+        """
         if isinstance(image_set, list):
             self.image_set = image_set
         else:
@@ -624,6 +667,10 @@ class ReadXRay(object):
         Data.image_list += [self.image_name]
 
     def _compute_plane(self):
+        """
+        Determines the anatomical plane (Axial, Coronal, Sagittal) from the PatientOrientation DICOM tag. Defaults to
+        Axial if not specified.
+        """
         if 'PatientOrientation' in self.image_set[0]:
             orient = self.image_set[0].PatientOrientation
             if 'L' in orient or 'R' in orient:
@@ -639,6 +686,10 @@ class ReadXRay(object):
             return 'Axial'
 
     def _compute_dimensions(self):
+        """
+        Defines image dimensions as [depth, height, width]. For 2D X-rays, one axis is set to 1 depending on the
+        detected plane.
+        """
         if self.plane == 'Axial':
             return np.asarray([1, self.image_set[0]['Rows'].value, self.image_set[0]['Columns'].value])
 
@@ -650,11 +701,8 @@ class ReadXRay(object):
 
     def _compute_spacing(self):
         """
-        Creates 3 axis spacing by inplane pixel spacing the 1 mm being the slice thickness even though 2D images don't
-        have thickness.
-
-        :return:
-        :rtype:
+        Calculates voxel spacing [x, y, z]. Uses available DICOM tags (e.g. PixelSpacing, ImagerPixelSpacing).
+        Sets slice thickness to 1 mm since X-rays are 2D. Adjusts spacing order based on the anatomical plane.
         """
         inplane_spacing = [1, 1]
         slice_thickness = 1
@@ -686,9 +734,9 @@ class ReadXRay(object):
 
     def _compute_array(self):
         """
-        Creates the image array.
-        :return:
-        :rtype:
+        Reads the image pixel array (pixel_array) and converts it to int16. Deletes raw pixel data from memory after
+        reading. If the PresentationLUTShape tag is 'Inverse', inverts grayscale values (16383 - array). Reshapes and
+        flips the array according to the detected plane for consistent orientation.
         """
         self.array = self.image_set[0].pixel_array.astype('int16')
         del self.image_set[0].PixelData
@@ -706,7 +754,15 @@ class ReadXRay(object):
 
 
 class ReadRF(object):
+    """
+    Handles Radio Fluoroscopy (RF) image data from DICOM files. Builds a standardized representation containing
+    metadata, orientation, and pixel data for integration into the global Data structure.
+    """
     def __init__(self, image_set, only_tags):
+        """
+        image_set: a DICOM object or list of DICOM datasets.
+        only_tags: if True, loads metadata only (no pixel data).
+        """
         if isinstance(image_set, list):
             self.image_set = image_set
         else:
@@ -741,6 +797,10 @@ class ReadRF(object):
         Data.image_list += [self.image_name]
 
     def _compute_plane(self):
+        """
+        Determines the anatomical viewing plane (Axial, Coronal, Sagittal) based on the DICOM PatientOrientation tag.
+        Defaults to Axial if the tag is missing.
+        """
         if 'PatientOrientation' in self.image_set[0]:
             orient = self.image_set[0].PatientOrientation
             if 'L' in orient or 'R' in orient:
@@ -757,9 +817,9 @@ class ReadRF(object):
 
     def _compute_array(self):
         """
-        Creates the image array.
-        :return:
-        :rtype:
+        Reads image pixel data into a NumPy array (int16). Deletes raw pixel data from memory to save space.
+        Reshapes the array into a consistent 3D form, even for single 2D frames, depending on the detected plane.
+        Saves the final shape as self.dimensions.
         """
         self.array = self.image_set[0].pixel_array.astype('int16')
         del self.image_set[0].PixelData
@@ -776,11 +836,9 @@ class ReadRF(object):
 
     def _compute_spacing(self):
         """
-        Creates 3 axis spacing by inplane pixel spacing the 1 mm being the slice thickness even though 2D images don't
-        have thickness.
-
-        :return:
-        :rtype:
+        Determines voxel spacing using standard DICOM tags (PixelSpacing, ImagerPixelSpacing, etc.). If no tags are
+        found, defaults to [1, 1, 1] (1 mm in each direction). Adjusts order of spacing values depending on the
+        anatomical plane.
         """
         inplane_spacing = [1, 1]
         slice_thickness = 1
@@ -813,11 +871,15 @@ class ReadRF(object):
 
 class ReadUS(object):
     """
-    This is Ultrasound images, modality is US. Similar to DX modality, except US can have stacks of "slices". Not slices
-    in the traditional because they don't correlate to one another.
+    Handles Ultrasound (US) images from DICOM files. Similar in structure to ReadXRay, but US images can include stacks
+    of frames that do not represent true anatomical slices.
     """
 
     def __init__(self, image_set, only_tags):
+        """
+        image_set: a single DICOM US image or a list of images.
+        only_tags: if True, loads only metadata without pixel data.
+        """
         if isinstance(image_set, list):
             self.image_set = image_set
         else:
@@ -852,6 +914,12 @@ class ReadUS(object):
         Data.image_list += [self.image_name]
 
     def _compute_array(self):
+        """
+        Reads pixel data and converts to NumPy array (uint8). Reshapes 2D images to 3D arrays with a single frame.
+        For multi-frame images:
+            Checks for uniform frames and extracts the first channel.
+            Updates self.dimensions based on the number of frames.
+        """
         us_data = np.asarray(self.image_set[0].pixel_array)
         del self.image_set[0].PixelData
 
@@ -872,6 +940,11 @@ class ReadUS(object):
             self.dimensions[0] = self.array.shape[0]
 
     def _compute_spacing(self):
+        """
+        Determines pixel spacing using standard DICOM tags (PixelSpacing, DetectorElementSpacing, etc.) or
+        ultrasound-specific sequences. Defaults to [1, 1, 1] if tags are missing. Returns spacing in [x, y, z] order
+        with a default slice thickness of 1 mm.
+        """
         inplane_spacing = [1, 1]
         slice_thickness = 1
 
@@ -897,7 +970,16 @@ class ReadUS(object):
 
 
 class ReadRTStruct(object):
+    """
+    Handles Radiotherapy Structure Set (RTSTRUCT) DICOM files. Extracts ROI (Region of Interest) contours and POI
+    (Points of Interest), matches them to a corresponding image series, and prepares them for integration with the
+    global Data structure.
+    """
     def __init__(self, image_set, only_tags):
+        """
+        image_set: a DICOM RTSTRUCT object.
+        only_tags: if True, only metadata is loaded (no contour/point coordinates).
+        """
         self.image_set = image_set
         self.only_tags = only_tags
 
@@ -921,6 +1003,9 @@ class ReadRTStruct(object):
             self.match_image_name = None
 
     def _get_series_uid(self):
+        """
+        Reads the SeriesInstanceUID of the image series referenced by the RTSTRUCT.
+        """
         study = 'RTReferencedStudySequence'
         series = 'RTReferencedSeriesSequence'
         ref = self.image_set.ReferencedFrameOfReferenceSequence
@@ -928,6 +1013,10 @@ class ReadRTStruct(object):
         return ref[0][study][0][series][0]['SeriesInstanceUID'].value
 
     def _get_properties(self):
+        """
+        Iterates through ROIContourSequence. Collects ROI/POI names, colors, geometric type, and linked SOPInstanceUIDs.
+        Assigns random colors if none are provided.
+        """
         tracker = []
         sop = []
         names = []
@@ -945,8 +1034,10 @@ class ReadRTStruct(object):
                         for seq in s['ContourSequence']:
                             slice_sop += [seq['ContourImageSequence'][0]['ReferencedSOPInstanceUID'].value]
                     else:
-                        slice_sop = [
-                            s['ContourSequence'][0]['ContourImageSequence'][0]['ReferencedSOPInstanceUID'].value]
+                        if 'ContourImageSequence' in s['ContourSequence'][0]:
+                            slice_sop = [s['ContourSequence'][0]['ContourImageSequence'][0]['ReferencedSOPInstanceUID'].value]
+                        else:
+                            slice_sop = []
                     sop += [slice_sop]
 
                     if hasattr(s, 'ROIDisplayColor'):
@@ -961,6 +1052,10 @@ class ReadRTStruct(object):
         return properties
 
     def _match_with_image(self):
+        """
+        Searches Data.image for an image with a matching series UID and SOPInstanceUID. Returns the matched image name
+        or None if no match exists.
+        """
         match_image_name = None
 
         for image_name in Data.image:
@@ -971,6 +1066,10 @@ class ReadRTStruct(object):
         return match_image_name
 
     def _structure_positions(self):
+        """
+        Extracts the 3D coordinates of contours and points. Stores planar ROIs in self.contours and points in
+        self.points.
+        """
         sequences = self.image_set.ROIContourSequence
         for prop in self._properties:
             seq = sequences[prop[0]]
@@ -1029,6 +1128,9 @@ class ReadREG(object):
             self._compute_rigid()
             self._create_name()
             self._create_registration()
+
+    def _compute_sops(self):
+        pass
 
     def _compute_rigid(self, deformable=False):
         if deformable:
@@ -1118,7 +1220,15 @@ class ReadREG(object):
 
 
 class ReadRTDose(object):
+    """
+    Handles Radiotherapy Dose (RTDOSE) DICOM files. Reads dose arrays, determines spacing, orientation, and dimensions,
+    and integrates the dose into the global Data structure.
+    """
     def __init__(self, image_set, only_tags):
+        """
+        image_set: one or more DICOM RTDOSE objects.
+        only_tags: if True, only metadata is loaded (no dose array computation).
+        """
         if isinstance(image_set, list):
             self.image_set = image_set
         else:
@@ -1153,9 +1263,8 @@ class ReadRTDose(object):
 
     def _compute_array(self):
         """
-        Combines all the slice arrays into a 3D array.
-        :return:
-        :rtype:
+        Combines slices into a 3D dose array. Applies DoseGridScaling if present. Converts data to int16 and deletes
+        original pixel data.
         """
 
         if (0x3004, 0x000E) in self.image_set[0]:
@@ -1173,9 +1282,8 @@ class ReadRTDose(object):
 
     def _compute_orientation(self):
         """
-        Looks in the tags for image orientation, typically exist in ImageOrientationPatient.
-        :return:
-        :rtype:
+        Reads orientation from ImageOrientationPatient or functional group sequences. Flags unverified if orientation
+        cannot be determined.
         """
         orientation = np.asarray([1, 0, 0, 0, 1, 0])
         if 'ImageOrientationPatient' in self.image_set[0]:
@@ -1199,9 +1307,7 @@ class ReadRTDose(object):
 
     def _compute_plane(self):
         """
-        Computes the image plane for the slices
-        :return:
-        :rtype:
+        Determines the anatomical plane (Axial, Coronal, Sagittal) based on orientation vectors.
         """
         x = np.abs(self.orientation[0]) + np.abs(self.orientation[3])
         y = np.abs(self.orientation[1]) + np.abs(self.orientation[4])
@@ -1216,9 +1322,8 @@ class ReadRTDose(object):
 
     def _compute_spacing(self):
         """
-        Creates 3 axis spacing by inplane pixel spacing the slice thickness
-        :return:
-        :rtype:
+        Computes 3-axis voxel spacing from pixel spacing and slice thickness. Detects skipped slices and adjusts spacing
+        if slices are irregularly spaced (_find_skipped_slices).
         """
         inplane_spacing = [1, 1]
         slice_thickness = np.double(self.image_set[0].SliceThickness)
@@ -1263,9 +1368,7 @@ class ReadRTDose(object):
 
     def _compute_dimensions(self):
         """
-        Creates dimensions by columns, rows, and number of slices.
-        :return:
-        :rtype:
+        Sets dimensions based on array shape and plane orientation.
         """
         shape = self.array.shape
         if self.plane == 'Axial':
@@ -1279,9 +1382,7 @@ class ReadRTDose(object):
 
     def _compute_image_matrix(self):
         """
-        Computes the image matrix using the image orientation.
-        :return:
-        :rtype:
+        Constructs a 3×3 image matrix using row, column, and slice directions.
         """
         row_direction = self.orientation[:3]
         column_direction = self.orientation[3:]
@@ -1295,6 +1396,10 @@ class ReadRTDose(object):
         return mat
 
     def _verify_axial_orientation(self):
+        """
+        Checks and corrects the origin and orientation of the dose array to ensure proper alignment. Rotates or flips
+        the array as needed.
+        """
         shape = self.array.shape
         if self.plane == 'Axial':
             spacing = self.spacing
@@ -1382,6 +1487,9 @@ class ReadRTDose(object):
             self.origin = origin
 
     def _find_skipped_slices(self, slice_direction):
+        """
+        Detects skipped or irregular slices along the slice direction and flags them.
+        """
         base_spacing = None
         for ii in range(len(self.image_set) - 1):
             position_1 = np.dot(slice_direction, self.image_set[ii].ImagePositionPatient)
@@ -1394,6 +1502,9 @@ class ReadRTDose(object):
 
 
 def create_image_name(modality):
+    """
+    Generate a unique, sequential name for an image based on its modality.
+    """
     idx = len(Data.image_list)
     if idx < 9:
         image_name = modality + ' 0' + str(1 + idx)
@@ -1404,6 +1515,9 @@ def create_image_name(modality):
 
 
 def create_dose_name(modality):
+    """
+    Generate a unique, sequential name for a dose based on its modality.
+    """
     idx = len(Data.dose_list)
     if idx < 9:
         image_name = modality + ' 0' + str(1 + idx)
