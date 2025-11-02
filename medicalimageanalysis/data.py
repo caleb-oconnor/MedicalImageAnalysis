@@ -1,34 +1,75 @@
+"""
+Morfeus lab
+The University of Texas
+MD Anderson Cancer Center
+Author - Caleb O'Connor
+Email - csoconnor@mdanderson.org
+
+
+Description:
+
+Functions:
+
+"""
+
 
 class Data(object):
+    """
+    Central storage class for managing images, rigid transformations, deformable transformations, doses, and associated
+    objects like ROIs (regions of interest) and POIs (points of interest).
+
+    This class uses class-level attributes to store all data and provides methods to maintain consistency across
+    multiple images.
+    """
+
     image = {}
     rigid = {}
     deformable = {}
     dose = {}
 
     image_list = []
-    roi_list = []
-    rigid_list = []
     deformable_list = []
     dose_list = []
+    poi_list = []
+    rigid_list = []
+    roi_list = []
 
     @classmethod
     def clear(cls):
+        """
+        Resets all data structures and lists. Clears all images, transformations, doses, ROIs, and POIs.
+        """
         cls.image = {}
         cls.rigid = {}
         cls.deformable = {}
         cls.dose = {}
 
         cls.image_list = []
+        cls.poi_list = []
         cls.roi_list = []
         cls.rigid_list = []
 
     @classmethod
     def delete_image(cls, image_name):
+        """
+        Deletes a specific image and removes it from the image list.
+
+        Parameters
+        ----------
+        image_name : str
+            Name of the image to remove.
+        """
         del cls.image[image_name]
         del cls.image_list[image_name]
 
     @classmethod
     def match_rois(cls):
+        """
+        Ensures that all images contain the same ROIs (regions of interest).
+        - Collects all ROI names from all images.
+        - Synchronizes color and visibility of ROIs across images.
+        - Adds missing ROIs to images with default or matched properties.
+        """
         image_rois = [list(cls.image[image_name].rois.keys()) for image_name in list(cls.image.keys())]
         roi_names = list({x for r in image_rois for x in r})
         Data.roi_list = roi_names
@@ -51,8 +92,15 @@ class Data(object):
 
     @classmethod
     def match_pois(cls):
+        """
+        Ensures that all images contain the same POIs (points of interest).
+        - Collects all POI names from all images.
+        - Synchronizes color and visibility of POIs across images.
+        - Adds missing POIs to images with default or matched properties.
+        """
         image_pois = [list(cls.image[image_name].pois.keys()) for image_name in list(cls.image.keys())]
         poi_names = list({x for r in image_pois for x in r})
+        Data.poi_list = poi_names
 
         color = [[128, 128, 128]] * len(poi_names)
         visible = [False] * len(poi_names)

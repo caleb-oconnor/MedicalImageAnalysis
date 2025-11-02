@@ -4,24 +4,6 @@ The University of Texas
 MD Anderson Cancer Center
 Author - Caleb O'Connor
 Email - csoconnor@mdanderson.org
-
-
-Description:
-    Currently, reads in dicom files for modalities: CT, MR, DX, MG, US, RTSTRUCTS.
-
-    The user inputs either a given folder path (can contain multiple images and subfolders). The files are sorted into
-    separate images.
-
-    Other user input options:
-        file_list - if the user already has the files wanted to read in, must be in type list
-        exclude_files - if the user wants to not read certain files
-        only_tags - does not read in the pixel array just the tags
-        only_modality - specify which modalities to read in, if not then all modalities will be read
-        only_load_roi_names - will only load rois with input name, list format
-
-Functions:
-    read_dicoms - Reads in all dicom files and separates them into the image list variable
-
 """
 
 import os
@@ -31,6 +13,20 @@ from .read import DicomReader, MhdReader, StlReader, VtkReader, ThreeMfReader
 
 
 def check_memory(files):
+    """
+    Estimate available memory after accounting for file sizes in different formats.
+
+    Parameters
+    ----------
+    files : dict
+        Dictionary of file lists grouped by type. Keys: 'Dicom', 'Nifti', 'Raw', 'Stl', 'Vtk', '3mf'
+
+    Returns
+    -------
+    float
+        Available memory in GB after subtracting the total file sizes.
+    """
+
     dicom_size = 0
     for file in files['Dicom']:
         dicom_size = dicom_size + os.path.getsize(file)
@@ -62,24 +58,31 @@ def check_memory(files):
 
 def file_parsar(folder_path=None, file_list=None, exclude_files=None):
     """
-    Walks through all the subfolders and checks each file extensions. Sorts them into 6 different options:
-        Dicom
-        MHD
-        Raw
-        Nifti
-        VTK
-        STL
-        3mf
+    Walk through folders or file list and sort files into categories based on extension.
+
+    Supports:
+        DICOM (.dcm)
+        MHD (.mhd)
+        RAW (.raw)
+        Nifti (.nii.gz)
+        STL (.stl)
+        VTK (.vtk)
+        3MF (.3mf)
         No extension
 
-    :param folder_path: single folder path
-    :type folder_path: string path
-    :param file_list: list of filepaths
-    :type file_list: list
-    :param exclude_files: list of filepaths
-    :type exclude_files: list
-    :return: dictionary of into files sorted by extensions
-    :rtype: dictionary
+    Parameters
+    ----------
+    folder_path : str, optional
+        Path to a folder containing files.
+    file_list : list, optional
+        Explicit list of file paths to process.
+    exclude_files : list, optional
+        List of file paths to exclude.
+
+    Returns
+    -------
+    dict
+        Dictionary of sorted file lists keyed by type.
     """
 
     no_file_extension = []
@@ -144,6 +147,26 @@ def file_parsar(folder_path=None, file_list=None, exclude_files=None):
 
 def read_dicoms(folder_path=None, file_list=None, exclude_files=None, only_tags=False, only_modality=None,
                 only_load_roi_names=None, clear=True):
+    """
+    Load DICOM files from a folder or file list using DicomReader.
+
+    Parameters
+    ----------
+    folder_path : str, optional
+        Path to folder containing DICOM files.
+    file_list : list, optional
+        Explicit list of file paths to read.
+    exclude_files : list, optional
+        List of file paths to exclude.
+    only_tags : bool, optional
+        If True, only read DICOM metadata tags.
+    only_modality : list, optional
+        List of DICOM modalities to include (e.g., CT, MR, PT, RTSTRUCT).
+    only_load_roi_names : list, optional
+        List of ROI names to load.
+    clear : bool, optional
+        Whether to clear existing DICOM data before loading.
+    """
     if only_modality is not None:
         only_modality = only_modality
     else:
@@ -158,14 +181,44 @@ def read_dicoms(folder_path=None, file_list=None, exclude_files=None, only_tags=
 
 
 def read_3mf(file=None, roi_name=None):
+    """
+    Load 3MF file using ThreeMfReader.
+
+    Parameters
+    ----------
+    file : str
+        Path to the 3MF file.
+    roi_name : str, optional
+        Name of the ROI to associate with the 3MF file.
+    """
     mf3_reader = ThreeMfReader(file, roi_name=roi_name)
     mf3_reader.load()
 
 
-def read_mhd(file=None, modality=None, reference_name=None, roi_name=None, dose=None, dvf=None):
+def read_mhd(file=None, modality=None, reference_name=None, moving_name=None, roi_name=None, dose=None, dvf=None):
+    """
+    Load MHD (MetaImage) file using MhdReader.
+
+    Parameters
+    ----------
+    file : str
+        Path to the MHD file.
+    modality : str, optional
+        Imaging modality (e.g., CT, MR).
+    reference_name : str, optional
+        Name of the reference image for registration.
+    moving_name : str, optional
+        Name of the moving image for registration.
+    roi_name : str, optional
+        ROI name to associate with this image.
+    dose : optional
+        Dose object to associate.
+    dvf : optional
+        Deformation vector field to associate.
+    """
     if file is not None:
-        mhd_reader = MhdReader(file=file, modality=modality, reference_name=reference_name, roi_name=roi_name,
-                               dose=dose, dvf=dvf)
+        mhd_reader = MhdReader(file=file, modality=modality, reference_name=reference_name, moving_name=moving_name,
+                               roi_name=roi_name, dose=dose, dvf=dvf)
         mhd_reader.load()
 
 
