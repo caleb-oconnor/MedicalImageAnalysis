@@ -54,7 +54,7 @@ Pygments==2.19.1
 pykdtree==1.4.1
 pylibjpeg==2.0.1
 pylibjpeg-libjpeg==2.3.0
-pymeshfix==0.17.0
+pymeshfix>=0.17.0
 pyparsing==3.2.1
 pytetwild==0.1.dev1
 python-dateutil==2.9.0.post0
