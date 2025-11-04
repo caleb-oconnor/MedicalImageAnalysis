@@ -482,9 +482,9 @@ class Image(object):
 
     def create_sitk_image(self, empty=False):
         if empty:
-            sitk_image = sitk.Image([int(dim) for dim in reversed(self.dimensions)], sitk.sitkUInt8)
+            sitk_image = sitk.Image([int(dim) for dim in self.dimensions], sitk.sitkUInt8)
         else:
-            sitk_image = sitk.GetImageFromArray(self.array.T)
+            sitk_image = sitk.GetImageFromArray(self.array)
 
         matrix_flat = self.matrix.flatten(order='F')
         sitk_image.SetDirection([float(mat) for mat in matrix_flat])
@@ -638,6 +638,18 @@ class Image(object):
         location = np.asarray([xyz[0], xyz[1], xyz[2], 1])
 
         return location.dot(pixel_to_position_matrix.T)[:3]
+
+    def compute_matrix_pixel_to_position(self):
+        matrix = copy.deepcopy(self.matrix)
+        spacing = self.spacing
+
+        pixel_to_position_matrix = np.identity(4, dtype=np.float32)
+        pixel_to_position_matrix[:3, 0] = matrix[0, :] * spacing[0]
+        pixel_to_position_matrix[:3, 1] = matrix[1, :] * spacing[1]
+        pixel_to_position_matrix[:3, 2] = matrix[2, :] * spacing[2]
+        pixel_to_position_matrix[:3, 3] = self.origin
+
+        return pixel_to_position_matrix
 
     def reset_array(self):
         self.display.secondary_array = None
