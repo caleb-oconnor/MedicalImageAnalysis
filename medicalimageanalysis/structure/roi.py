@@ -244,10 +244,21 @@ class Roi(object):
 
         else:
             colors = None
-            if self.multi_color:
-                colors = roi_slice['colors']
+            # if self.multi_color:
+            #     colors = roi_slice['colors']
 
             return roi_slice, colors
+
+    def create_sitk_mask(self):
+        mask = self.compute_mask()
+
+        matrix_flat = self.image.matrix.flatten(order='F')
+        sitk_mask = sitk.GetImageFromArray(mask.T)
+        sitk_mask.SetDirection([float(mat) for mat in matrix_flat])
+        sitk_mask.SetOrigin(self.image.origin)
+        sitk_mask.SetSpacing(self.image.spacing)
+
+        return sitk_mask
 
     def update_pixel(self, pixel, plane='Axial'):
         self.plane = plane
