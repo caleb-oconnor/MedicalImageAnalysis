@@ -291,6 +291,7 @@ class Rigid(object):
                     n += 1
                     new_name = copy.deepcopy(rigid_name + '_' + str(n))
                     if new_name not in Data.rigid_list:
+                        rigid_name = new_name
                         n = -100
 
         Data.rigid[rigid_name] = self
