@@ -14,6 +14,7 @@ Structure:
 import copy
 
 import numpy as np
+import SimpleITK as sitk
 
 import vtk
 from vtkmodules.util import numpy_support
@@ -381,6 +382,44 @@ class Rigid(object):
                 moving_roving.mesh = reference_roi.mesh.transform(np.linalg.inv(self.matrix @ self.combo_matrix),
                                                                   inplace=False)
                 self.update_rois(roi_name=roi_name)
+
+    def export_image(self, path=None):
+        if self.moving_name is not None and path is not None:
+            name = self.moving_name
+            matrix_reshape = Data.image[name].matrix.reshape(1, 9)[0]
+            vtk_image = vtk.vtkImageData()
+            vtk_image.SetSpacing(Data.image[name].spacing)
+            vtk_image.SetDirectionMatrix(matrix_reshape)
+            vtk_image.SetDimensions(np.flip(Data.image[name].array.shape))
+            vtk_image.SetOrigin(Data.image[name].origin)
+            vtk_image.GetPointData().SetScalars(numpy_support.numpy_to_vtk(Data.image[name].array.flatten(order="C")))
+
+            matrix = self.matrix @ self.combo_matrix
+            vtk_matrix = vtk.vtkMatrix4x4()
+            for i in range(4):
+                for j in range(4):
+                    vtk_matrix.SetElement(i, j, matrix[i, j])
+
+            transform = vtk.vtkTransform()
+            transform.SetMatrix(vtk_matrix)
+            transform.Inverse()
+
+            vtk_reslice = vtk.vtkImageReslice()
+            vtk_reslice.SetInputData(vtk_image)
+            vtk_reslice.SetResliceTransform(transform)
+            vtk_reslice.SetInterpolationModeToLinear()
+            vtk_reslice.SetOutputSpacing(Data.image[self.reference_name].spacing)
+            vtk_reslice.SetOutputDirection(1, 0, 0, 0, 1, 0, 0, 0, 1)
+            vtk_reslice.AutoCropOutputOn()
+            vtk_reslice.SetBackgroundLevel(-3001)
+            vtk_reslice.Update()
+
+            image_data = vtk_reslice.GetOutput()
+
+            writer = vtk.vtkMetaImageWriter()
+            writer.SetInputData(image_data)
+            writer.SetFileName(path)
+            writer.Write()
 
     def pre_alignment(self, superior=False, center=False, origin=False):
         if superior:
