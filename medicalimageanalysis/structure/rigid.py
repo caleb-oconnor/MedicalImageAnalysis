@@ -32,6 +32,7 @@ class Display(object):
         self.origin = None
         self.spacing = None
         self.array = None
+        self.matrix = np.identity(4)
 
         self.slice_location = [0, 0, 0]
         self.scroll_max = None
@@ -93,13 +94,12 @@ class Display(object):
         if self.rigid.rois[roi_name] is None:
             self.rigid.update_rois(roi_name=roi_name)
 
-        matrix = np.identity(4)
         if slice_plane == 'Axial':
-            normal = matrix[:3, 2]
+            normal = self.matrix[:3, 2]
         elif slice_plane == 'Coronal':
-            normal = matrix[:3, 1]
+            normal = self.matrix[:3, 1]
         else:
-            normal = matrix[:3, 0]
+            normal = self.matrix[:3, 0]
 
         roi_slice = self.rigid.rois[roi_name].slice(normal=normal, origin=location)
 
@@ -133,42 +133,14 @@ class Display(object):
             return roi_slice
 
     def compute_reslice(self):
-        name = self.rigid.moving_name
-        matrix_reshape = Data.image[name].matrix.reshape(1, 9)[0]
-        vtk_image = vtk.vtkImageData()
-        vtk_image.SetSpacing(Data.image[name].spacing)
-        vtk_image.SetDirectionMatrix(matrix_reshape)
-        vtk_image.SetDimensions(np.flip(Data.image[name].array.shape))
-        vtk_image.SetOrigin(Data.image[name].origin)
-        vtk_image.GetPointData().SetScalars(numpy_support.numpy_to_vtk(Data.image[name].array.flatten(order="C")))
+        image = self.rigid.create_image()
 
-        matrix = self.rigid.matrix @ self.rigid.combo_matrix
-        vtk_matrix = vtk.vtkMatrix4x4()
-        for i in range(4):
-            for j in range(4):
-                vtk_matrix.SetElement(i, j, matrix[i, j])
-
-        transform = vtk.vtkTransform()
-        transform.SetMatrix(vtk_matrix)
-        transform.Inverse()
-
-        vtk_reslice = vtk.vtkImageReslice()
-        vtk_reslice.SetInputData(vtk_image)
-        vtk_reslice.SetResliceTransform(transform)
-        vtk_reslice.SetInterpolationModeToLinear()
-        vtk_reslice.SetOutputSpacing(Data.image[self.rigid.reference_name].spacing)
-        vtk_reslice.SetOutputDirection(1, 0, 0, 0, 1, 0, 0, 0, 1)
-        vtk_reslice.AutoCropOutputOn()
-        vtk_reslice.SetBackgroundLevel(-3001)
-        vtk_reslice.Update()
-
-        reslice_data = vtk_reslice.GetOutput()
-        self.origin = np.asarray(reslice_data.GetOrigin())
-        self.spacing = reslice_data.GetSpacing()
-        dimensions = reslice_data.GetDimensions()
+        self.origin = np.asarray(image.GetOrigin())
+        self.spacing = image.GetSpacing()
+        dimensions = image.GetDimensions()
         self.compute_offset()
 
-        scalars = reslice_data.GetPointData().GetScalars()
+        scalars = image.GetPointData().GetScalars()
         self.array = numpy_support.vtk_to_numpy(scalars).reshape(dimensions[2], dimensions[1], dimensions[0])
 
     def compute_slice_location(self, position=None):
@@ -383,41 +355,44 @@ class Rigid(object):
                                                                   inplace=False)
                 self.update_rois(roi_name=roi_name)
 
+    def create_image(self):
+        name = self.moving_name
+        matrix_reshape = Data.image[name].matrix.reshape(1, 9)[0]
+        vtk_image = vtk.vtkImageData()
+        vtk_image.SetSpacing(Data.image[name].spacing)
+        vtk_image.SetDirectionMatrix(matrix_reshape)
+        vtk_image.SetDimensions(np.flip(Data.image[name].array.shape))
+        vtk_image.SetOrigin(Data.image[name].origin)
+        vtk_image.GetPointData().SetScalars(numpy_support.numpy_to_vtk(Data.image[name].array.flatten(order="C")))
+
+        matrix = self.matrix @ self.combo_matrix
+        vtk_matrix = vtk.vtkMatrix4x4()
+        for i in range(4):
+            for j in range(4):
+                vtk_matrix.SetElement(i, j, matrix[i, j])
+
+        transform = vtk.vtkTransform()
+        transform.SetMatrix(vtk_matrix)
+        transform.Inverse()
+
+        vtk_reslice = vtk.vtkImageReslice()
+        vtk_reslice.SetInputData(vtk_image)
+        vtk_reslice.SetResliceTransform(transform)
+        vtk_reslice.SetInterpolationModeToLinear()
+        vtk_reslice.SetOutputSpacing(Data.image[self.reference_name].spacing)
+        vtk_reslice.SetOutputDirection(1, 0, 0, 0, 1, 0, 0, 0, 1)
+        vtk_reslice.AutoCropOutputOn()
+        vtk_reslice.SetBackgroundLevel(-3001)
+        vtk_reslice.Update()
+
+        return vtk_reslice.GetOutput()
+
     def export_image(self, path=None):
         if self.moving_name is not None and path is not None:
-            name = self.moving_name
-            matrix_reshape = Data.image[name].matrix.reshape(1, 9)[0]
-            vtk_image = vtk.vtkImageData()
-            vtk_image.SetSpacing(Data.image[name].spacing)
-            vtk_image.SetDirectionMatrix(matrix_reshape)
-            vtk_image.SetDimensions(np.flip(Data.image[name].array.shape))
-            vtk_image.SetOrigin(Data.image[name].origin)
-            vtk_image.GetPointData().SetScalars(numpy_support.numpy_to_vtk(Data.image[name].array.flatten(order="C")))
-
-            matrix = self.matrix @ self.combo_matrix
-            vtk_matrix = vtk.vtkMatrix4x4()
-            for i in range(4):
-                for j in range(4):
-                    vtk_matrix.SetElement(i, j, matrix[i, j])
-
-            transform = vtk.vtkTransform()
-            transform.SetMatrix(vtk_matrix)
-            transform.Inverse()
-
-            vtk_reslice = vtk.vtkImageReslice()
-            vtk_reslice.SetInputData(vtk_image)
-            vtk_reslice.SetResliceTransform(transform)
-            vtk_reslice.SetInterpolationModeToLinear()
-            vtk_reslice.SetOutputSpacing(Data.image[self.reference_name].spacing)
-            vtk_reslice.SetOutputDirection(1, 0, 0, 0, 1, 0, 0, 0, 1)
-            vtk_reslice.AutoCropOutputOn()
-            vtk_reslice.SetBackgroundLevel(-3001)
-            vtk_reslice.Update()
-
-            image_data = vtk_reslice.GetOutput()
+            image = self.create_image()
 
             writer = vtk.vtkMetaImageWriter()
-            writer.SetInputData(image_data)
+            writer.SetInputData(image)
             writer.SetFileName(path)
             writer.Write()
 
