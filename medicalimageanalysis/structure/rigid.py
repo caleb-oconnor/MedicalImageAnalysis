@@ -138,10 +138,12 @@ class Display(object):
         self.origin = np.asarray(image.GetOrigin())
         self.spacing = image.GetSpacing()
         dimensions = image.GetDimensions()
-        self.compute_offset()
 
         scalars = image.GetPointData().GetScalars()
         self.array = numpy_support.vtk_to_numpy(scalars).reshape(dimensions[2], dimensions[1], dimensions[0])
+
+        self.compute_offset()
+        self.compute_scroll_max()
 
     def compute_slice_location(self, position=None):
         if position is None:
@@ -212,6 +214,15 @@ class Display(object):
 
         return pixel
 
+    def update_slice_location(self, scroll, slice_plane):
+        # print(a)
+        if slice_plane == 'Axial':
+            self.slice_location[0] = scroll
+        elif slice_plane == 'Coronal':
+            self.slice_location[1] = scroll
+        else:
+            self.slice_location[2] = scroll
+
 
 class Rigid(object):
     def __init__(self, reference_name, moving_name, rigid_name=None, roi_names=None, reference_sops=None,
@@ -272,6 +283,16 @@ class Rigid(object):
 
         return rigid_name
 
+    def compute_aspect(self, slice_plane):
+        if slice_plane == 'Axial':
+            aspect = np.round(self.display.spacing[0] / self.display.spacing[1], 2)
+        elif slice_plane == 'Coronal':
+            aspect = np.round(self.display.spacing[0] / self.display.spacing[2], 2)
+        else:
+            aspect = np.round(self.display.spacing[1] / self.display.spacing[2], 2)
+
+        return aspect
+
     def compute_icp_vtk(self, source_mesh, target_mesh, distance=1e-5, iterations=1000, landmarks=None,
                         com_matching=True, inverse=True, center=None):
         target_mesh.transform(self.matrix @ self.combo_matrix, inplace=True)
@@ -306,7 +327,7 @@ class Rigid(object):
         else:
             self.matrix = icp.get_matrix()
 
-        self.update_rois(all_rois=True)
+        self.update_rois()
 
     def compute_o3d(self, source_mesh, target_mesh, distance=10, iterations=1000, rmse=1e-7, fitness=1e-7,
                     method='point', com_matching=True, inverse=True, center=None):
@@ -342,7 +363,7 @@ class Rigid(object):
         else:
             self.matrix = icp.get_matrix()
 
-        self.update_rois(all_rois=True)
+        self.update_rois()
 
     def copy_roi(self, roi_name=None, inverse=False):
         if roi_name in list(self.rois.keys()):
@@ -421,6 +442,44 @@ class Rigid(object):
     def retrieve_offset(self, slice_plane):
         return self.display.offset[slice_plane]
 
+    def retrieve_slice_location(self, slice_plane):
+        if slice_plane == 'Axial':
+            return self.display.slice_location[0]
+
+        elif slice_plane == 'Coronal':
+            return self.display.slice_location[1]
+
+        else:
+            return self.display.slice_location[2]
+
+    def retrieve_slice_position(self, slice_plane=None):
+        pixel_to_position_matrix = self.display.compute_matrix_pixel_to_position()
+
+        if slice_plane is None:
+            location = np.asarray([self.display.slice_location[2],
+                                   self.display.slice_location[1],
+                                   self.display.slice_location[0], 1])
+        else:
+            if slice_plane == 'Axial':
+                location = np.asarray([0, 0, self.display.slice_location[0], 1])
+            elif slice_plane == 'Coronal':
+                location = np.asarray([0, self.display.slice_location[1], 0, 1])
+                print(location)
+            else:
+                location = np.asarray([self.display.slice_location[2], 0, 0, 1])
+
+        return location.dot(pixel_to_position_matrix.T)[:3]
+
+    def retrieve_scroll_max(self, slice_plane):
+        if slice_plane == 'Axial':
+            return self.display.scroll_max[0]
+
+        elif slice_plane == 'Coronal':
+            return self.display.scroll_max[1]
+
+        else:
+            return self.display.scroll_max[2]
+
     def retrieve_translation(self):
         return self.matrix[:3, 3]
 
@@ -442,7 +501,7 @@ class Rigid(object):
         self.matrix = new_matrix @ self.matrix
         self.display.compute_reslice()
         self.display.compute_scroll_max()
-        self.update_rois(all_rois=True)
+        self.update_rois()
 
     def update_translation(self, t_x=0, t_y=0, t_z=0):
         new_matrix = np.identity(4)
@@ -457,9 +516,9 @@ class Rigid(object):
 
         self.display.compute_offset()
         self.display.compute_scroll_max()
-        self.update_rois(all_rois=True)
+        self.update_rois()
 
-    def update_rois(self, roi_name=None, all_rois=False):
+    def update_rois(self, roi_name=None):
         for name in list(self.rois.keys()):
             if name not in Data.roi_list:
                 del self.rois[name]
@@ -468,13 +527,8 @@ class Rigid(object):
             if name not in list(self.rois.keys()):
                 self.rois[name] = None
 
-        if all_rois:
-            for roi_name in Data.roi_list:
-                roi = Data.image[self.moving_name].rois[roi_name]
+        for name in Data.roi_list:
+            if roi_name is None or name == roi_name:
+                roi = Data.image[self.moving_name].rois[name]
                 if roi.mesh is not None and roi.visible:
                     self.rois[roi_name] = roi.mesh.transform(self.matrix @ self.combo_matrix, inplace=False)
-
-        else:
-            roi = Data.image[self.moving_name].rois[roi_name]
-            if roi.mesh is not None and roi.visible:
-                self.rois[roi_name] = roi.mesh.transform(self.matrix @ self.combo_matrix, inplace=False)
