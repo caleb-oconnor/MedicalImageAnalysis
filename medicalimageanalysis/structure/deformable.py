@@ -11,8 +11,14 @@ Structure:
 
 """
 
+import copy
+
 import numpy as np
 import SimpleITK as sitk
+
+import vtk
+from vtkmodules.util import numpy_support
+from scipy.ndimage import map_coordinates
 
 from ..data import Data
 from ..utils.deformable.simpleitk import DeformableITK
@@ -35,12 +41,28 @@ class Display(object):
 
         self.compute_scroll_max()
 
+    def compute_array(self, slice_plane):
+        array_slice = None
+        if slice_plane == 'Axial':
+            if 0 <= self.slice_location[0] < self.array.shape[0]:
+                array_slice = self.array[self.slice_location[0], :, :].astype(np.double)
+
+        elif slice_plane == 'Coronal':
+            if 0 <= self.slice_location[1] < self.array.shape[1]:
+                array_slice = self.array[:, self.slice_location[1], :].astype(np.double)
+
+        else:
+            if 0 <= self.slice_location[2] < self.array.shape[2]:
+                array_slice = self.array[:, :, self.slice_location[2]].astype(np.double)
+
+        return array_slice
+
     def compute_deformation(self):
         image = self.deformable.create_image()
 
-        self.array = warped_image.GetArrayFromImage(image)
-        self.spacing = warped_image.GetArrayFromImage(image.GetSpacing())
-        self.origin = warped_image.GetArrayFromImage(image.GetOrigin())
+        self.array = sitk.GetArrayFromImage(image)
+        self.spacing = image.GetSpacing()
+        self.origin = image.GetOrigin()
 
     def compute_grid(self, slice_plane='Axial', vector='x'):
         if slice_plane == 'Axial':
@@ -183,6 +205,7 @@ class Deformable(object):
 
         self.deformable_name = self.add_deformable(registration_name)
 
+        self.rois = {}
         self.display = Display(self)
 
     def add_deformable(self, deformable_name):
@@ -388,7 +411,7 @@ class Deformable(object):
         dvf_resampled.SetTransform(dvf_transform)
         dvf_resampled.SetInterpolator(sitk.sitkLinear)
         dvf_resampled.SetDefaultPixelValue(0)
-        dvf_resampled.SetOutputDirection(list(np.identity(3).flatten))
+        dvf_resampled.SetOutputDirection(np.identity(3).flatten().tolist())
 
         return dvf_resampled.Execute(resampled_image)
 
@@ -401,8 +424,15 @@ class Deformable(object):
             writer.SetFileName(path)
             writer.Write()
 
-    def retrieve_array_plane(self, slice_plane):
-        return self.display.compute_array(slice_plane=slice_plane)
+    def retrieve_array_plane(self, slice_plane, vector=None):
+        if vector is None:
+            return self.display.compute_array(slice_plane)
+        elif vector == 'x':
+            return self.display.compute_grid(slice_plane=slice_plane, vector=vector)
+        elif vector == 'y':
+            return self.display.compute_grid(slice_plane=slice_plane, vector=vector)
+        elif vector == 'z':
+            return self.display.compute_grid(slice_plane=slice_plane, vector=vector)
 
     def retrieve_grid(self, slice_plane='Axial', vector='x'):
         return self.display.compute_grid(slice_plane=slice_plane, vector=vector)
@@ -417,6 +447,24 @@ class Deformable(object):
         else:
             return self.display.slice_location[2]
 
+    def retrieve_slice_position(self, slice_plane=None):
+        pixel_to_position_matrix = self.display.compute_matrix_pixel_to_position()
+
+        if slice_plane is None:
+            location = np.asarray([self.display.slice_location[2],
+                                   self.display.slice_location[1],
+                                   self.display.slice_location[0], 1])
+        else:
+            if slice_plane == 'Axial':
+                location = np.asarray([0, 0, self.display.slice_location[0], 1])
+            elif slice_plane == 'Coronal':
+                location = np.asarray([0, self.display.slice_location[1], 0, 1])
+                print(location)
+            else:
+                location = np.asarray([self.display.slice_location[2], 0, 0, 1])
+
+        return location.dot(pixel_to_position_matrix.T)[:3]
+
     def retrieve_scroll_max(self, slice_plane):
         if slice_plane == 'Axial':
             return self.display.scroll_max[0]
@@ -427,7 +475,7 @@ class Deformable(object):
         else:
             return self.display.scroll_max[2]
 
-    def update_rois(self, roi_name=None, all_rois=False):
+    def update_rois(self, roi_name=None):
         for name in list(self.rois.keys()):
             if name not in Data.roi_list:
                 del self.rois[name]
@@ -441,3 +489,17 @@ class Deformable(object):
                 roi = Data.image[self.moving_name].rois[name]
                 if roi.mesh is not None and roi.visible:
                     self.rigid_rois[name] = roi.mesh.transform(self.rigid_matrix, inplace=False)
+
+                    points = self.rigid_rois[name].points
+                    voxel_coords = (points - self.origin) / self.spacing
+                    deformed_points = points.copy()
+                    for i in range(3):
+                        deformed_points[:, i] += map_coordinates(
+                            self.dvf[..., i],
+                            [voxel_coords[:, 2], voxel_coords[:, 1], voxel_coords[:, 0]],
+                            order=1,
+                            mode='nearest'
+                        )
+
+                    self.deformable_rois[name] = self.rigid_rois[name].copy()
+                    self.deformable_rois.points = deformed_points
