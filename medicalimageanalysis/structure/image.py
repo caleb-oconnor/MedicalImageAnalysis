@@ -24,7 +24,6 @@ from scipy.spatial.transform import Rotation
 import vtk
 from vtkmodules.util import numpy_support
 
-from ..utils.image.transform import euler_transform
 from ..utils.image.threshold import external
 from ..utils.roi.contour import contours_from_mask
 
