@@ -1148,8 +1148,8 @@ class ReadREG(object):
             self.moving_matrix = np.linalg.inv(np.asarray(matrix).reshape(4, 4))
         else:
             self.reference_matrix = self.image_set[0].RegistrationSequence[1]['MatrixRegistrationSequence'][0]['MatrixSequence'][0][0x3006, 0x00C6].value
-            self.moving_matrix = self.image_set[0].RegistrationSequence[1]['MatrixRegistrationSequence'][0]['MatrixSequence'][0][
-                0x3006, 0x00C6].value
+            matrix = self.image_set[0].RegistrationSequence[1]['MatrixRegistrationSequence'][0]['MatrixSequence'][0][0x3006, 0x00C6].value
+            self.moving_matrix = np.linalg.inv(np.asarray(matrix).reshape(4, 4))
 
     def _compute_dvf(self):
         self.origin = self.image_set[0].DeformableRegistrationSequence[0].DeformableRegistrationGridSequence[
@@ -1263,8 +1263,7 @@ class ReadRTDose(object):
 
     def _compute_array(self):
         """
-        Combines slices into a 3D dose array. Applies DoseGridScaling if present. Converts data to int16 and deletes
-        original pixel data.
+        Combines slices into a 3D dose array. Applies DoseGridScaling if present. Deletes original pixel data.
         """
 
         if (0x3004, 0x000E) in self.image_set[0]:
@@ -1272,7 +1271,7 @@ class ReadRTDose(object):
         else:
             slope = 1
 
-        dose_array = (self.image_set[0].pixel_array * slope).astype('int16')
+        dose_array = (self.image_set[0].pixel_array * slope)
 
         self.array = np.asarray(dose_array)
         if len(dose_array.shape) == 2:
