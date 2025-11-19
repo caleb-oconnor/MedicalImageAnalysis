@@ -475,6 +475,20 @@ class Deformable(object):
         else:
             return self.display.scroll_max[2]
 
+    def save_deformable(self, path):
+        variable_names = self.__dict__.keys()
+        column_names = [name for name in variable_names if name not in ['deformable_rois',
+                                                                        'display',
+                                                                        'dvf',
+                                                                        'rigid_rois']]
+
+        df = pd.DataFrame(index=[0], columns=column_names)
+        for name in column_names:
+            df.at[0, name] = getattr(self, name)
+
+        df.to_pickle(os.path.join(path, 'info.p'))
+        np.save(os.path.join(path, 'dvf.npy'), self.dvf, allow_pickle=True)
+
     def update_rois(self, roi_name=None):
         for name in list(self.rois.keys()):
             if name not in Data.roi_list:
