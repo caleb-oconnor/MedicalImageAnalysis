@@ -503,6 +503,18 @@ class Dose(object):
     def retrieve_vtk_volume(self, slice_plane):
         return self.display.compute_vtk_volume(slice_plane)
 
+    def save_image(self, path):
+        variable_names = self.__dict__.keys()
+        column_names = [name for name in variable_names if name not in ['tags', 'array', 'display', 'rois']]
+
+        df = pd.DataFrame(index=[0], columns=column_names)
+        for name in column_names:
+            df.at[0, name] = getattr(self, name)
+
+        df.to_pickle(os.path.join(path, 'info.p'))
+        np.save(os.path.join(path, 'tags.npy'), self.tags, allow_pickle=True)
+        np.save(os.path.join(path, 'array.npy'), self.array, allow_pickle=True)
+
     def update_rotation(self, r_x=0, r_y=0, r_z=0, base=True):
         if r_x != 0 or r_y != 0 or r_z != 0:
             r = Rotation.from_euler('xyz', [r_x, r_y, r_z], degrees=True)
