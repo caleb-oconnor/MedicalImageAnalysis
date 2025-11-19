@@ -44,6 +44,10 @@ Using [pip](https://pip.pypa.io/en/stable/):
 pip install medicalimageanalysis
 ```
 
+During install there can be an error with a jupyter dependency file path containing over 260 characters exceeding windows 
+limit. This can be resolved by enabling long paths on Windows or simply trying to install again, it will skip the 
+package causing the error. 
+
 ## Reader Example 1
 The user sets a path to the folder containing the dicom files or highest level folder with subfolders containing dicom
 files.
