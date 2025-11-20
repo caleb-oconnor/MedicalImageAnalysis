@@ -57,8 +57,7 @@ import medicalimageanalysis as mia
 
 path = r'/path/to/folder'
 
-reader = mia.Reader(folder_path=path)
-reader.read_dicoms()
+mia.read_dicoms(folder_path=path)
 
 ```
 
@@ -78,9 +77,8 @@ import medicalimageanalysis as mia
 file_list = ['filepath1.dcm', 'filepath2.dcm', ...]
 exclude_files = ['filepath10.dcm', 'filepath11.dcm', ...]
 
-reader = mia.Reader(file_list=file_list, exclude_files=exclude_files, only_tags=True, only_modality=['CT'],
-                    only_load_roi_names=['Liver', 'Tumor'])
-reader.read_dicoms()
+mia.read_dicoms(file_list=file_list, exclude_files=exclude_files, only_tags=True, only_modality=['CT'],
+                only_load_roi_names=['Liver', 'Tumor'])
 
 ```
 
@@ -95,16 +93,16 @@ import medicalimageanalysis as mia
 
 path = r'/path/to/folder'
 
-reader = mia.Reader(folder_path=path)
-reader.read_dicoms()
+mia.read_dicoms(folder_path=path)
 
-images = reader.images
+image_list = mia.Data.image_list
+image = mia.Data[image_list[0]]
 
-array = images[0].array
-tags = images[0].tags  # list of all the tags, for 100 slice CT scan the tags list would be 0-99 each containing a dict
+array = image.array
+tags = image.tags  # list of all the tags, for 100 slice CT scan the tags list would be 0-99 each containing a dict
 
-name = images[0].patient_name  # or tags[0].PatientName
-spacing = images[0].spacing  # inplane spacing followed by slice thickness
+name = image.patient_name  # or tags[0].PatientName
+spacing = image.spacing  # inplane spacing followed by slice thickness
 
 ```
 
@@ -127,13 +125,14 @@ path = r'/path/to/folder'
 reader = mia.Reader(folder_path=path)
 reader.read_dicoms()
 
-image = reader.images[0]
+image_list = mia.Data.image_list
+image = mia.Data[image_list[0]]
 
-roi_names = list(image.rois.keys())
+roi_names = mia.Data.roi_list
 roi = image.rois[roi_names[0]]
 contour_position = roi.contour_position
 
-poi_names = list(image.pois.keys())
+poi_names = mia.Data.poi_list
 poi = image.rois[poi_names[0]]
 point_position = poi.point_position
 
