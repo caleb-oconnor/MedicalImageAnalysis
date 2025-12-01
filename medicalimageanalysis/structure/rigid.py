@@ -56,7 +56,10 @@ class Display(object):
         return array_slice
 
     def compute_offset(self):
-        pos = Data.image[self.rigid.reference_name].origin
+        if self.rigid.inverse:
+            pos = Data.image[self.rigid.moving_name].origin
+        else:
+            pos = Data.image[self.rigid.reference_name].origin
 
         self.offset['Axial'][0] = (self.origin[0] - pos[0]) / self.spacing[0]
         self.offset['Axial'][1] = (self.origin[1] - pos[1]) / self.spacing[1]
@@ -66,7 +69,10 @@ class Display(object):
         self.offset['Sagittal'][1] = (self.origin[2] - pos[2]) / self.spacing[2]
 
     def compute_matrix_pixel_to_position(self):
-        matrix = copy.deepcopy(Data.image[self.rigid.moving_name].matrix)
+        if self.rigid.inverse:
+            matrix = copy.deepcopy(Data.image[self.rigid.reference_name].matrix)
+        else:
+            matrix = copy.deepcopy(Data.image[self.rigid.moving_name].matrix)
 
         pixel_to_position_matrix = np.identity(4, dtype=np.float32)
         pixel_to_position_matrix[:3, 0] = matrix[0, :] * self.spacing[0]
@@ -77,7 +83,10 @@ class Display(object):
         return pixel_to_position_matrix
 
     def compute_matrix_position_to_pixel(self):
-        matrix = copy.deepcopy(Data.image[self.rigid.moving_name].matrix)
+        if self.rigid.inverse:
+            matrix = copy.deepcopy(Data.image[self.rigid.reference_name].matrix)
+        else:
+            matrix = copy.deepcopy(Data.image[self.rigid.moving_name].matrix)
 
         hold_matrix = np.identity(3, dtype=np.float32)
         hold_matrix[0, :] = matrix[0, :] / self.spacing[0]
@@ -147,8 +156,13 @@ class Display(object):
 
     def compute_slice_location(self, position=None):
         if position is None:
-            source_location = np.flip(Data.image[self.rigid.reference_name].display.slice_location)
-            position = Data.image[self.rigid.reference_name].display.compute_index_positions(source_location)
+            if self.rigid.inverse:
+                source_location = np.flip(Data.image[self.rigid.reference_name].display.slice_location)
+                position = Data.image[self.rigid.reference_name].display.compute_index_positions(source_location)
+            else:
+                source_location = np.flip(Data.image[self.rigid.moving_name].display.slice_location)
+                position = Data.image[self.rigid.moving_name].display.compute_index_positions(source_location)
+
         self.slice_location = np.flip(np.round((position - self.origin) / self.spacing).astype(np.int32))
 
     def compute_slice_origin(self, slice_plane):
@@ -204,7 +218,10 @@ class Display(object):
         return vtk_image
 
     def convert_position_to_pixel(self, position=None):
-        position_to_pixel_matrix = Data.image[self.rigid.reference_name].display.compute_matrix_position_to_pixel()
+        if self.rigid.inverse:
+            position_to_pixel_matrix = Data.image[self.rigid.moving_name].display.compute_matrix_position_to_pixel()
+        else:
+            position_to_pixel_matrix = Data.image[self.rigid.reference_name].display.compute_matrix_position_to_pixel()
 
         pixel = []
         for ii, pos in enumerate(position):
@@ -215,7 +232,6 @@ class Display(object):
         return pixel
 
     def update_slice_location(self, scroll, slice_plane):
-        # print(a)
         if slice_plane == 'Axial':
             self.slice_location[0] = scroll
         elif slice_plane == 'Coronal':
@@ -252,6 +268,7 @@ class Rigid(object):
         else:
             self.combo_matrix = combo_matrix
 
+        self.inverse = False
         self.slices = {'reference': ['All'], 'moving': ['All'], 'reference_sops': reference_sops,
                        'moving_sops': moving_sops}
         self.visual = {'reference': None, 'moving': None, 'opacity': 0.5, 'multicolor': None}
@@ -294,8 +311,12 @@ class Rigid(object):
         return aspect
 
     def compute_icp_vtk(self, source_mesh, target_mesh, distance=1e-5, iterations=1000, landmarks=None,
-                        com_matching=True, inverse=True, center=None):
-        target_mesh.transform(self.matrix @ self.combo_matrix, inplace=True)
+                        com_matching=True, inverse=False, center=None):
+        self.inverse = inverse
+        if self.inverse:
+            target_mesh.transform(self.matrix @ self.combo_matrix, inplace=True)
+        else:
+            target_mesh.transform(np.linalg.inv(self.matrix @ self.combo_matrix), inplace=True)
 
         icp = ICP(source_mesh, target_mesh)
         icp.compute_vtk(distance=distance, iterations=iterations, landmarks=landmarks, com_matching=com_matching,
@@ -330,7 +351,7 @@ class Rigid(object):
         self.update_rois()
 
     def compute_o3d(self, source_mesh, target_mesh, distance=10, iterations=1000, rmse=1e-7, fitness=1e-7,
-                    method='point', com_matching=True, inverse=True, center=None):
+                    method='point', com_matching=True, inverse=False, center=None):
         target_mesh.transform(self.matrix @ self.combo_matrix, inplace=True)
 
         icp = ICP(source_mesh, target_mesh)
@@ -365,26 +386,32 @@ class Rigid(object):
 
         self.update_rois()
 
-    def copy_roi(self, roi_name=None, inverse=False):
+    def copy_roi(self, roi_name=None):
         if roi_name in list(self.rois.keys()):
             reference_roi = Data.image[self.reference_name].rois[roi_name]
             moving_roving = Data.image[self.moving_name].rois[roi_name]
-            if inverse and self.rois[roi_name] is not None:
-                reference_roi.mesh = self.rois[roi_name].transform(self.matrix @ self.combo_matrix, inplace=False)
+            if self.inverse and self.rois[roi_name] is not None:
+                reference_roi.mesh = self.rois[roi_name].transform(np.linalg.inv(self.matrix @ self.combo_matrix),
+                                                                   inplace=False)
             elif reference_roi.mesh is not None:
-                moving_roving.mesh = reference_roi.mesh.transform(np.linalg.inv(self.matrix @ self.combo_matrix),
-                                                                  inplace=False)
+                moving_roving.mesh = reference_roi.mesh.transform(self.matrix @ self.combo_matrix, inplace=False)
                 self.update_rois(roi_name=roi_name)
 
     def create_image(self):
-        name = self.moving_name
-        matrix_reshape = Data.image[name].matrix.reshape(1, 9)[0]
+        if self.inverse:
+            ref = self.moving_name
+            mov = self.reference_name
+        else:
+            ref = self.reference_name
+            mov = self.moving_name
+
+        matrix_reshape = Data.image[mov].matrix.reshape(1, 9)[0]
         vtk_image = vtk.vtkImageData()
-        vtk_image.SetSpacing(Data.image[name].spacing)
+        vtk_image.SetSpacing(Data.image[mov].spacing)
         vtk_image.SetDirectionMatrix(matrix_reshape)
-        vtk_image.SetDimensions(np.flip(Data.image[name].array.shape))
-        vtk_image.SetOrigin(Data.image[name].origin)
-        vtk_image.GetPointData().SetScalars(numpy_support.numpy_to_vtk(Data.image[name].array.flatten(order="C")))
+        vtk_image.SetDimensions(np.flip(Data.image[mov].array.shape))
+        vtk_image.SetOrigin(Data.image[mov].origin)
+        vtk_image.GetPointData().SetScalars(numpy_support.numpy_to_vtk(Data.image[mov].array.flatten(order="C")))
 
         matrix = self.matrix @ self.combo_matrix
         vtk_matrix = vtk.vtkMatrix4x4()
@@ -394,13 +421,14 @@ class Rigid(object):
 
         transform = vtk.vtkTransform()
         transform.SetMatrix(vtk_matrix)
-        transform.Inverse()
+        if self.inverse:
+            transform.Inverse()
 
         vtk_reslice = vtk.vtkImageReslice()
         vtk_reslice.SetInputData(vtk_image)
         vtk_reslice.SetResliceTransform(transform)
         vtk_reslice.SetInterpolationModeToLinear()
-        vtk_reslice.SetOutputSpacing(Data.image[self.reference_name].spacing)
+        vtk_reslice.SetOutputSpacing(Data.image[ref].spacing)
         vtk_reslice.SetOutputDirection(1, 0, 0, 0, 1, 0, 0, 0, 1)
         vtk_reslice.AutoCropOutputOn()
         vtk_reslice.SetBackgroundLevel(-3001)
@@ -541,4 +569,8 @@ class Rigid(object):
             if roi_name is None or name == roi_name:
                 roi = Data.image[self.moving_name].rois[name]
                 if roi.mesh is not None and roi.visible:
-                    self.rois[roi_name] = roi.mesh.transform(self.matrix @ self.combo_matrix, inplace=False)
+                    if self.inverse:
+                        self.rois[roi_name] = roi.mesh.transform(self.matrix @ self.combo_matrix, inplace=False)
+                    else:
+                        self.rois[roi_name] = roi.mesh.transform(np.linalg.inv(self.matrix @ self.combo_matrix),
+                                                                 inplace=False)
