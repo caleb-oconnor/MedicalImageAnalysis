@@ -30,7 +30,7 @@ class Display(object):
 
         self.origin = None
         self.spacing = None
-        self.array = None
+        self.array = []
         self.image = None
         self.matrix = np.identity(3)
 
@@ -41,28 +41,32 @@ class Display(object):
 
         self.compute_scroll_max()
 
-    def compute_array(self, slice_plane):
+    def compute_array(self, slice_plane, portion=0):
         array_slice = None
         if slice_plane == 'Axial':
-            if 0 <= self.slice_location[0] < self.array.shape[0]:
-                array_slice = self.array[self.slice_location[0], :, :].astype(np.double)
+            if 0 <= self.slice_location[0] < self.array[portion].shape[0]:
+                array_slice = self.array[portion][self.slice_location[0], :, :].astype(np.double)
 
         elif slice_plane == 'Coronal':
-            if 0 <= self.slice_location[1] < self.array.shape[1]:
-                array_slice = self.array[:, self.slice_location[1], :].astype(np.double)
+            if 0 <= self.slice_location[1] < self.array[portion].shape[1]:
+                array_slice = self.array[portion][:, self.slice_location[1], :].astype(np.double)
 
         else:
-            if 0 <= self.slice_location[2] < self.array.shape[2]:
-                array_slice = self.array[:, :, self.slice_location[2]].astype(np.double)
+            if 0 <= self.slice_location[2] < self.array[portion].shape[2]:
+                array_slice = self.array[portion][:, :, self.slice_location[2]].astype(np.double)
 
         return array_slice
 
-    def compute_deformation(self):
-        image = self.deformable.create_image()
+    def compute_deformation(self, division=1):
+        for ii in range(division):
+            ratio = (ii + 1) / division
+            image = self.deformable.create_image(ratio=ratio)
 
-        self.array = sitk.GetArrayFromImage(image)
-        self.spacing = image.GetSpacing()
-        self.origin = image.GetOrigin()
+            self.array += [sitk.GetArrayFromImage(image)]
+            self.spacing = image.GetSpacing()
+            self.origin = image.GetOrigin()
+
+        self.compute_offset()
 
     def compute_grid(self, slice_plane='Axial', vector='x'):
         if slice_plane == 'Axial':
@@ -110,6 +114,44 @@ class Display(object):
         if self.deformable.rois[roi_name] is None:
             self.deformable.update_rois(roi_name=roi_name)
 
+        if slice_plane == 'Axial':
+            normal = self.matrix[:3, 2]
+        elif slice_plane == 'Coronal':
+            normal = self.matrix[:3, 1]
+        else:
+            normal = self.matrix[:3, 0]
+
+        roi_slice = self.deformable.rois[roi_name].slice(normal=normal, origin=location)
+
+        if return_pixel:
+            if roi_slice.number_of_points > 0:
+                roi_strip = roi_slice.strip(max_length=10000000)
+
+                position = [np.asarray(c.points) for c in roi_strip.cell]
+                pixels = self.convert_position_to_pixel(position=position)
+                pixel_corrected = []
+                for pixel in pixels:
+
+                    if slice_plane in 'Axial':
+                        pixel_reshape = pixel[:, :2]
+                        pixel_corrected += [np.asarray([pixel_reshape[:, 0], pixel_reshape[:, 1]]).T]
+
+                    elif slice_plane == 'Coronal':
+                        pixel_reshape = np.column_stack((pixel[:, 0], pixel[:, 2]))
+                        pixel_corrected += [pixel_reshape]
+
+                    else:
+                        pixel_reshape = pixel[:, 1:]
+                        pixel_corrected += [pixel_reshape]
+
+                return pixel_corrected
+
+            else:
+                return []
+
+        else:
+            return roi_slice
+
     def compute_offset(self):
         if self.deformable.reference_name is not None:
             pos = Data.image[self.deformable.reference_name].origin
@@ -142,12 +184,12 @@ class Display(object):
         return slice_origin
 
     def compute_scroll_max(self):
-        if self.array is None:
+        if len(self.array) == 0:
             self.scroll_max = self.deformable.dimensions - 1
         else:
-            self.scroll_max = [self.array.shape[0] - 1,
-                               self.array.shape[1] - 1,
-                               self.array.shape[2] - 1]
+            self.scroll_max = [self.array[-1].shape[0] - 1,
+                               self.array[-1].shape[1] - 1,
+                               self.array[-1].shape[2] - 1]
 
     def convert_position_to_pixel(self, position=None):
         position_to_pixel_matrix = self.compute_matrix_position_to_pixel()
@@ -179,7 +221,7 @@ class Deformable(object):
         self.moving_sops = moving_sops
         self.roi_names = roi_names
         self.rigid_rois = dict.fromkeys(Data.roi_list)
-        self.deformable_rois = dict.fromkeys(Data.roi_list)
+        self.rois = dict.fromkeys(Data.roi_list)
 
         self.modality = None
         if dvf_matrix is not None:
@@ -370,59 +412,42 @@ class Deformable(object):
 
         return dvf_rotated, spacing, origin_new, dimensions
 
-    def create_image(self):
-        R_inv = self.rigid_matrix[:3, :3].T
-        t_inv = -R_inv @ self.rigid_matrix[:3, 3]
+    def create_image(self, ratio=1):
+        R = self.rigid_matrix[:3, :3]
+        t = self.rigid_matrix[:3, 3]
 
         affine = sitk.AffineTransform(3)
-        affine.SetMatrix(R_inv.flatten())
-        affine.SetTranslation(t_inv)
+        affine.SetMatrix(R.flatten())
+        affine.SetTranslation(t)
 
         ref_image = Data.image[self.reference_name].create_sitk_image()
         moving_image = Data.image[self.moving_name].create_sitk_image()
 
         resampled_image = sitk.Resample(
             moving_image,
-            size=ref_image.GetSize(),
+            ref_image,
             transform=affine,
-            outputOrigin=ref_image.GetOrigin(),
-            outputSpacing=ref_image.GetSpacing(),
             interpolator=sitk.sitkLinear,
             defaultPixelValue=-3001,
             outputPixelType=moving_image.GetPixelID()
         )
 
         dvf_initial_image = sitk.GetImageFromArray(self.dvf, isVector=True)
+        # dvf_initial_image = sitk.GetImageFromArray(ratio * self.dvf, isVector=True)
         dvf_initial_image.SetSpacing(self.spacing)
         dvf_initial_image.SetOrigin(self.origin)
 
-        cropped_image = sitk.Resample(
-            resampled_image,
-            dvf_initial_image,
-            sitk.Transform(),
-            sitk.sitkLinear,
-            0.0,
-            resampled_image.GetPixelID()
-        )
+        invert_filter = sitk.InvertDisplacementFieldImageFilter()
+        invert_dvf = invert_filter.Execute(dvf_initial_image)
+        dis_tx = sitk.DisplacementFieldTransform(sitk.Cast(invert_dvf, sitk.sitkVectorFloat64))
 
-        dvf_transform = sitk.DisplacementFieldTransform(dvf_initial_image)
-        dvf_resampled = sitk.ResampleImageFilter()
-        dvf_resampled.SetReferenceImage(cropped_image)
-        dvf_resampled.SetTransform(dvf_transform)
-        dvf_resampled.SetInterpolator(sitk.sitkLinear)
-        dvf_resampled.SetDefaultPixelValue(0)
-        dvf_resampled.SetOutputDirection(np.identity(3).flatten().tolist())
-
-        return dvf_resampled.Execute(resampled_image)
+        return sitk.Resample(resampled_image, dis_tx, sitk.sitkLinear, -3001, resampled_image.GetPixelID())
 
     def export_image(self, path=None):
         if self.moving_name is not None and path is not None:
             image = self.create_image()
 
-            writer = vtk.vtkMetaImageWriter()
-            writer.SetInputData(image)
-            writer.SetFileName(path)
-            writer.Write()
+            sitk.WriteImage(image, path)
 
     def retrieve_array_plane(self, slice_plane, vector=None):
         if vector is None:
@@ -436,6 +461,9 @@ class Deformable(object):
 
     def retrieve_grid(self, slice_plane='Axial', vector='x'):
         return self.display.compute_grid(slice_plane=slice_plane, vector=vector)
+
+    def retrieve_offset(self, slice_plane):
+        return self.display.offset[slice_plane]
 
     def retrieve_slice_location(self, slice_plane):
         if slice_plane == 'Axial':
@@ -477,7 +505,7 @@ class Deformable(object):
 
     def save_deformable(self, path):
         variable_names = self.__dict__.keys()
-        column_names = [name for name in variable_names if name not in ['deformable_rois',
+        column_names = [name for name in variable_names if name not in ['rois',
                                                                         'display',
                                                                         'dvf',
                                                                         'rigid_rois']]
@@ -489,7 +517,7 @@ class Deformable(object):
         df.to_pickle(os.path.join(path, 'info.p'))
         np.save(os.path.join(path, 'dvf.npy'), self.dvf, allow_pickle=True)
 
-    def update_rois(self, roi_name=None):
+    def update_rois(self, roi_name=None, portion=0):
         for name in list(self.rois.keys()):
             if name not in Data.roi_list:
                 del self.rois[name]
@@ -498,22 +526,24 @@ class Deformable(object):
             if name not in list(self.rois.keys()):
                 self.rois[name] = None
 
+        dvf_percent = (portion + 1) / len(self.display.array)
+
         for name in Data.roi_list:
             if roi_name is None or name == roi_name:
                 roi = Data.image[self.moving_name].rois[name]
                 if roi.mesh is not None and roi.visible:
-                    self.rigid_rois[name] = roi.mesh.transform(self.rigid_matrix, inplace=False)
+                    self.rigid_rois[name] = roi.mesh.transform(np.linalg.inv(self.rigid_matrix), inplace=False)
 
                     points = self.rigid_rois[name].points
                     voxel_coords = (points - self.origin) / self.spacing
-                    deformed_points = points.copy()
+                    deformed_points = copy.deepcopy(points)
                     for i in range(3):
                         deformed_points[:, i] += map_coordinates(
-                            self.dvf[..., i],
+                            dvf_percent * self.dvf[..., i],
                             [voxel_coords[:, 2], voxel_coords[:, 1], voxel_coords[:, 0]],
                             order=1,
                             mode='nearest'
                         )
 
-                    self.deformable_rois[name] = self.rigid_rois[name].copy()
-                    self.deformable_rois.points = deformed_points
+                    self.rois[name] = copy.deepcopy(self.rigid_rois[name])
+                    self.rois[name].points = deformed_points
