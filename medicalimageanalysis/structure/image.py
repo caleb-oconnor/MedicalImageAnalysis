@@ -242,6 +242,8 @@ class Image(object):
         self.rgb = image.rgb
 
         self.camera_position = None
+
+        self.visual = {'colormap': 'gray', 'bounds': None}
         self.misc = {}
 
         self.display = Display(self)

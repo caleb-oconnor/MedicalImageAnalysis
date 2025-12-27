@@ -77,8 +77,12 @@ class DicomReader(object):
         """
         self.files = files
         self.only_tags = only_tags
-        self.only_modality = only_modality
         self.only_load_roi_names = only_load_roi_names
+
+        if only_modality is not None:
+            self.only_modality = only_modality
+        else:
+            self.only_modality = ['CT', 'MR', 'PT', 'US', 'DX', 'RF', 'CR', 'RTSTRUCT', 'REG', 'RTDOSE']
 
         if clear:
             Data.clear()
@@ -142,6 +146,9 @@ class DicomReader(object):
                 else:
                     sorting_tags = []
                     for img in images_in_modality:
+                        if 'ImageOrientationPatient' not in img or 'ImagePositionPatient' not in img:
+                            continue
+
                         orient = np.asarray(img['ImageOrientationPatient'].value)
                         pos = np.asarray(img['ImagePositionPatient'].value)
                         if 'AcquisitionNumber' in img and img['AcquisitionNumber'].value is not None:
@@ -151,6 +158,7 @@ class DicomReader(object):
 
                         sorting_tags += [[img['SeriesInstanceUID'].value, acq, orient[0], orient[1], orient[2],
                                           orient[3], orient[4], orient[5], pos[0], pos[1], pos[2]]]
+
                     sorting_tags = np.asarray(sorting_tags)
                     unique_series = np.unique(np.asarray(sorting_tags[:, 0]), axis=0)
                     for series in unique_series:
@@ -1022,28 +1030,29 @@ class ReadRTStruct(object):
         names = []
         colors = []
         geometric = []
-        for ii, s in enumerate(self.image_set.ROIContourSequence):
-            if hasattr(self.image_set.StructureSetROISequence[ii], 'ROIName'):
-                if hasattr(s, 'ContourSequence'):
-                    tracker += [ii]
-                    names += [self.image_set.StructureSetROISequence[ii].ROIName]
-                    geometric += [s['ContourSequence'][0]['ContourGeometricType'].value]
+        if ROIContourSequence in self.image_set:
+            for ii, s in enumerate(self.image_set.ROIContourSequence):
+                if hasattr(self.image_set.StructureSetROISequence[ii], 'ROIName'):
+                    if hasattr(s, 'ContourSequence'):
+                        tracker += [ii]
+                        names += [self.image_set.StructureSetROISequence[ii].ROIName]
+                        geometric += [s['ContourSequence'][0]['ContourGeometricType'].value]
 
-                    slice_sop = []
-                    if geometric[-1].lower() == 'closed_planar':
-                        for seq in s['ContourSequence']:
-                            slice_sop += [seq['ContourImageSequence'][0]['ReferencedSOPInstanceUID'].value]
-                    else:
-                        if 'ContourImageSequence' in s['ContourSequence'][0]:
-                            slice_sop = [s['ContourSequence'][0]['ContourImageSequence'][0]['ReferencedSOPInstanceUID'].value]
+                        slice_sop = []
+                        if geometric[-1].lower() == 'closed_planar':
+                            for seq in s['ContourSequence']:
+                                slice_sop += [seq['ContourImageSequence'][0]['ReferencedSOPInstanceUID'].value]
                         else:
-                            slice_sop = []
-                    sop += [slice_sop]
+                            if 'ContourImageSequence' in s['ContourSequence'][0]:
+                                slice_sop = [s['ContourSequence'][0]['ContourImageSequence'][0]['ReferencedSOPInstanceUID'].value]
+                            else:
+                                slice_sop = []
+                        sop += [slice_sop]
 
-                    if hasattr(s, 'ROIDisplayColor'):
-                        colors += [s.ROIDisplayColor]
-                    else:
-                        colors += [[np.random.randint(0, 256), np.random.randint(0, 256), np.random.randint(0, 256)]]
+                        if hasattr(s, 'ROIDisplayColor'):
+                            colors += [s.ROIDisplayColor]
+                        else:
+                            colors += [[np.random.randint(0, 256), np.random.randint(0, 256), np.random.randint(0, 256)]]
 
         properties = []
         for ii in range(len(names)):
