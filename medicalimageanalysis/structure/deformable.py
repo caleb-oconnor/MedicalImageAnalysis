@@ -517,7 +517,7 @@ class Deformable(object):
         df.to_pickle(os.path.join(path, 'info.p'))
         np.save(os.path.join(path, 'dvf.npy'), self.dvf, allow_pickle=True)
 
-    def update_rois(self, roi_name=None, portion=0):
+    def update_rois(self, roi_name=None, percent=100):
         for name in list(self.rois.keys()):
             if name not in Data.roi_list:
                 del self.rois[name]
@@ -525,8 +525,6 @@ class Deformable(object):
         for name in Data.roi_list:
             if name not in list(self.rois.keys()):
                 self.rois[name] = None
-
-        dvf_percent = (portion + 1) / len(self.display.array)
 
         for name in Data.roi_list:
             if roi_name is None or name == roi_name:
@@ -539,7 +537,7 @@ class Deformable(object):
                     deformed_points = copy.deepcopy(points)
                     for i in range(3):
                         deformed_points[:, i] += map_coordinates(
-                            dvf_percent * self.dvf[..., i],
+                            (percent * self.dvf[..., i]) / 100,
                             [voxel_coords[:, 2], voxel_coords[:, 1], voxel_coords[:, 0]],
                             order=1,
                             mode='nearest'

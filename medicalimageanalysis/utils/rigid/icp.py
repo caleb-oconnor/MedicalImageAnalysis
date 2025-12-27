@@ -54,7 +54,7 @@ class ICP(object):
         """
         Computes an initial translation by matching the center of mass (COM) of the source and target meshes.
         """
-        translation = np.asarray(self.mov.center - self.ref.center)
+        translation = np.asarray(self.mov.center) - np.asarray(self.ref.center)
 
         self.matrix = np.identity(4)
         self.matrix[:3, 3] = translation
