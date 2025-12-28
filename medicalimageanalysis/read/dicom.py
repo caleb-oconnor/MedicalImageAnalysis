@@ -1030,7 +1030,7 @@ class ReadRTStruct(object):
         names = []
         colors = []
         geometric = []
-        if ROIContourSequence in self.image_set:
+        if 'ROIContourSequence' in self.image_set:
             for ii, s in enumerate(self.image_set.ROIContourSequence):
                 if hasattr(self.image_set.StructureSetROISequence[ii], 'ROIName'):
                     if hasattr(s, 'ContourSequence'):
