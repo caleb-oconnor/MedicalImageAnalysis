@@ -249,6 +249,8 @@ class Deformable(object):
 
         self.rois = {}
         self.display = Display(self)
+        if rigid_matrix is not None:
+            self.update_rois()
 
     def add_deformable(self, deformable_name):
         if deformable_name is None:
