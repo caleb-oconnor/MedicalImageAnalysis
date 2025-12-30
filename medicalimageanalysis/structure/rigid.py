@@ -157,11 +157,11 @@ class Display(object):
     def compute_slice_location(self, position=None):
         if position is None:
             if self.rigid.inverse:
-                source_location = np.flip(Data.image[self.rigid.reference_name].display.slice_location)
-                position = Data.image[self.rigid.reference_name].display.compute_index_positions(source_location)
-            else:
                 source_location = np.flip(Data.image[self.rigid.moving_name].display.slice_location)
                 position = Data.image[self.rigid.moving_name].display.compute_index_positions(source_location)
+            else:
+                source_location = np.flip(Data.image[self.rigid.reference_name].display.slice_location)
+                position = Data.image[self.rigid.reference_name].display.compute_index_positions(source_location)
 
         self.slice_location = np.flip(np.round((position - self.origin) / self.spacing).astype(np.int32))
 
@@ -278,6 +278,8 @@ class Rigid(object):
         self.rigid_name = self.add_rigid(rigid_name)
 
         self.display = Display(self)
+        if matrix is not None:
+            self.update_rois()
 
     def add_rigid(self, rigid_name):
         if rigid_name is None:
@@ -570,7 +572,7 @@ class Rigid(object):
                 roi = Data.image[self.moving_name].rois[name]
                 if roi.mesh is not None and roi.visible:
                     if self.inverse:
-                        self.rois[roi_name] = roi.mesh.transform(self.matrix @ self.combo_matrix, inplace=False)
+                        self.rois[name] = roi.mesh.transform(self.matrix @ self.combo_matrix, inplace=False)
                     else:
-                        self.rois[roi_name] = roi.mesh.transform(np.linalg.inv(self.matrix @ self.combo_matrix),
-                                                                 inplace=False)
+                        self.rois[name] = roi.mesh.transform(np.linalg.inv(self.matrix @ self.combo_matrix),
+                                                             inplace=False)
