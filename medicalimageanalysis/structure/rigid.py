@@ -19,6 +19,7 @@ import SimpleITK as sitk
 import vtk
 from vtkmodules.util import numpy_support
 
+from pydicom.uid import generate_uid
 from scipy.spatial.transform import Rotation
 
 from ..utils.rigid.icp import ICP
@@ -247,6 +248,7 @@ class Rigid(object):
         self.moving_name = moving_name
         self.combo_name = combo_name
         self.rois = dict.fromkeys(Data.roi_list)
+        self.local_uid = generate_uid()
 
         if roi_names is None:
             self.roi_names = ['Unknown']
