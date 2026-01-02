@@ -19,6 +19,7 @@ import pandas as pd
 import pyvista as pv
 import SimpleITK as sitk
 
+from pydicom.uid import generate_uid
 from scipy.spatial.transform import Rotation
 
 import vtk
@@ -221,6 +222,7 @@ class Image(object):
         self.birthdate = self.get_birthdate()
         self.date = self.get_date()
         self.time = self.get_time()
+        self.local_uid = generate_uid()
         self.series_uid = self.get_series_uid()
         self.acq_number = self.get_acq_number()
         self.frame_ref = self.get_frame_ref()
