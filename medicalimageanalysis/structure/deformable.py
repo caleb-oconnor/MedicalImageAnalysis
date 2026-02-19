@@ -455,6 +455,8 @@ class Deformable(object):
             sitk.WriteImage(image, path)
 
     def retrieve_array_plane(self, slice_plane, vector=None):
+        self.display.compute_slice_location()
+
         if vector is None:
             return self.display.compute_array(slice_plane)
         elif vector == 'x':
@@ -463,6 +465,8 @@ class Deformable(object):
             return self.display.compute_grid(slice_plane=slice_plane, vector=vector)
         elif vector == 'z':
             return self.display.compute_grid(slice_plane=slice_plane, vector=vector)
+        else:
+            return None
 
     def retrieve_grid(self, slice_plane='Axial', vector='x'):
         return self.display.compute_grid(slice_plane=slice_plane, vector=vector)
