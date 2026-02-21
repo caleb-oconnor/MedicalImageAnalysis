@@ -654,6 +654,19 @@ class Image(object):
 
         return pixel_to_position_matrix
 
+    def compute_matrix_position_to_pixel(self):
+        matrix = copy.deepcopy(self.matrix)
+        spacing = self.spacing
+
+        hold_matrix = np.identity(3, dtype=np.float32)
+        hold_matrix[0, :] = matrix[0, :] / spacing[0]
+        hold_matrix[1, :] = matrix[1, :] / spacing[1]
+        hold_matrix[2, :] = matrix[2, :] / spacing[2]
+
+        position_to_pixel_matrix = np.identity(4, dtype=np.float32)
+        position_to_pixel_matrix[:3, :3] = hold_matrix
+        position_to_pixel_matrix[:3, 3] = np.asarray(self.origin).dot(-hold_matrix.T)
+
     def reset_array(self):
         self.display.secondary_array = None
         self.display.matrix = copy.deepcopy(self.matrix)
