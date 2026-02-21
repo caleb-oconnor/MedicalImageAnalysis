@@ -18,7 +18,7 @@ import SimpleITK as sitk
 from scipy.spatial.transform import Rotation
 
 from ..utils.mesh.surface import Refinement
-from ..utils.conversion import ContourToDiscreteMesh
+from ..utils.conversion import ContourToDiscreteMesh, MaskToContour
 
 
 class Roi(object):
@@ -261,7 +261,18 @@ class Roi(object):
         return sitk_mask
 
     def convert_mask(self, mask):
-        pass
+        mask_to_contour = MaskToContour(mask, spacing=self.image.spacing, origin=self.image.origin,
+                                        matrix=self.image.matrix, plane=self.plane)
+        self.contour_pixel, self.contour_position = mask_to_contour.create_contours()
+
+        if len(self.contour_pixel) > 0:
+            self.create_discrete_mesh()
+            self.create_display_mesh()
+        else:
+            self.mesh = None
+            self.volume = None
+            self.com = None
+            self.bounds = None
 
     def update_pixel(self, pixel, plane='Axial'):
         self.plane = plane
