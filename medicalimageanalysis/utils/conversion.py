@@ -236,6 +236,82 @@ class ContourToMask(object):
             self.mask = (hold_mask > 0).astype(np.uint8)
 
 
+class MaskToContour(object):
+    def __init__(self, mask=None, spacing=None, origin=None, matrix=None, plane='Axial'):
+        self.mask = mask
+        self.spacing = spacing
+        self.origin = origin
+        self.matrix = matrix
+        self.plane = plane
+
+        self.contour_position = []
+        self.contour_pixel = []
+
+    def create_contours(self):
+        self.compute_pixel()
+        if None not in (self.spacing, self.origin, self.matrix):
+            self.compute_position()
+
+        return self.contour_pixel, self.contour_position
+
+    def compute_pixel(self):
+        if self.plane == "axial":
+            axis = 0
+        elif self.plane == "coronal":
+            axis = 1
+        else:
+            axis = 2
+
+        num_slices = self.mask.shape[axis]
+        for i in range(num_slices):
+            if axis == 0:
+                slice_2d = self.mask[i, :, :]
+            elif axis == 1:
+                slice_2d = self.mask[:, i, :]
+            else:
+                slice_2d = self.mask[:, :, i]
+
+            slice_2d = (slice_2d > 0).astype(np.uint8) * 255
+            if np.count_nonzero(slice_2d) == 0:
+                continue
+
+            contours, _ = cv2.findContours(slice_2d, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            for contour in contours:
+                if len(contour) > 2:
+                    contour = contour.squeeze(1)
+
+                    n = contour.shape[0]
+                    contour_xyz = np.zeros((n, 3), dtype=np.int32)
+                    if self.plane == "axial":
+                        contour_xyz[:, 0] = contour[:, 0]
+                        contour_xyz[:, 1] = contour[:, 1]
+                        contour_xyz[:, 2] = i
+
+                    elif self.plane == "coronal":
+                        contour_xyz[:, 0] = contour[:, 0]
+                        contour_xyz[:, 1] = i
+                        contour_xyz[:, 2] = contour[:, 1]
+
+                    else:
+                        contour_xyz[:, 0] = i
+                        contour_xyz[:, 1] = contour[:, 0]
+                        contour_xyz[:, 2] = contour[:, 1]
+
+                    self.contour_pixel.append(contour_xyz)
+
+    def compute_position(self):
+        pixel_to_position_matrix = np.identity(4, dtype=np.float32)
+        pixel_to_position_matrix[:3, 0] = self.matrix[0, :] * self.spacing[0]
+        pixel_to_position_matrix[:3, 1] = self.matrix[1, :] * self.spacing[1]
+        pixel_to_position_matrix[:3, 2] = self.matrix[2, :] * self.spacing[2]
+        pixel_to_position_matrix[:3, 3] = self.origin
+
+        for ii, pix in enumerate(self.contour_pixel):
+            p_concat = np.concatenate((pix, np.ones((pix.shape[0], 1))), axis=1)
+            self.contour_position += [p_concat.dot(pixel_to_position_matrix.T)[:, :3]]
+
+
 class ModelToMask:
     """
     Converts a 3D model/s into a mask. The mask can either be an empty array (default) or a binary mask of the model/s.
