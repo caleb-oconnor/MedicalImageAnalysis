@@ -72,7 +72,7 @@ class Roi(object):
         self.misc = {}
 
     def convert_position_to_pixel(self, position=None):
-        position_to_pixel_matrix = self.image.compute_matrix_position_to_pixel()
+        position_to_pixel_matrix = self.image.display.compute_matrix_position_to_pixel()
 
         pixel = []
         for ii, pos in enumerate(position):
@@ -83,7 +83,7 @@ class Roi(object):
         return pixel
 
     def convert_pixel_to_position(self, pixel=None):
-        pixel_to_position_matrix = self.image.compute_matrix_pixel_to_position()
+        pixel_to_position_matrix = self.image.display.compute_matrix_pixel_to_position()
 
         position = []
         for ii, pix in enumerate(pixel):
