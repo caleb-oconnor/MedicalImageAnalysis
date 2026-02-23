@@ -55,7 +55,7 @@ class CreateDicomImage(object):
     def set_thickness(self, thickness):
         self.thickness = thickness
 
-    def run(self):
+    def run(self, patient_name='Test', patient_id='Test', modality='CT', description='', sex='M'):
         if self.study is None:
             self.study = generate_uid()
         if self.series is None:
@@ -82,11 +82,11 @@ class CreateDicomImage(object):
             ds.is_little_endian = True
             ds.is_implicit_VR = False
 
-            ds.PatientName = 'ForAI'
-            ds.PatientSex = 'M'
-            ds.SeriesDescription = 'Fake for AI'
-            ds.PatientID = '12345'
-            ds.Modality = 'CT'
+            ds.PatientName = patient_name
+            ds.PatientSex = sex
+            ds.SeriesDescription = description
+            ds.PatientID = patient_id
+            ds.Modality = modality
             ds.StudyDate = str(datetime.date.today()).replace('-', '')
             ds.ContentDate = str(datetime.date.today()).replace('-', '')
             ds.StudyTime = str(10)
@@ -112,8 +112,8 @@ class CreateDicomImage(object):
             ds.HighBit = 15
             ds.BitsStored = 16
             ds.BitsAllocated = 16
-            ds.Columns = array.shape[0]
-            ds.Rows = array.shape[1]
+            ds.Columns = array.shape[1]
+            ds.Rows = array.shape[0]
             ds.RescaleIntercept = 0
             ds.RescaleSlope = 1
             ds.PixelData = array.tobytes()
