@@ -249,7 +249,7 @@ class MaskToContour(object):
 
     def create_contours(self):
         self.compute_pixel()
-        if None not in (self.spacing, self.origin, self.matrix):
+        if (self.spacing, self.origin, self.matrix) is not None:
             self.compute_position()
 
         return self.contour_pixel, self.contour_position
