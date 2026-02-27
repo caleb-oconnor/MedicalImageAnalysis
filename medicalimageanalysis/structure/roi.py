@@ -225,7 +225,7 @@ class Roi(object):
                 pixel_corrected = []
                 for pixel in pixels:
 
-                    if slice_plane in 'Axial':
+                    if slice_plane == 'Axial':
                         pixel_reshape = pixel[:, :2] + offset
                         pixel_corrected += [np.asarray([pixel_reshape[:, 0], pixel_reshape[:, 1]]).T]
 
