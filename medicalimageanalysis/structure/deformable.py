@@ -11,6 +11,7 @@ Structure:
 
 """
 
+import os
 import copy
 
 import numpy as np
@@ -291,8 +292,8 @@ class Deformable(object):
 
     def compute_bspline(self, modality_gradient=True, sigma=2, control_spacing=None, mesh_size=None, gradient=1e-5,
                         iterations=100, crop=5):
-        ref_image = mia.Data.image[self.reference_name].create_sitk_image()
-        mov_image = mia.Data.image[self.moving_name].create_sitk_image()
+        ref_image = Data.image[self.reference_name].create_sitk_image()
+        mov_image = Data.image[self.moving_name].create_sitk_image()
 
         euler = sitk.Euler3DTransform()
         euler.SetMatrix(self.rigid_matrix[:3, :3].flatten().tolist())
@@ -303,8 +304,8 @@ class Deformable(object):
         ref_mask = None
         mov_mask = None
         for roi_name in self.roi_names:
-            ref_roi = mia.Data.image[self.reference_name].rois[roi_name]
-            mov_roi = mia.Data.image[self.moving_name].rois[roi_name]
+            ref_roi = Data.image[self.reference_name].rois[roi_name]
+            mov_roi = Data.image[self.moving_name].rois[roi_name]
             if ref_roi.mesh is not None or ref_roi.contour_pixel is not None:
                 if mov_roi.mesh is not None or mov_roi.contour_pixel is not None:
                     if ref_mask is None:
@@ -317,17 +318,15 @@ class Deformable(object):
                         else:
                             mov_mask = mov_mask + mov_roi.compute_mask()
 
-        deform_itk = mia.utils.deformable.simpleitk.DeformableITK(reference_image=ref_image,
-                                                                  moving_image=mov_resampled,
-                                                                  reference_mask=None,
-                                                                  moving_mask=None)
+        deform_itk = DeformableITK(reference_image=ref_image, moving_image=mov_resampled, reference_mask=None,
+                                   moving_mask=None)
 
-        if mia.Data.image[self.reference_name].modality != mia.Data.image[self.moving_name].modality and modality_gradient:
+        if Data.image[self.reference_name].modality != Data.image[self.moving_name].modality and modality_gradient:
             deform_itk.cross_modality_correction()
 
         if ref_mask is not None and mov_mask is not None:
-            deform_itk.create_sitk_image(ref_mask, ref.origin, ref.spacing, ref.matrix, mask=True)
-            deform_itk.create_sitk_image(mov_mask, mov.origin, mov.spacing, mov.matrix, reference=False, mask=True)
+            deform_itk.create_sitk_image(ref_mask, ref_image.origin, ref_image.spacing, ref_image.matrix, mask=True)
+            deform_itk.create_sitk_image(mov_mask, mov_image.origin, mov_image.spacing, mov_image.matrix, reference=False, mask=True)
 
             if sigma is not None:
                 deform_itk.blur_mask(sigma=sigma)
@@ -342,21 +341,21 @@ class Deformable(object):
 
     def compute_demons(self, method=None, modality_gradient=True, sigma=2, smooth=True, std=1, iterations=50,
                        intensity_threshold=0.001, step=2.0, crop=5):
-        ref = mia.Data.image[self.reference_name]
-        mov = mia.Data.image[self.moving_name]
+        ref = Data.image[self.reference_name]
+        mov = Data.image[self.moving_name]
 
-        deform_itk = mia.utils.deformable.simpleitk.DeformableITK()
+        deform_itk = DeformableITK()
         deform_itk.create_sitk_image(ref.array, ref.origin, ref.spacing, ref.matrix)
         deform_itk.create_sitk_image(mov.array, mov.origin, mov.spacing, mov.matrix, reference=False)
 
-        if mia.Data.image[self.reference_name].modality != mia.Data.image[self.moving_name].modality and modality_gradient:
+        if Data.image[self.reference_name].modality != Data.image[self.moving_name].modality and modality_gradient:
             deform_itk.cross_modality_correction()
 
         ref_mask = None
         mov_mask = None
         for roi_name in self.roi_names:
-            ref_roi = mia.Data.image[self.reference_name].rois[roi_name]
-            mov_roi = mia.Data.image[self.moving_name].rois[roi_name]
+            ref_roi = Data.image[self.reference_name].rois[roi_name]
+            mov_roi = Data.image[self.moving_name].rois[roi_name]
             if ref_roi.mesh is not None or ref_roi.contour_pixel is not None:
                 if mov_roi.mesh is not None or mov_roi.contour_pixel is not None:
                     if ref_mask is None:
@@ -454,8 +453,13 @@ class Deformable(object):
 
             sitk.WriteImage(image, path)
 
-    def retrieve_array_plane(self, slice_plane, vector=None):
-        self.display.compute_slice_location()
+    def retrieve_array_plane(self, slice_plane, solo=None, position=None, vector=None):
+        if len(self.display.array) == 0:
+            self.display.compute_deformation()
+            self.display.compute_slice_location()
+
+        if solo is None:
+            self.display.compute_slice_location(position=position)
 
         if vector is None:
             return self.display.compute_array(slice_plane)
