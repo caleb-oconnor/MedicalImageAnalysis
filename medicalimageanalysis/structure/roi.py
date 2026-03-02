@@ -198,7 +198,10 @@ class Roi(object):
         else:
             normal = matrix[:3, 0]
 
-        roi_slice = self.mesh.slice(normal=normal, origin=location)
+        if self.mesh is not None:
+            roi_slice = self.mesh.slice(normal=normal, origin=location)
+        else:
+            return [], []
 
         if return_pixel:
             if roi_slice.number_of_points > 0:
