@@ -256,7 +256,7 @@ class Roi(object):
         mask = self.compute_mask()
 
         matrix_flat = self.image.matrix.flatten(order='F')
-        sitk_mask = sitk.GetImageFromArray(mask.T)
+        sitk_mask = sitk.GetImageFromArray(mask)
         sitk_mask.SetDirection([float(mat) for mat in matrix_flat])
         sitk_mask.SetOrigin(self.image.origin)
         sitk_mask.SetSpacing(self.image.spacing)
