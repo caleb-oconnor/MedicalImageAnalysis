@@ -255,9 +255,9 @@ class MaskToContour(object):
         return self.contour_pixel, self.contour_position
 
     def compute_pixel(self):
-        if self.plane == "axial":
+        if self.plane == "Axial":
             axis = 0
-        elif self.plane == "coronal":
+        elif self.plane == "Coronal":
             axis = 1
         else:
             axis = 2
@@ -283,12 +283,12 @@ class MaskToContour(object):
 
                     n = contour.shape[0]
                     contour_xyz = np.zeros((n, 3), dtype=np.int32)
-                    if self.plane == "axial":
+                    if self.plane == "Axial":
                         contour_xyz[:, 0] = contour[:, 0]
                         contour_xyz[:, 1] = contour[:, 1]
                         contour_xyz[:, 2] = i
 
-                    elif self.plane == "coronal":
+                    elif self.plane == "Coronal":
                         contour_xyz[:, 0] = contour[:, 0]
                         contour_xyz[:, 1] = i
                         contour_xyz[:, 2] = contour[:, 1]
