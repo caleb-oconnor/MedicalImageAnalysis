@@ -14,6 +14,7 @@ Structure:
 import copy
 
 import numpy as np
+import pandas as pd
 import SimpleITK as sitk
 
 import vtk
@@ -36,7 +37,7 @@ class Display(object):
         self.matrix = np.identity(4)
 
         self.slice_location = [0, 0, 0]
-        self.scroll_max = None
+        self.scroll_max = [0, 0, 0]
         self.offset = {'Axial': [0, 0], 'Coronal': [0, 0], 'Sagittal': [0, 0]}
         self.misc = {}
 
