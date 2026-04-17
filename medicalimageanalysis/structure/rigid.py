@@ -456,7 +456,7 @@ class Rigid(object):
         elif center:
             pass
         elif origin:
-            self.matrix[:3, 3] = Data.image[self.reference_name].origin - Data.image[self.moving_name].origin
+            self.matrix[:3, 3] = Data.image[self.moving_name].origin - Data.image[self.reference_name].origin
 
     def retrieve_angles(self, order='ZXY'):
         rotation = Rotation.from_matrix(self.matrix[:3, :3])
@@ -471,6 +471,18 @@ class Rigid(object):
             self.display.compute_slice_location(position=position)
 
         return self.display.compute_array_slice(slice_plane=slice_plane)
+
+    def retrieve_center(self):
+        if self.inverse:
+            image_name = self.moving_name
+        else:
+            image_name = self.reference_name
+
+        original_center = Data.image[image_name].compute_center()
+        center_h = np.array([original_center[0], original_center[1], original_center[2], 1.0])
+        center = (self.matrix @ self.combo_matrix @ center_h)[:3]
+
+        return center
 
     def retrieve_offset(self, slice_plane):
         return self.display.offset[slice_plane]
@@ -529,19 +541,30 @@ class Rigid(object):
 
         df.to_pickle(os.path.join(path, 'info.p'))
 
-    def update_rotation(self, r_x=0, r_y=0, r_z=0):
-        new_matrix = np.identity(4)
-        if r_x:
-            radians = np.deg2rad(r_x)
-            new_matrix[:3, :3] = Rotation.from_euler('x', radians).as_matrix()
-        if r_y:
-            radians = np.deg2rad(r_y)
-            new_matrix[:3, :3] = Rotation.from_euler('y', radians).as_matrix()
-        if r_z:
-            radians = np.deg2rad(r_z)
-            new_matrix[:3, :3] = Rotation.from_euler('z', radians).as_matrix()
+    def update_rotation(self, center=None, r_x=0, r_y=0, r_z=0):
+        if center is None:
+            center = self.retrieve_center()
 
-        self.matrix = new_matrix @ self.matrix
+        R = np.identity(4)
+        if r_x:
+            R[:3, :3] = Rotation.from_euler('x', np.deg2rad(r_x)).as_matrix()
+        if r_y:
+            R[:3, :3] = Rotation.from_euler('y', np.deg2rad(r_y)).as_matrix()
+        if r_z:
+            R[:3, :3] = Rotation.from_euler('z', np.deg2rad(r_z)).as_matrix()
+
+        # translation to origin
+        T_neg = np.identity(4)
+        T_neg[:3, 3] = -np.array(center)
+
+        # translation back
+        T_pos = np.identity(4)
+        T_pos[:3, 3] = np.array(center)
+
+        # full transform: T(C) * R * T(-C)
+        transform = T_pos @ R @ T_neg
+
+        self.matrix = transform @ self.matrix
         self.display.compute_reslice()
         self.display.compute_scroll_max()
         self.update_rois()
@@ -553,9 +576,9 @@ class Rigid(object):
         new_matrix[2, 3] = t_z
 
         self.matrix = new_matrix @ self.matrix
-        self.display.origin[0] = self.display.origin[0] + t_x
-        self.display.origin[1] = self.display.origin[1] + t_y
-        self.display.origin[2] = self.display.origin[2] + t_z
+        self.display.origin[0] = self.display.origin[0] - t_x
+        self.display.origin[1] = self.display.origin[1] - t_y
+        self.display.origin[2] = self.display.origin[2] - t_z
 
         self.display.compute_offset()
         self.display.compute_scroll_max()
