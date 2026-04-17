@@ -159,6 +159,9 @@ class DicomReader(object):
                         sorting_tags += [[img['SeriesInstanceUID'].value, acq, orient[0], orient[1], orient[2],
                                           orient[3], orient[4], orient[5], pos[0], pos[1], pos[2]]]
 
+                    if len(sorting_tags) == 0:
+                        continue
+
                     sorting_tags = np.asarray(sorting_tags)
                     unique_series = np.unique(np.asarray(sorting_tags[:, 0]), axis=0)
                     for series in unique_series:
