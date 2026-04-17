@@ -13,6 +13,7 @@ Functions:
 """
 
 import zipfile
+from PIL import Image as pil_image
 from PIL import ImageColor
 import xml.etree.ElementTree as ET
 
@@ -66,7 +67,7 @@ class ThreeMfReader(object):
 
             tex_el = root.find(".//m:texture2d", ns)
             tex_path = tex_el.get("path").lstrip("/")
-            texture_img = Image.open(archive.open(tex_path)).convert("RGB")
+            texture_img = pil_image.open(archive.open(tex_path)).convert("RGB")
             tex_w, tex_h = texture_img.size
             tex_pixels = np.array(texture_img)
 
@@ -142,8 +143,8 @@ class ThreeMfReader(object):
         Data.image[image_name] = Image(new_image)
         Data.image_list += [image_name]
 
-        Data.image[image_name].create_roi(name=roi_name, visible=False, filepath=self.file)
-        Data.image[image_name].rois[roi_name].add_mesh(decimate_mesh)
-        Data.image[image_name].rois[roi_name].color = [128, 128, 128]
-        Data.image[image_name].rois[roi_name].multi_color = True
+        Data.image[image_name].create_roi(name=self.roi_name, visible=False, filepath=self.file)
+        Data.image[image_name].rois[self.roi_name].add_mesh(decimate_mesh)
+        Data.image[image_name].rois[self.roi_name].color = [128, 128, 128]
+        Data.image[image_name].rois[self.roi_name].multi_color = True
         Data.match_rois()
