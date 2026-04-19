@@ -545,40 +545,34 @@ class Rigid(object):
         if center is None:
             center = self.retrieve_center()
 
+        R_mat = Rotation.from_euler('xyz', [r_x, r_y, r_z], degrees=True).as_matrix()
         R = np.identity(4)
-        if r_x:
-            R[:3, :3] = Rotation.from_euler('x', np.deg2rad(r_x)).as_matrix()
-        if r_y:
-            R[:3, :3] = Rotation.from_euler('y', np.deg2rad(r_y)).as_matrix()
-        if r_z:
-            R[:3, :3] = Rotation.from_euler('z', np.deg2rad(r_z)).as_matrix()
+        R[:3, :3] = R_mat
 
-        # translation to origin
         T_neg = np.identity(4)
         T_neg[:3, 3] = -np.array(center)
 
-        # translation back
         T_pos = np.identity(4)
         T_pos[:3, 3] = np.array(center)
-
-        # full transform: T(C) * R * T(-C)
         transform = T_pos @ R @ T_neg
 
         self.matrix = transform @ self.matrix
+
         self.display.compute_reslice()
         self.display.compute_scroll_max()
         self.update_rois()
 
     def update_translation(self, t_x=0, t_y=0, t_z=0):
-        new_matrix = np.identity(4)
-        new_matrix[0, 3] = t_x
-        new_matrix[1, 3] = t_y
-        new_matrix[2, 3] = t_z
+        T = np.identity(4)
+        T[0, 3] = t_x
+        T[1, 3] = t_y
+        T[2, 3] = t_z
 
-        self.matrix = new_matrix @ self.matrix
-        self.display.origin[0] = self.display.origin[0] - t_x
-        self.display.origin[1] = self.display.origin[1] - t_y
-        self.display.origin[2] = self.display.origin[2] - t_z
+        self.matrix = self.matrix @ T
+
+        self.display.origin[0] -= t_x
+        self.display.origin[1] -= t_y
+        self.display.origin[2] -= t_z
 
         self.display.compute_offset()
         self.display.compute_scroll_max()
