@@ -25,6 +25,8 @@ from scipy.spatial.transform import Rotation
 import vtk
 from vtkmodules.util import numpy_support
 
+from ..data import Data
+
 
 class Display(object):
     def __init__(self, dose):
@@ -405,6 +407,53 @@ class Dose(object):
 
         return pv.PolyData(points, faces)
 
+    def compute_dose_statistics(self):
+        pass
+
+    def compute_roi_dose_array(self, image_name, roi_name):
+        dose_image = self.create_sitk_image()
+        image = Data.image[image_name].create_sitk_image()
+        roi_image = Data.image[image_name].rois[roi_name].create_sitk_mask()
+
+        resampler = sitk.ResampleImageFilter()
+        resampler.SetReferenceImage(image)
+        resampler.SetInterpolator(sitk.sitkLinear)
+        resampler.SetDefaultPixelValue(0.0)
+        dose_resampled = resampler.Execute(dose_image)
+
+        dose_arr = sitk.GetArrayFromImage(dose_resampled)
+        mask_arr = sitk.GetArrayFromImage(roi_image)
+
+        mask_indices = np.where(mask_arr > 0)
+        dose_in_roi = dose_arr[mask_indices]
+
+        return dose_in_roi
+
+    def compute_roi_dose_statistics(self, image_name, roi_name, max_dose=150, increment=5):
+        spacing = Data.image[image_name].spacing
+        dose_in_roi = self.compute_roi_dose_array(image_name, roi_name)
+
+        voxel_vol_cc = np.prod(spacing) / 1000.0
+        roi_volume_cc = dose_in_roi.size * voxel_vol_cc
+
+        dvh = {"ROI": roi_name,
+               "Volume (cc)": roi_volume_cc,
+               "Dmin": np.min(dose_in_roi),
+               "Dmax": np.max(dose_in_roi),
+               "Dmean": np.mean(dose_in_roi),
+               "Dmedian": np.median(dose_in_roi),
+               "Dstd": np.std(dose_in_roi)}
+
+        d_values =  [1, 2, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 98, 99]
+        dvh.update({f"D{d}": np.percentile(dose_in_roi, 100 - d) for d in d_values})
+        voxel_vol_cc = np.prod(spacing) / 1000.0
+        for d in range(0, max_dose + increment, 5):
+            mask = dose_in_roi < d
+            dvh[f"VS{d}Gy_percent"] = np.mean(mask) * 100
+            dvh[f"VS{d}Gy_cc"] = np.sum(mask) * voxel_vol_cc
+
+        return dvh
+
     def compute_pixel(self, position):
         matrix = copy.deepcopy(self.matrix)
 
@@ -446,6 +495,19 @@ class Dose(object):
         pixel_to_position_matrix[:3, 3] = self.origin
 
         return pixel_to_position_matrix
+
+    def create_sitk_image(self, empty=False):
+        if empty:
+            sitk_image = sitk.Image([int(dim) for dim in self.dimensions], sitk.sitkUInt8)
+        else:
+            sitk_image = sitk.GetImageFromArray(self.array)
+
+        matrix_flat = self.matrix.flatten(order='F')
+        sitk_image.SetDirection([float(mat) for mat in matrix_flat])
+        sitk_image.SetOrigin(self.origin)
+        sitk_image.SetSpacing(self.spacing)
+
+        return sitk_image
 
     def reset_array(self):
         self.display.secondary_array = None
