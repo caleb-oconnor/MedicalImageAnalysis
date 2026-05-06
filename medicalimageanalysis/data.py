@@ -48,6 +48,8 @@ class Data(object):
         cls.poi_list = []
         cls.roi_list = []
         cls.rigid_list = []
+        cls.deformable_list = []
+        cls.dose_list = []
 
     @classmethod
     def delete_image(cls, image_name):
