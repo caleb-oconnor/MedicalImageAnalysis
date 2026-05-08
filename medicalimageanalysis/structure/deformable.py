@@ -215,9 +215,9 @@ class Display(object):
 
 
 class Deformable(object):
-    def __init__(self, dvf=None, origin=None, spacing=None, dimensions=None, roi_names=None, rigid_matrix=None,
-                 dvf_matrix=None, registration_name=None, reference_name=None, moving_name=None, reference_sops=None,
-                 moving_sops=None):
+    def __init__(self, dvf=None, origin=None, spacing=None, dimensions=None, roi_names=None,
+                 rigid_matrix=None, dvf_matrix=None, registration_name=None, reference_name=None, moving_name=None,
+                 reference_sops=None, moving_sops=None, reference_meshes=None, moving_meshes=None):
         self.reference_name = reference_name
         self.reference_sops = reference_sops
         self.moving_name = moving_name
@@ -225,6 +225,8 @@ class Deformable(object):
         self.roi_names = roi_names
         self.rigid_rois = dict.fromkeys(Data.roi_list)
         self.rois = dict.fromkeys(Data.roi_list)
+        self.reference_mesh = reference_meshes
+        self.moving_mesh = moving_meshes
         self.local_uid = generate_uid()
 
         self.modality = None
