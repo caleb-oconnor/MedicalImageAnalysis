@@ -1338,6 +1338,11 @@ class ReadRTDose(object):
         """
         inplane_spacing = [1, 1]
         slice_thickness = np.double(self.image_set[0].SliceThickness)
+        if np.isnan(slice_thickness):
+            if 'GridFrameOffsetVector' in self.image_set[0]:
+                grid_vector = self.image_set[0].GridFrameOffsetVector
+                if len(grid_vector) > 1:
+                    slice_thickness = grid_vector[1] - grid_vector[0]
 
         if 'PixelSpacing' in self.image_set[0]:
             inplane_spacing = self.image_set[0].PixelSpacing
