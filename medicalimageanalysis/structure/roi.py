@@ -11,14 +11,12 @@ Structure:
 
 """
 
-import vtk
 import numpy as np
 import SimpleITK as sitk
 
-from scipy.spatial.transform import Rotation
 
 from ..utils.mesh.surface import Refinement
-from ..utils.conversion import ContourToDiscreteMesh, MaskToContour
+from ..utils.convert.contour import ContourToDiscreteMesh, MaskToContour
 
 
 class Roi(object):

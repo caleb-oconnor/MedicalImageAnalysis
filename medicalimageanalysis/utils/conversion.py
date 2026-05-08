@@ -8,7 +8,6 @@ Email - csoconnor@mdanderson.org
 Description:
 """
 
-import os
 
 import cv2
 import numpy as np
