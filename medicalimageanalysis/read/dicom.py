@@ -1035,9 +1035,9 @@ class ReadRTStruct(object):
         geometric = []
         if 'ROIContourSequence' in self.image_set:
             for ii, s in enumerate(self.image_set.ROIContourSequence):
+                print(ii)
                 if hasattr(self.image_set.StructureSetROISequence[ii], 'ROIName'):
-                    if hasattr(s, 'ContourSequence'):
-                        tracker += [ii]
+                    if hasattr(s, 'ContourSequence') and len(s['ContourSequence'].value) > 0:
                         names += [self.image_set.StructureSetROISequence[ii].ROIName]
                         geometric += [s['ContourSequence'][0]['ContourGeometricType'].value]
 
