@@ -9,216 +9,417 @@ Email - csoconnor@mdanderson.org
 import os
 import psutil
 
+from pathlib import Path
+from typing import Optional
+
 from .read import DicomReader, MhdReader, StlReader, VtkReader, ThreeMfReader
 
 
-def check_memory(files):
+def check_memory(files: dict[str, list[str]]) -> float:
     """
-    Estimate available memory after accounting for file sizes in different formats.
+    Estimate remaining system memory after accounting for file sizes.
 
     Parameters
     ----------
-    files : dict
-        Dictionary of file lists grouped by type. Keys: 'Dicom', 'Nifti', 'Raw', 'Stl', 'Vtk', '3mf'
+    files : dict[str, list[str]]
+        Dictionary where each key contains a list of file paths.
+        Example:
+        {
+            'Dicom': [...],
+            'Nifti': [...],
+            'Raw': [...],
+        }
 
     Returns
     -------
     float
-        Available memory in GB after subtracting the total file sizes.
+        Remaining available memory in GB.
+
+    Examples
+    --------
+    Estimate remaining memory after loading a patient dataset:
+
+    >>> files = file_parser(folder_path='C:/Data/Patient01')
+    >>> remaining_memory = check_memory(files)
+    >>> print(f'{remaining_memory:.2f} GB available')
+    24.81 GB available
+
+    Estimate memory using a predefined file list:
+
+    >>> files = {
+    ...     'Dicom': ['image_001.dcm', 'image_002.dcm'],
+    ...     'Nifti': ['segmentation.nii.gz'],
+    ...     'Raw': [],
+    ...     'Stl': [],
+    ...     'Vtk': [],
+    ...     '3mf': [],
+    ... }
+    >>> check_memory(files)
+    23.4
     """
 
-    dicom_size = 0
-    for file in files['Dicom']:
-        dicom_size = dicom_size + os.path.getsize(file)
+    # Sum the size of every file across all file categories
+    total_size = sum(
+        Path(file).stat().st_size
+        for file_list in files.values()
+        for file in file_list
+    )
 
-    nifti_size = 0
-    for file in files['Nifti']:
-        nifti_size = nifti_size + os.path.getsize(file)
+    # Get currently available system RAM in bytes
+    available_memory = psutil.virtual_memory().available
 
-    raw_size = 0
-    for file in files['Raw']:
-        raw_size = raw_size + os.path.getsize(file)
-
-    stl_size = 0
-    for file in files['Stl']:
-        stl_size = stl_size + os.path.getsize(file)
-
-    vtk_size = 0
-    for file in files['Vtk']:
-        vtk_size = vtk_size + os.path.getsize(file)
-
-    mf3_size = 0
-    for file in files['3mf']:
-        mf3_size = mf3_size + os.path.getsize(file)
-
-    total_size = dicom_size + raw_size + nifti_size + stl_size + vtk_size + mf3_size
-    available_memory = psutil.virtual_memory()[1]
-    return (available_memory - total_size) / 1000000000
+    # Return remaining memory in gigabytes
+    return (available_memory - total_size) / 1e9
 
 
-def file_parsar(folder_path=None, file_list=None, exclude_files=None):
+def file_parser(
+    folder_path: Optional[str] = None,
+    file_list: Optional[list[str]] = None,
+    exclude_files: Optional[list[str]] = None,
+) -> dict[str, list[str]]:
     """
-    Walk through folders or file list and sort files into categories based on extension.
-
-    Supports:
-        DICOM (.dcm)
-        MHD (.mhd)
-        RAW (.raw)
-        Nifti (.nii.gz)
-        STL (.stl)
-        VTK (.vtk)
-        3MF (.3mf)
-        No extension
+    Parse files by extension from a folder or provided file list.
 
     Parameters
     ----------
-    folder_path : str, optional
-        Path to a folder containing files.
-    file_list : list, optional
-        Explicit list of file paths to process.
-    exclude_files : list, optional
-        List of file paths to exclude.
+    folder_path : str | None
+        Root folder to recursively search for files.
+
+    file_list : list[str] | None
+        Optional pre-generated list of file paths.
+        If provided, folder traversal is skipped.
+
+    exclude_files : list[str] | None
+        Files to ignore during parsing.
 
     Returns
     -------
-    dict
-        Dictionary of sorted file lists keyed by type.
+    dict[str, list[str]]
+        Dictionary containing categorized file paths.
+
+    Examples
+    --------
+    Parse all supported medical imaging files from a folder:
+
+    >>> files = file_parser(folder_path='C:/Data/Patient01')
+    >>> files.keys()
+    dict_keys([
+    ...     'Dicom',
+    ...     'MHD',
+    ...     'Raw',
+    ...     'Nifti',
+    ...     'Stl',
+    ...     'Vtk',
+    ...     '3mf',
+    ...     'NoExtension',
+    ... ])
+
+    Parse a specific list of files:
+
+    >>> file_list = [
+    ...     'C:/Data/image_001.dcm',
+    ...     'C:/Data/segmentation.nii.gz',
+    ...     'C:/Data/model.stl',
+    ... ]
+    >>> files = file_parser(file_list=file_list)
+
+    Exclude specific files during parsing:
+
+    >>> files = file_parser(
+    ...     folder_path='C:/Data',
+    ...     exclude_files=['C:/Data/bad_scan.dcm'],
+    ... )
     """
 
-    no_file_extension = []
-    dicom_files = []
-    mhd_files = []
-    raw_files = []
-    nifti_files = []
-    stl_files = []
-    vtk_files = []
-    mf3_files = []
+    # Initialize output dictionary
+    files = {
+        'Dicom': [],
+        'MHD': [],
+        'Raw': [],
+        'Nifti': [],
+        'Stl': [],
+        'Vtk': [],
+        '3mf': [],
+        'NoExtension': [],
+    }
 
-    if not exclude_files:
-        exclude_files = []
+    # Default empty exclusion list
+    exclude_files = exclude_files or []
 
+    # Generate file list from folder if not provided
     if file_list is None:
         file_list = []
-        for root, dirs, files in os.walk(folder_path):
-            if files:
-                for name in files:
-                    file_list += [os.path.join(root, name)]
 
+        for root, _, filenames in os.walk(folder_path):
+            file_list.extend(
+                str(Path(root) / filename)
+                for filename in filenames
+            )
+
+    # Categorize files by extension
     for filepath in file_list:
-        if filepath not in exclude_files:
-            filename, file_extension = os.path.splitext(filepath)
 
-            if file_extension == '.dcm':
-                dicom_files.append(filepath)
+        if filepath in exclude_files:
+            continue
 
-            elif file_extension == '.mhd':
-                mhd_files.append(filepath)
+        extension = Path(filepath).suffix.lower()
 
-            elif file_extension == '.raw':
-                raw_files.append(filepath)
+        if extension == '.dcm':
+            files['Dicom'].append(filepath)
 
-            elif file_extension == '.gz':
-                if filepath[-6:] == 'nii.gz':
-                    nifti_files.append(filepath)
+        elif extension == '.mhd':
+            files['MHD'].append(filepath)
 
-            elif file_extension == '.stl':
-                stl_files.append(filepath)
+        elif extension == '.raw':
+            files['Raw'].append(filepath)
 
-            elif file_extension == '.vtk':
-                vtk_files.append(filepath)
+        elif filepath.lower().endswith('.nii.gz'):
+            files['Nifti'].append(filepath)
 
-            elif file_extension == '.3mf':
-                mf3_files.append(filepath)
+        elif extension == '.stl':
+            files['Stl'].append(filepath)
 
-            elif file_extension == '':
-                no_file_extension.append(filepath)
+        elif extension == '.vtk':
+            files['Vtk'].append(filepath)
 
-    files = {'Dicom': dicom_files,
-             'MHD': mhd_files,
-             'Raw': raw_files,
-             'Nifti': nifti_files,
-             'Stl': stl_files,
-             'Vtk': vtk_files,
-             '3mf': mf3_files,
-             'NoExtension': no_file_extension}
+        elif extension == '.3mf':
+            files['3mf'].append(filepath)
+
+        elif extension == '':
+            files['NoExtension'].append(filepath)
 
     return files
 
 
-def read_dicoms(folder_path=None, file_list=None, exclude_files=None, only_tags=False, only_modality=None,
-                only_load_roi_names=None, clear=True):
+def read_dicoms(
+    folder_path: Optional[str] = None,
+    file_list: Optional[list[str]] = None,
+    exclude_files: Optional[list[str]] = None,
+    only_tags: bool = False,
+    only_modality: Optional[list[str]] = None,
+    only_load_roi_names: Optional[list[str]] = None,
+    clear: bool = True,
+):
     """
-    Load DICOM files from a folder or file list using DicomReader.
+    Load DICOM files using DicomReader.
 
     Parameters
     ----------
-    folder_path : str, optional
-        Path to folder containing DICOM files.
-    file_list : list, optional
-        Explicit list of file paths to read.
-    exclude_files : list, optional
-        List of file paths to exclude.
-    only_tags : bool, optional
-        If True, only read DICOM metadata tags.
-    only_modality : list, optional
-        List of DICOM modalities to include (e.g., CT, MR, PT, RTSTRUCT).
-    only_load_roi_names : list, optional
-        List of ROI names to load.
-    clear : bool, optional
-        Whether to clear existing DICOM data before loading.
+    folder_path : str | None
+        Path to a folder containing DICOM files or subfolders with dicom files.
+
+    file_list : list[str] | None
+        Explicit list of file paths to load.
+
+    exclude_files : list[str] | None
+        Files to exclude from loading.
+
+    only_tags : bool
+        If True, only load DICOM metadata tags.
+
+    only_modality : list[str] | None
+        Modalities to include.
+        Example:
+        ['CT', 'MR', 'PT', 'RTSTRUCT']
+
+    only_load_roi_names : list[str] | None
+        Specific ROI names to load from RTSTRUCT files.
+
+    clear : bool
+        If True, clear existing loaded DICOM data before loading.
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    Load all DICOMs from a folder:
+
+    >>> read_dicoms(folder_path='C:/Data/Patient01')
+
+    Load specific files only:
+
+    >>> files = [
+    ...     'C:/Data/image_001.dcm',
+    ...     'C:/Data/image_002.dcm',
+    ... ]
+    >>> read_dicoms(file_list=files)
+
+    Load only RTSTRUCT files:
+
+    >>> read_dicoms(
+    ...     folder_path='C:/Data',
+    ...     only_modality=['CT'],
+    ... )
+
     """
-    if only_modality is not None:
-        only_modality = only_modality
-    else:
-        only_modality = ['CT', 'MR', 'PT', 'US', 'DX', 'RF', 'CR', 'RTSTRUCT', 'REG', 'RTDOSE']
+
+    # Default supported modalities
+    if only_modality is None:
+        only_modality = [
+            'CT',
+            'MR',
+            'PT',
+            'US',
+            'DX',
+            'RF',
+            'CR',
+            'RTSTRUCT',
+            'REG',
+            'RTDOSE',
+        ]
 
     files = None
-    if folder_path is not None or file_list is not None:
-        files = file_parsar(folder_path=folder_path, file_list=file_list, exclude_files=exclude_files)
 
-    dicom_reader = DicomReader(files, only_tags, only_modality, only_load_roi_names, clear)
+    # Parse files from folder or provided file list
+    if folder_path is not None or file_list is not None:
+        files = file_parser(
+            folder_path=folder_path,
+            file_list=file_list,
+            exclude_files=exclude_files,
+        )
+
+    # Initialize DICOM reader
+    dicom_reader = DicomReader(
+        files,
+        only_tags,
+        only_modality,
+        only_load_roi_names,
+        clear,
+    )
+
+    # Load DICOM data
     dicom_reader.load()
 
 
-def read_3mf(file=None, roi_name=None):
+def read_3mf(
+    file: str,
+    roi_name: str | None = None,
+) -> None:
     """
-    Load 3MF file using ThreeMfReader.
+    Load a 3MF mesh file using ThreeMfReader.
 
     Parameters
     ----------
     file : str
         Path to the 3MF file.
-    roi_name : str, optional
-        Name of the ROI to associate with the 3MF file.
+
+    roi_name : str | None
+        Optional ROI name to associate with the mesh.
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    Load a 3MF implant mesh:
+
+    >>> read_3mf('C:/Data/implant.3mf')
+
+    Load a 3MF file and assign an ROI name:
+
+    >>> read_3mf(
+    ...     file='C:/Data/pelvis_model.3mf',
+    ...     roi_name='Pelvis',
+    ... )
     """
-    mf3_reader = ThreeMfReader(file, roi_name=roi_name)
+
+    # Initialize 3MF reader
+    mf3_reader = ThreeMfReader(
+        file,
+        roi_name=roi_name,
+    )
+
+    # Load 3MF data
     mf3_reader.load()
 
 
-def read_mhd(file=None, modality=None, reference_name=None, moving_name=None, roi_name=None, dose=None, dvf=None):
+def read_mhd(
+    file: str | None = None,
+    modality: str | None = None,
+    reference_name: str | None = None,
+    moving_name: str | None = None,
+    roi_name: str | None = None,
+    dose=None,
+    dvf=None,
+) -> None:
     """
-    Load MHD (MetaImage) file using MhdReader.
+    Load an MHD (MetaImage) file using MhdReader.
 
     Parameters
     ----------
-    file : str
+    file : str | None
         Path to the MHD file.
-    modality : str, optional
+
+    modality : str | None
         Imaging modality (e.g., CT, MR).
-    reference_name : str, optional
-        Name of the reference image for registration.
-    moving_name : str, optional
-        Name of the moving image for registration.
-    roi_name : str, optional
+
+    reference_name : str | None
+        Name of the reference image for registration workflows.
+
+    moving_name : str | None
+        Name of the moving image for registration workflows.
+
+    roi_name : str | None
         ROI name to associate with this image.
+
     dose : optional
-        Dose object to associate.
+        Dose object to associate with this image.
+
     dvf : optional
-        Deformation vector field to associate.
+        Deformation vector field (DVF) to associate with this image.
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    Load a basic MHD image:
+
+    >>> read_mhd(file='C:/Data/scan.mhd')
+
+    Load an MHD with modality labeling:
+
+    >>> read_mhd(
+    ...     file='C:/Data/scan.mhd',
+    ...     modality='CT',
+    ... )
+
+    Load MHD for registration workflow:
+
+    >>> read_mhd(
+    ...     file='C:/Data/fixed.mhd',
+    ...     reference_name='FixedImage',
+    ...     moving_name='MovingImage',
+    ... )
+
+    Load MHD and associate ROI and dose:
+
+    >>> read_mhd(
+    ...     file='C:/Data/scan.mhd',
+    ...     roi_name='PTV',
+    ...     dose=dose_object,
+    ... )
     """
+
+    # Only proceed if file is provided
     if file is not None:
-        mhd_reader = MhdReader(file=file, modality=modality, reference_name=reference_name, moving_name=moving_name,
-                               roi_name=roi_name, dose=dose, dvf=dvf)
+
+        # Initialize MHD reader with all optional metadata
+        mhd_reader = MhdReader(
+            file=file,
+            modality=modality,
+            reference_name=reference_name,
+            moving_name=moving_name,
+            roi_name=roi_name,
+            dose=dose,
+            dvf=dvf,
+        )
+
+        # Load image into system
         mhd_reader.load()
 
 
