@@ -4,6 +4,42 @@ The University of Texas
 MD Anderson Cancer Center
 Author - Caleb O'Connor
 Email - csoconnor@mdanderson.org
+
+Medical Imaging IO and File Orchestration Utility
+=================================================
+
+Description:
+    This module serves as the primary entry point for parsing and loading
+    multimodal medical datasets into the Morfeus environment. It provides
+    robust file system traversal, memory safety checks, and specialized
+    readers for clinical and research data formats.
+
+Supported Formats:
+    * DICOM (CT, MR, PT, RTSTRUCT, RTDOSE, REG, etc.)
+    * MetaImage (.mhd, .raw)
+    * NIfTI (.nii.gz)
+    * Surface/Mesh Data (.stl, .vtk, .3mf)
+
+Key Functionalities:
+    1. **File Parsing**: Recursive directory searching and categorization
+       by imaging modality and file extension.
+    2. **Memory Management**: Predictive memory estimation via `check_memory`
+       to prevent system crashes during large dataset ingestion.
+    3. **Standardized Reading**: Unified wrappers for format-specific
+       reader classes (e.g., DicomReader, ThreeMfReader).
+
+Architecture Note:
+    Most 'read' functions in this module interact with a global `Data`
+    registry. Loading a file typically updates the shared state across
+    the application.
+
+Usage:
+    >>> import medicalimageanalysis as mia
+    >>> # Parse a directory
+    >>> files = mia.file_parser(folder_path='path/to/patient_data')
+    >>> # Load the DICOMs found
+    >>> mia.read_dicoms(file_list=files['Dicom'])
+
 """
 
 import os
@@ -435,7 +471,3 @@ def read_mhd(
 #         if files is not None:
 #             vtk_reader.input_files(files)
 #         vtk_reader.load()
-
-
-if __name__ == '_main__':
-    pass
