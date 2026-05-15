@@ -11,12 +11,43 @@ Structure:
 
 """
 
+import random
 import numpy as np
 import SimpleITK as sitk
 
 
 from ..utils.mesh.surface import Refinement
 from ..utils.convert.contour import ContourToDiscreteMesh, MaskToContour
+
+
+def random_color(rgb_255=True):
+    """
+    Generate a random color.
+
+    Parameters
+    ----------
+    rgb_255 : bool
+        True  -> returns integers in [0, 255]
+        False -> returns floats in [0.0, 1.0]
+
+    Returns
+    -------
+    tuple
+        (r, g, b)
+    """
+    if rgb_255:
+        return (
+            random.randint(0, 255),
+            random.randint(0, 255),
+            random.randint(0, 255)
+        )
+    else:
+        return (
+            random.random(),
+            random.random(),
+            random.random()
+        )
+
 
 
 class Roi(object):
@@ -39,6 +70,9 @@ class Roi(object):
         else:
             self.contour_position = None
             self.contour_pixel = None
+
+        if color is None:
+            self.color = random_color()
 
         self.mesh = None
         self.volume = None
