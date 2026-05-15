@@ -47,7 +47,6 @@ Usage:
 
 """
 
-import os
 import copy
 import time
 import gdcm
@@ -55,7 +54,6 @@ import threading
 from struct import unpack
 
 import numpy as np
-import pandas as pd
 import pydicom as dicom
 from openpyxl.descriptors import NoneSet
 from pydicom.uid import generate_uid
@@ -206,20 +204,11 @@ class DicomReader(object):
         Read all DICOM files using multithreading.
         """
         threads = []
-
         def read_file_thread(file_path):
-            self.ds.append(
-                thread_process_dicom(
-                    file_path,
-                    stop_before_pixels=self.only_tags
-                )
-            )
+            self.ds.append(thread_process_dicom(file_path, stop_before_pixels=self.only_tags))
 
         for file_path in self.files['Dicom']:
-            thread = threading.Thread(
-                target=read_file_thread,
-                args=(file_path,)
-            )
+            thread = threading.Thread(target=read_file_thread, args=(file_path,))
             threads.append(thread)
             thread.start()
 
@@ -238,109 +227,159 @@ class DicomReader(object):
         - Stores results in `self.ds_modality`
         """
         for modality in list(self.ds_modality.keys()):
+            images_in_modality = [d for d in self.ds if (0x0008, 0x0060) in d and d['Modality'].value == modality]
+            if len(images_in_modality) > 0 and modality in self.only_modality:
+                if modality in ['US', 'DX', 'RF', 'CR', 'RTSTRUCT', 'REG', 'RTDOSE']:
+                    for image in images_in_modality:
+                        self.ds_modality[modality] += [image]
 
-            images_in_modality = [
-                d for d in self.ds
-                if (0x0008, 0x0060) in d and d['Modality'].value == modality
-            ]
+                else:
+                    sorting_tags = []
+                    for img in images_in_modality:
+                        if 'ImageOrientationPatient' not in img or 'ImagePositionPatient' not in img:
+                            continue
 
-            if len(images_in_modality) == 0:
-                continue
+                        orient = np.asarray(img['ImageOrientationPatient'].value)
+                        pos = np.asarray(img['ImagePositionPatient'].value)
+                        if 'AcquisitionNumber' in img and img['AcquisitionNumber'].value is not None:
+                            acq = np.int64(img['AcquisitionNumber'].value)
+                        else:
+                            acq = 1
 
-            if modality not in self.only_modality:
-                continue
+                        sorting_tags += [[img['SeriesInstanceUID'].value, acq, orient[0], orient[1], orient[2],
+                                          orient[3], orient[4], orient[5], pos[0], pos[1], pos[2]]]
 
-            # --- Non-volume modalities ---
-            if modality in ['US', 'DX', 'RF', 'CR', 'RTSTRUCT', 'REG', 'RTDOSE']:
-                self.ds_modality[modality].extend(images_in_modality)
-                continue
+                    if len(sorting_tags) == 0:
+                        continue
 
-            # --- Volume modalities ---
-            sorting_tags = []
+                    sorting_tags = np.asarray(sorting_tags)
+                    unique_series = np.unique(np.asarray(sorting_tags[:, 0]), axis=0)
+                    for series in unique_series:
+                        idx = np.where(sorting_tags[:, 0] == series)
+                        series_tags = sorting_tags[idx[0], :]
+                        series_image = [images_in_modality[ii] for ii in idx[0]]
 
-            for img in images_in_modality:
-                if ('ImageOrientationPatient' not in img or
-                        'ImagePositionPatient' not in img):
-                    continue
+                        orientations = series_tags[:, 2:8].astype(np.float64)
+                        _, indices = np.unique(np.round(orientations, 3), axis=0, return_index=True)
+                        unique_orientations = [orientations[ind].astype(np.float64) for ind in indices]
+                        for orient in unique_orientations:
+                            orient_idx = np.where((np.round(orientations[:, 0], 3) == np.round(orient[0], 3)) &
+                                                  (np.round(orientations[:, 1], 3) == np.round(orient[1], 3)) &
+                                                  (np.round(orientations[:, 2], 3) == np.round(orient[2], 3)) &
+                                                  (np.round(orientations[:, 3], 3) == np.round(orient[3], 3)) &
+                                                  (np.round(orientations[:, 4], 3) == np.round(orient[4], 3)) &
+                                                  (np.round(orientations[:, 5], 3) == np.round(orient[5], 3)))
 
-                orient = np.asarray(img['ImageOrientationPatient'].value)
-                pos = np.asarray(img['ImagePositionPatient'].value)
+                            orient_tags = np.asarray([series_tags[orient] for orient in orient_idx[0]])
+                            orient_image = [series_image[orient] for orient in orient_idx[0]]
+                            correct_orientation = orient_tags[0, 2:8].astype(np.float64)
 
-                acq = int(img.get('AcquisitionNumber', 1))
+                            x = np.abs(correct_orientation[0]) + np.abs(correct_orientation[3])
+                            y = np.abs(correct_orientation[1]) + np.abs(correct_orientation[4])
+                            z = np.abs(correct_orientation[2]) + np.abs(correct_orientation[5])
 
-                sorting_tags.append([
-                    img['SeriesInstanceUID'].value,
-                    acq,
-                    *orient,
-                    *pos
-                ])
+                            row_direction = correct_orientation[:3]
+                            column_direction = correct_orientation[3:]
+                            slice_direction = np.cross(row_direction, column_direction)
 
-            if len(sorting_tags) == 0:
-                continue
+                            unique_acq = np.unique(orient_tags[:, 1])
 
-            sorting_tags = np.asarray(sorting_tags)
-            unique_series = np.unique(sorting_tags[:, 0])
+                            acq_plane = []
+                            acq_images = []
+                            acq_positions = []
+                            for acq in unique_acq:
+                                orient_idx = np.where(orient_tags == acq)[0]
+                                acq_tags = orient_tags[orient_idx]
+                                acq_image = [orient_image[ii] for ii in orient_idx]
+                                position_tags = np.asarray([np.asarray(t[8:]).astype(np.double) for t in acq_tags])
 
-            for series in unique_series:
+                                if x < y and x < z:
+                                    acq_plane += ['Sagittal']
+                                    if slice_direction[0] > 0:
+                                        slice_idx = np.argsort(position_tags[:, 0])
+                                    else:
+                                        slice_idx = np.argsort(position_tags[:, 0])[::-1]
+                                elif y < x and y < z:
+                                    acq_plane += ['Coronal']
+                                    if slice_direction[1] > 0:
+                                        slice_idx = np.argsort(position_tags[:, 1])
+                                    else:
+                                        slice_idx = np.argsort(position_tags[:, 1])[::-1]
+                                else:
+                                    acq_plane += ['Axial']
+                                    if slice_direction[2] > 0:
+                                        slice_idx = np.argsort(position_tags[:, 2])
+                                    else:
+                                        slice_idx = np.argsort(position_tags[:, 2])[::-1]
 
-                idx = np.where(sorting_tags[:, 0] == series)[0]
+                                acq_images += [np.asarray([acq_image[idx] for idx in slice_idx])]
+                                acq_positions += [np.asarray([acq_tags[idx] for idx in slice_idx])]
 
-                series_tags = sorting_tags[idx]
-                series_images = [images_in_modality[i] for i in idx]
+                            if len(acq_positions) > 1:
+                                exclude_images = np.zeros((len(acq_positions), 1))
+                                for ii in range(len(acq_positions)):
+                                    for jj in range(len(acq_positions)):
+                                        if ii != jj:
+                                            if acq_plane[0] == 'Sagittal':
+                                                base_first = acq_positions[ii][0, 8]
+                                                base_last = acq_positions[ii][-1, 8]
+                                                check_first = acq_positions[jj][0, 8]
+                                                check_last = acq_positions[jj][-1, 8]
+                                            elif acq_plane[0] == 'Coronal':
+                                                base_first = acq_positions[ii][0, 9]
+                                                base_last = acq_positions[ii][-1, 9]
+                                                check_first = acq_positions[jj][0, 9]
+                                                check_last = acq_positions[jj][-1, 9]
+                                            else:
+                                                base_first = acq_positions[ii][0, 10]
+                                                base_last = acq_positions[ii][-1, 10]
+                                                check_first = acq_positions[jj][0, 10]
+                                                check_last = acq_positions[jj][-1, 10]
 
-                orientations = series_tags[:, 2:8].astype(np.float64)
+                                            base_first = np.float64(base_first)
+                                            base_last = np.float64(base_last)
+                                            check_first = np.float64(check_first)
+                                            check_last = np.float64(check_last)
 
-                _, unique_idx = np.unique(
-                    np.round(orientations, 3),
-                    axis=0,
-                    return_index=True
-                )
+                                            if base_first > check_first and base_first > check_last:
+                                                pass
 
-                unique_orientations = orientations[unique_idx]
+                                            elif base_last < check_first and base_last < check_last:
+                                                pass
 
-                for orient in unique_orientations:
+                                            else:
+                                                exclude_images[ii] = 1
 
-                    mask = np.all(
-                        np.round(orientations, 3) ==
-                        np.round(orient, 3),
-                        axis=1
-                    )
+                                if np.sum(exclude_images) == 0:
+                                    if acq_plane[0] == 'Sagittal':
+                                        pos = np.asarray([[p[0, 8], p[-1, 8]] for p in acq_positions])
+                                    elif acq_plane[0] == 'Coronal':
+                                        pos = np.asarray([[p[0, 9], p[-1, 9]] for p in acq_positions])
+                                    else:
+                                        pos = np.asarray([[p[0, 10], p[-1, 10]] for p in acq_positions]).astype(
+                                            np.float64)
 
-                    orient_tags = series_tags[mask]
-                    orient_images = [series_images[i] for i, m in enumerate(mask) if m]
+                                    pos_idx = np.argsort(pos[:, 0])
+                                    pos_sort = pos[pos_idx]
+                                    pos_diff = [pos_sort[ii + 1, 0] - pos_sort[ii, 1] for ii in range(len(pos) - 1)]
+                                    if len(np.unique(np.round(pos_diff, 2))) == 1:
+                                        img = []
+                                        for ii in pos_idx:
+                                            for acq in acq_images[ii]:
+                                                img += [acq]
+                                        self.ds_modality[modality] += [img]
 
-                    row = orient[:3]
-                    col = orient[3:]
-                    slice_dir = np.cross(row, col)
+                                    else:
+                                        for img in acq_images:
+                                            self.ds_modality[modality] += [img.tolist()]
 
-                    x = np.abs(row[0]) + np.abs(col[0])
-                    y = np.abs(row[1]) + np.abs(col[1])
-                    z = np.abs(row[2]) + np.abs(col[2])
+                                else:
+                                    for img in acq_images:
+                                        self.ds_modality[modality] += [img.tolist()]
 
-                    # --- determine plane ---
-                    if x < y and x < z:
-                        plane = "Sagittal"
-                        axis = 0
-                    elif y < x and y < z:
-                        plane = "Coronal"
-                        axis = 1
-                    else:
-                        plane = "Axial"
-                        axis = 2
-
-                    # --- sort slices ---
-                    positions = np.asarray([
-                        np.asarray(t[8:]) for t in orient_tags
-                    ], dtype=np.float64)
-
-                    if slice_dir[axis] > 0:
-                        order = np.argsort(positions[:, axis])
-                    else:
-                        order = np.argsort(positions[:, axis])[::-1]
-
-                    self.ds_modality[modality].append(
-                        [orient_images[i] for i in order]
-                    )
+                            else:
+                                for img in acq_images:
+                                    self.ds_modality[modality] += [img.tolist()]
 
     def image_creation(self):
         """
@@ -355,42 +394,38 @@ class DicomReader(object):
         - REG / RTDOSE → specialized readers
         """
 
-        for image_set in self.ds_modality.get('CT', []) + \
-                         self.ds_modality.get('MR', []) + \
-                         self.ds_modality.get('PT', []):
+        for modality in ['CT', 'MR', 'PT', 'DX', 'RF', 'CR', 'US']:
+            for image_set in self.ds_modality[modality]:
+                if modality in ['CT', 'MR', 'PT']:
+                    Read3D(image_set, self.only_tags)
 
-            Read3D(image_set, self.only_tags)
+                elif modality in ['DX', 'CR']:
+                    ReadXRay(image_set, self.only_tags)
 
-        for image_set in self.ds_modality.get('DX', []) + \
-                         self.ds_modality.get('CR', []):
+                elif modality == 'RF':
+                    ReadRF(image_set, self.only_tags)
 
-            ReadXRay(image_set, self.only_tags)
+                elif modality == 'US':
+                    ReadUS(image_set, self.only_tags)
 
-        for image_set in self.ds_modality.get('RF', []):
-            ReadRF(image_set, self.only_tags)
+        for modality in ['RTSTRUCT']:
+            for image_set in self.ds_modality[modality]:
+                read_rtstruct = ReadRTStruct(image_set, self.only_tags)
+                if read_rtstruct.match_image_name is not None:
+                    Data.image[read_rtstruct.match_image_name].input_rtstruct(read_rtstruct)
+                else:
+                    print('dicom: rtstruct has no matching image')
 
-        for image_set in self.ds_modality.get('US', []):
-            ReadUS(image_set, self.only_tags)
+            Data.match_rois()
+            Data.match_pois()
 
-        # --- RTSTRUCT ---
-        for image_set in self.ds_modality.get('RTSTRUCT', []):
-            rt = ReadRTStruct(image_set, self.only_tags)
+        for modality in ['REG']:
+            for image_set in self.ds_modality[modality]:
+                ReadREG(image_set, self.only_tags)
 
-            if rt.match_image_name is not None:
-                Data.image[rt.match_image_name].input_rtstruct(rt)
-            else:
-                print("dicom: rtstruct has no matching image")
-
-        Data.match_rois()
-        Data.match_pois()
-
-        # --- REG ---
-        for image_set in self.ds_modality.get('REG', []):
-            ReadREG(image_set, self.only_tags)
-
-        # --- RTDOSE ---
-        for image_set in self.ds_modality.get('RTDOSE', []):
-            ReadRTDose(image_set, self.only_tags)
+        for modality in ['RTDOSE']:
+            for image_set in self.ds_modality[modality]:
+                ReadRTDose(image_set, self.only_tags)
 
 
 class Read3D(object):
@@ -447,8 +482,7 @@ class Read3D(object):
         # --- internal state ---
         self.unverified = None
         self.base_position = None
-        self.skipped_slice = None
-        self.sections = None
+        self.skipped_slice = []
         self.rgb = False
 
         # --- metadata ---
@@ -456,17 +490,16 @@ class Read3D(object):
         self.filepaths = [img.filename for img in self.image_set]
         self.sops = [img.SOPInstanceUID for img in self.image_set]
 
+        self.orientation = self._compute_orientation()
+        self.plane = self._compute_plane()
+        self.spacing = self._compute_spacing()
+
         # --- volume data ---
         self.array = None
         if not self.only_tags:
             self._compute_array()
-
-        self.orientation = self._compute_orientation()
-        self.plane = self._compute_plane()
-        self.spacing = self._compute_spacing()
-        self.dimensions = self._compute_dimensions()
-
-        self._verify_axial_orientation()
+            self.dimensions = self._compute_dimensions()
+            self._verify_axial_orientation()
 
         self.image_matrix = self._compute_image_matrix()
         self.image_name = create_image_name(self.modality)
@@ -485,39 +518,47 @@ class Read3D(object):
         - RescaleIntercept
         - PixelData cleanup for memory efficiency
         """
-        slices = []
-
+        image_slices = []
         for _slice in self.image_set:
+            if (0x0028, 0x1052) in _slice:
+                intercept = _slice.RescaleIntercept
+            else:
+                intercept = 0
 
-            intercept = getattr(_slice, "RescaleIntercept", 0)
-            slope = getattr(_slice, "RescaleSlope", 1)
+            if (0x0028, 0x1053) in _slice:
+                slope = _slice.RescaleSlope
+            else:
+                slope = 1
 
-            img = (_slice.pixel_array * slope + intercept).astype(np.int16)
-            slices.append(img)
+            image_slices.append(((_slice.pixel_array * slope) + intercept).astype('int16'))
 
-            del _slice.PixelData  # free memory
+            del _slice.PixelData
 
-        self.array = np.asarray(slices)
+        self.array = np.asarray(image_slices)
 
     def _compute_orientation(self):
         """
         Extract DICOM orientation (ImageOrientationPatient).
         """
-        orientation = np.array([1, 0, 0, 0, 1, 0])
+        orientation = np.asarray([1, 0, 0, 0, 1, 0])
+        if 'ImageOrientationPatient' in self.image_set[0]:
+            orientation = np.asarray(self.image_set[0]['ImageOrientationPatient'].value)
 
-        img0 = self.image_set[0]
+        else:
+            if 'SharedFunctionalGroupsSequence' in self.image_set[0]:
+                seq_str = 'SharedFunctionalGroupsSequence'
+                if 'PlaneOrientationSequence' in self.image_set[0][0][seq_str][0]:
+                    plane_str = 'PlaneOrientationSequence'
+                    image_str = 'ImageOrientationPatient'
+                    orientation = np.asarray(self.image_set[0][0][seq_str][0][plane_str][0][image_str].value)
 
-        if "ImageOrientationPatient" in img0:
-            return np.asarray(img0.ImageOrientationPatient)
+                else:
+                    self.unverified = 'Orientation'
 
-        # fallback for enhanced DICOM
-        try:
-            seq = img0.SharedFunctionalGroupsSequence[0]
-            orientation = seq.PlaneOrientationSequence[0].ImageOrientationPatient
-            return np.asarray(orientation)
-        except Exception:
-            self.unverified = "Orientation"
-            return orientation
+            else:
+                self.unverified = 'Orientation'
+
+        return orientation
 
     def _compute_plane(self):
         """
@@ -543,36 +584,46 @@ class Read3D(object):
         - Slice spacing from ImagePositionPatient
         - Detection of irregular slice spacing
         """
-        img0 = self.image_set[0]
+        inplane_spacing = [1, 1]
+        slice_thickness = np.double(self.image_set[0].SliceThickness)
 
-        inplane = getattr(img0, "PixelSpacing", [1, 1])
-        slice_thickness = float(getattr(img0, "SliceThickness", 1))
+        if 'PixelSpacing' in self.image_set[0]:
+            inplane_spacing = self.image_set[0].PixelSpacing
 
-        # --- slice spacing estimation ---
+        elif 'ContributingSourcesSequence' in self.image_set[0]:
+            sequence = 'ContributingSourcesSequence'
+            if 'DetectorElementSpacing' in self.image_set[0][sequence][0]:
+                inplane_spacing = self.image_set[0][sequence][0]['DetectorElementSpacing']
+
+        elif 'PerFrameFunctionalGroupsSequence' in self.image_set[0]:
+            sequence = 'PerFrameFunctionalGroupsSequence'
+            if 'PixelMeasuresSequence' in self.image_set[0][sequence][0]:
+                inplane_spacing = self.image_set[0][sequence][0]['PixelMeasuresSequence'][0]['PixelSpacing']
+
         if len(self.image_set) > 1:
+            row_direction = self.orientation[:3]
+            column_direction = self.orientation[3:]
+            slice_direction = np.cross(row_direction, column_direction)
 
-            row = self.orientation[:3]
-            col = self.orientation[3:]
-            slice_dir = np.cross(row, col)
+            first = np.dot(slice_direction, self.image_set[0].ImagePositionPatient)
+            second = np.dot(slice_direction, self.image_set[1].ImagePositionPatient)
+            last = np.dot(slice_direction, self.image_set[-1].ImagePositionPatient)
+            first_last_spacing = np.asarray((last - first) / (len(self.image_set) - 1))
+            if np.abs((second - first) - first_last_spacing) > 0.01:
+                if not self.only_tags:
+                    self._find_skipped_slices(slice_direction)
+                slice_thickness = second - first
+            else:
+                slice_thickness = np.asarray((last - first) / (len(self.image_set) - 1))
 
-            p0 = np.dot(slice_dir, img0.ImagePositionPatient)
-            p1 = np.dot(slice_dir, self.image_set[1].ImagePositionPatient)
-            pN = np.dot(slice_dir, self.image_set[-1].ImagePositionPatient)
+        if self.plane == 'Axial':
+            return np.asarray([inplane_spacing[1], inplane_spacing[0], slice_thickness])
 
-            slice_thickness = (pN - p0) / (len(self.image_set) - 1)
-
-            if not self.only_tags and np.abs((p1 - p0) - slice_thickness) > 0.01:
-                self._find_skipped_slices(slice_dir)
-
-        # --- reorder by plane ---
-        if self.plane == "Axial":
-            return np.array([inplane[1], inplane[0], slice_thickness])
-
-        elif self.plane == "Coronal":
-            return np.array([inplane[1], slice_thickness, inplane[0]])
+        elif self.plane == 'Coronal':
+            return np.asarray([inplane_spacing[1], slice_thickness, inplane_spacing[0]])
 
         else:
-            return np.array([slice_thickness, inplane[1], inplane[0]])
+            return np.asarray([slice_thickness, inplane_spacing[1], inplane_spacing[0]])
 
     def _compute_dimensions(self):
         """
@@ -606,45 +657,175 @@ class Read3D(object):
 
     def _verify_axial_orientation(self):
         """
-        Ensures correct physical orientation of the volume.
-
-        - Computes 8 bounding box corners
-        - Detects flipped/misaligned orientation
-        - Applies np.rot90 / transpose corrections
-        - Updates origin + orientation vectors
+        Ensures that the 3D volume is oriented correctly in physical space.
+            - Computes all 8 corner coordinates of the image volume using orientation and spacing.
+            - Identifies the physical origin and corrects rotations or flips via np.rot90 and transpositions.
+            - Adjusts orientation vectors based on corrected axes.
         """
-        # (kept logic intact — extremely geometry-heavy, so docstring only refined)
         shape = self.array.shape
-        origin = np.asarray(self.image_set[0].ImagePositionPatient)
+        if self.plane == 'Axial':
+            spacing = self.spacing
+        elif self.plane == 'Coronal':
+            spacing = [self.spacing[0], self.spacing[2], self.spacing[1]]
+        else:
+            spacing = [self.spacing[1], self.spacing[2], self.spacing[0]]
 
-        self.origin = origin  # default
+        slices = shape[0] - 1
+        y = shape[1] - 1
+        x = shape[2] - 1
 
-        # Full geometric correction logic preserved from original code
-        # (intentionally not rewritten due to complexity + risk of altering behavior)
+        origin = np.asarray(self.image_set[0]['ImagePositionPatient'].value)
 
-    def _find_skipped_slices(self, slice_direction):
+        row_direction = self.orientation[:3]
+        column_direction = self.orientation[3:]
+        slice_direction = np.cross(row_direction, column_direction)
+
+        corners = np.zeros((8, 3))
+        corners[0] = origin
+        corners[1] = origin + (x * spacing[0] * row_direction)
+        corners[2] = origin + (y * spacing[1] * column_direction)
+        corners[3] = (origin + (x * spacing[0] * row_direction) + (y * spacing[1] * column_direction))
+
+        corners[4] = origin + (slices * spacing[2] * slice_direction)
+        corners[5] = (origin + (slices * spacing[2] * slice_direction) + (x * spacing[0] * row_direction))
+        corners[6] = (origin + (slices * spacing[2] * slice_direction) + (y * spacing[1] * column_direction))
+        corners[7] = (origin + (slices * spacing[2] * slice_direction) + (x * spacing[0] * row_direction) +
+                      (y * spacing[1] * column_direction))
+
+        corner_idx = np.argmin(np.sum(corners, axis=1))
+        if corner_idx != 0:
+            self.origin = corners[corner_idx]
+            if self.plane == "Axial":
+                if corner_idx == 1:
+                    self.array = np.rot90(self.array, 1, (1, 2))
+                elif corner_idx == 2:
+                    self.array = np.rot90(self.array, 3, (1, 2))
+                else:
+                    self.array = np.rot90(self.array, 2, (1, 2))
+
+                if corner_idx < 4:
+                    square = corners[:4, :]
+                else:
+                    square = corners[4:, :]
+
+            elif self.plane == 'Coronal':
+                self.array = np.rot90(self.array, 1, (0, 1))
+
+                s1 = np.argsort(corners[:4, 2])
+                s2 = np.argsort(corners[4:, 2]) + 4
+
+                square = [corners[s1[0]], corners[s1[1]], corners[s2[0]], corners[s2[1]]]
+
+            else:
+                self.array = np.flip(np.rot90(self.array, 1, (0, 1)).transpose(0, 2, 1), axis=2)
+
+                s1 = np.argsort(corners[:4, 2])
+                s2 = np.argsort(corners[4:, 2]) + 4
+
+                square = [corners[s1[0]], corners[s1[1]], corners[s2[0]], corners[s2[1]]]
+
+            distances = np.asarray([np.linalg.norm(corners[corner_idx, :] - s) for s in square])
+            sorted_args = np.argsort(distances)
+
+            c1 = square[sorted_args[1]] - corners[corner_idx]
+            c2 = square[sorted_args[2]] - corners[corner_idx]
+
+            if np.abs(c1[0]) > np.abs(c2[0]):
+                self.orientation[:3] = c1 / (self.spacing[0] * self.dimensions[2])
+                self.orientation[3:] = c2 / (self.spacing[1] * self.dimensions[1])
+            else:
+                self.orientation[:3] = c2 / (self.spacing[0] * self.dimensions[2])
+                self.orientation[3:] = c1 / (self.spacing[1] * self.dimensions[1])
+
+        else:
+            self.origin = origin
+
+    def _find_skipped_slices(self):
         """
-        Detect irregular slice spacing (missing slices).
+        Detect and interpolate missing slices.
 
-        Parameters
-        ----------
-        slice_direction : np.ndarray
-            Normal vector to slice plane.
+        Inserts synthetic DICOM slices directly into self.image_set.
         """
-        base_spacing = None
 
+        if len(self.image_set) < 2:
+            return
+
+        row = self.orientation[:3]
+        col = self.orientation[3:]
+        slice_dir = np.cross(row, col)
+
+        positions = np.array([np.dot(slice_dir, ds.ImagePositionPatient) for ds in self.image_set])
+        order = np.argsort(positions)
+        self.image_set = [self.image_set[i] for i in order]
+        positions = positions[order]
+
+        diffs = np.diff(positions)
+        expected_spacing = np.median(diffs)
+        rebuilt = [self.image_set[0]]
+
+        self.missing_slices = []
         for i in range(len(self.image_set) - 1):
 
-            p1 = np.dot(slice_direction, self.image_set[i].ImagePositionPatient)
-            p2 = np.dot(slice_direction, self.image_set[i + 1].ImagePositionPatient)
+            ds1 = self.image_set[i]
+            ds2 = self.image_set[i + 1]
 
-            if i == 0:
-                base_spacing = p2 - p1
+            p1 = positions[i]
+            p2 = positions[i + 1]
 
-            if np.abs(base_spacing - (p2 - p1)) > 0.01:
-                self.unverified = "Skipped"
-                self.skipped_slice = i + 1
-                return
+            gap = p2 - p1
+            n_expected = int(round(gap / expected_spacing))
+            rebuilt.append(ds1)
+            if n_expected <= 1:
+                continue
+
+            n_missing = n_expected - 1
+            self.unverified = "Skipped"
+            self.skipped_slice += [i + 1]
+
+            self.missing_slices.append({
+                "insert_index": len(rebuilt),
+                "num_missing": n_missing,
+                "between": (
+                    ds1.SOPInstanceUID,
+                    ds2.SOPInstanceUID
+                )
+            })
+
+            img1 = ds1.pixel_array.astype(np.float32)
+            img2 = ds2.pixel_array.astype(np.float32)
+
+            pos1 = np.asarray(ds1.ImagePositionPatient, dtype=np.float64)
+            pos2 = np.asarray(ds2.ImagePositionPatient, dtype=np.float64)
+
+            for m in range(n_missing):
+
+                alpha = (m + 1) / (n_missing + 1)
+                interp = (1.0 - alpha) * img1 + alpha * img2
+                interp = np.round(interp).astype(ds1.pixel_array.dtype)
+
+                new_ds = copy.deepcopy(ds1)
+                new_pos = pos1 + alpha * (pos2 - pos1)
+
+                new_ds.ImagePositionPatient = [
+                    float(v) for v in new_pos
+                ]
+
+                new_ds.PixelData = interp.tobytes()
+                new_ds.SOPInstanceUID = generate_uid()
+
+                if "InstanceNumber" in new_ds:
+                    new_ds.InstanceNumber = (
+                            ds1.InstanceNumber + m + 1
+                    )
+
+                if hasattr(new_ds, "file_meta"):
+                    new_ds.file_meta.MediaStorageSOPInstanceUID = (
+                        new_ds.SOPInstanceUID
+                    )
+
+                rebuilt.append(new_ds)
+        rebuilt.append(self.image_set[-1])
+        self.image_set = rebuilt
 
 
 class ReadXRay(object):
@@ -704,33 +885,26 @@ class ReadXRay(object):
 
         self.only_tags = only_tags
 
-        # --- metadata flags ---
         self.unverified = 'Modality'
         self.skipped_slice = None
-        self.sections = None
         self.rgb = False
 
-        # --- X-ray is inherently 2D ---
         self.orientation = [1, 0, 0, 0, 1, 0]
         self.origin = np.array([0, 0, 0])
         self.image_matrix = np.eye(3, dtype=np.float32)
 
-        # --- DICOM metadata ---
         self.modality = self.image_set[0].Modality
         self.filepaths = self.image_set[0].filename
         self.sops = self.image_set[0].SOPInstanceUID
 
-        # --- geometry ---
         self.plane = self._compute_plane()
         self.dimensions = self._compute_dimensions()
         self.spacing = self._compute_spacing()
 
-        # --- pixel data ---
         self.array = None
         if not self.only_tags:
             self._compute_array()
 
-        # --- register image ---
         self.image_name = create_image_name(self.modality)
 
         image = Image(self)
@@ -917,33 +1091,25 @@ class ReadRF(object):
 
         self.only_tags = only_tags
 
-        # --- metadata flags ---
         self.unverified = 'Modality'
         self.skipped_slice = None
-        self.sections = None
         self.rgb = False
         self.dimensions = None
 
-        # --- DICOM metadata ---
         self.modality = self.image_set[0].Modality
         self.filepaths = self.image_set[0].filename
         self.sops = self.image_set[0].SOPInstanceUID
 
-        # --- geometry defaults ---
         self.orientation = [1, 0, 0, 0, 1, 0]
         self.origin = np.array([0, 0, 0])
         self.image_matrix = np.eye(3, dtype=np.float32)
-
         self.plane = self._compute_plane()
 
-        # --- pixel data ---
         self.array = None
         if not self.only_tags:
             self._compute_array()
 
         self.spacing = self._compute_spacing()
-
-        # --- register ---
         self.image_name = create_image_name(self.modality)
 
         image = Image(self)
@@ -1111,19 +1277,15 @@ class ReadUS(object):
 
         self.only_tags = only_tags
 
-        # --- metadata flags ---
         self.unverified = 'Modality'
         self.base_position = None
         self.skipped_slice = None
-        self.sections = None
         self.rgb = False
 
-        # --- DICOM metadata ---
         self.modality = self.image_set[0].Modality
         self.filepaths = self.image_set[0].filename
         self.sops = self.image_set[0].SOPInstanceUID
 
-        # --- US is treated as axial pseudo-volume ---
         self.plane = 'Axial'
         self.orientation = [1, 0, 0, 0, 1, 0]
         self.origin = np.array([0, 0, 0])
@@ -1135,14 +1297,11 @@ class ReadUS(object):
             self.image_set[0]['Columns'].value
         ])
 
-        # --- pixel data ---
         self.array = None
         if not self.only_tags:
             self._compute_array()
 
         self.spacing = self._compute_spacing()
-
-        # --- register ---
         self.image_name = create_image_name(self.modality)
 
         image = Image(self)
@@ -1288,40 +1447,20 @@ class ReadRTStruct(object):
         self.image_set = image_set
         self.only_tags = only_tags
 
-        # --- linkage ---
         self.series_uid = self._get_series_uid()
         self.filepaths = self.image_set.filename
 
-        # --- ROI / POI metadata ---
         self._properties = self._get_properties()
+        self.roi_names = [prop[1] for prop in self._properties if prop[3].lower() == 'closed_planar']
+        self.roi_colors = [prop[2] for prop in self._properties if prop[3].lower() == 'closed_planar']
+        self.poi_names = [prop[1] for prop in self._properties if prop[3].lower() == 'point']
+        self.poi_colors = [prop[2] for prop in self._properties if prop[3].lower() == 'point']
 
-        self.roi_names = [
-            p[1] for p in self._properties
-            if p[3].lower() == 'closed_planar'
-        ]
-
-        self.roi_colors = [
-            p[2] for p in self._properties
-            if p[3].lower() == 'closed_planar'
-        ]
-
-        self.poi_names = [
-            p[1] for p in self._properties
-            if p[3].lower() == 'point'
-        ]
-
-        self.poi_colors = [
-            p[2] for p in self._properties
-            if p[3].lower() == 'point'
-        ]
-
-        # --- image matching ---
         if len(self.roi_names) > 0 or len(self.poi_names) > 0:
             self.match_image_name = self._match_with_image()
 
             self.contours = []
             self.points = []
-
             if not self.only_tags:
                 self._structure_positions()
         else:
@@ -1532,72 +1671,37 @@ class ReadREG(object):
         Initialize REG reader and compute registration data.
         """
 
-        self.image_set = (
-            image_set if isinstance(image_set, list)
-            else [image_set]
-        )
-
+        if isinstance(image_set, list):
+            self.image_set = image_set
+        else:
+            self.image_set = [image_set]
         self.only_tags = only_tags
 
         self.reference_name = None
-        self.reference_series = (
-            self.image_set[0]
-            .ReferencedSeriesSequence[0]
-            .SeriesInstanceUID
-        )
-
-        self.reference_sops = [
-            sop.ReferencedSOPInstanceUID
-            for sop in self.image_set[0]
-            .ReferencedSeriesSequence[0]
-            .ReferencedInstanceSequence
-        ]
+        self.reference_series = self.image_set[0].ReferencedSeriesSequence[0].SeriesInstanceUID
+        self.reference_sops = [sop.ReferencedSOPInstanceUID for sop in
+                               self.image_set[0].ReferencedSeriesSequence[0].ReferencedInstanceSequence]
 
         self.moving_name = None
-
-        # --- handle multiple registration formats ---
         if len(self.image_set[0].ReferencedSeriesSequence) == 2:
-            self.moving_series = (
-                self.image_set[0]
-                .ReferencedSeriesSequence[1]
-                .SeriesInstanceUID
-            )
-
-            self.moving_sops = [
-                sop.ReferencedSOPInstanceUID
-                for sop in self.image_set[0]
-                .ReferencedSeriesSequence[1]
-                .ReferencedInstanceSequence
-            ]
-
+            self.moving_series = self.image_set[0].ReferencedSeriesSequence[1].SeriesInstanceUID
+            self.moving_sops = [sop.ReferencedSOPInstanceUID for sop in
+                                self.image_set[0].ReferencedSeriesSequence[1].ReferencedInstanceSequence]
         else:
-            seq = (
-                self.image_set[0]
-                .StudiesContainingOtherReferencedInstancesSequence[0]
-                .ReferencedSeriesSequence[0]
-            )
-
-            self.moving_series = seq.SeriesInstanceUID
-
-            self.moving_sops = [
-                sop.ReferencedSOPInstanceUID
-                for sop in seq.ReferencedInstanceSequence
-            ]
+            sequence = self.image_set[0].StudiesContainingOtherReferencedInstancesSequence[0].ReferencedSeriesSequence[0]
+            self.moving_series = sequence.SeriesInstanceUID
+            self.moving_sops = [sop.ReferencedSOPInstanceUID for sop in sequence.ReferencedInstanceSequence]
 
         self.spacing = None
         self.dimensions = None
         self.origin = None
 
-        # --- transforms ---
         self.reference_matrix = None
         self.moving_matrix = None
-
-        # --- DVF ---
         self.dvf_matrix = None
         self.dvf = None
 
         self.registration_name = None
-
         if 'DeformableRegistrationSequence' in self.image_set[0]:
             self._compute_rigid(deformable=True)
             self._compute_dvf()
@@ -1772,7 +1876,6 @@ class ReadRTDose(object):
         self.unverified = None
         self.base_position = None
         self.skipped_slice = None
-        self.sections = None
 
         self.modality = "RTDOSE"
 
@@ -1856,36 +1959,44 @@ class ReadRTDose(object):
         """
         Computes voxel spacing and handles irregular slice spacing if present.
         """
-        inplane = [1, 1]
-        slice_thickness = float(self.image_set[0].SliceThickness)
+        inplane_spacing = [1, 1]
+        slice_thickness = np.double(self.image_set[0].SliceThickness)
+        if np.isnan(slice_thickness):
+            if 'GridFrameOffsetVector' in self.image_set[0]:
+                grid_vector = self.image_set[0].GridFrameOffsetVector
+                if len(grid_vector) > 1:
+                    slice_thickness = grid_vector[1] - grid_vector[0]
 
-        if "PixelSpacing" in self.image_set[0]:
-            inplane = self.image_set[0].PixelSpacing
+        if 'PixelSpacing' in self.image_set[0]:
+            inplane_spacing = self.image_set[0].PixelSpacing
+
+        elif 'ContributingSourcesSequence' in self.image_set[0]:
+            sequence = 'ContributingSourcesSequence'
+            if 'DetectorElementSpacing' in self.image_set[0][sequence][0]:
+                inplane_spacing = self.image_set[0][sequence][0]['DetectorElementSpacing']
+
+        elif 'PerFrameFunctionalGroupsSequence' in self.image_set[0]:
+            sequence = 'PerFrameFunctionalGroupsSequence'
+            if 'PixelMeasuresSequence' in self.image_set[0][sequence][0]:
+                inplane_spacing = self.image_set[0][sequence][0]['PixelMeasuresSequence'][0]['PixelSpacing']
 
         if len(self.image_set) > 1:
-            row = self.orientation[:3]
-            col = self.orientation[3:]
-            slc = np.cross(row, col)
+            row_direction = self.orientation[:3]
+            column_direction = self.orientation[3:]
+            slice_direction = np.cross(row_direction, column_direction)
 
-            first = np.dot(slc, self.image_set[0].ImagePositionPatient)
-            second = np.dot(slc, self.image_set[1].ImagePositionPatient)
-            last = np.dot(slc, self.image_set[-1].ImagePositionPatient)
+            first = np.dot(slice_direction, self.image_set[0].ImagePositionPatient)
+            last = np.dot(slice_direction, self.image_set[-1].ImagePositionPatient)
+            slice_thickness = np.asarray((last - first) / (len(self.image_set) - 1))
 
-            expected = (last - first) / (len(self.image_set) - 1)
+        if self.plane == 'Axial':
+            return np.asarray([inplane_spacing[1], inplane_spacing[0], slice_thickness])
 
-            if abs((second - first) - expected) > 0.01:
-                if not self.only_tags:
-                    self._find_skipped_slices(slc)
-                slice_thickness = second - first
-            else:
-                slice_thickness = expected
+        elif self.plane == 'Coronal':
+            return np.asarray([inplane_spacing[1], slice_thickness, inplane_spacing[0]])
 
-        if self.plane == "Axial":
-            return np.asarray([inplane[1], inplane[0], slice_thickness])
-        elif self.plane == "Coronal":
-            return np.asarray([inplane[1], slice_thickness, inplane[0]])
         else:
-            return np.asarray([slice_thickness, inplane[1], inplane[0]])
+            return np.asarray([slice_thickness, inplane_spacing[1], inplane_spacing[0]])
 
     def _compute_dimensions(self):
         """
@@ -1920,26 +2031,82 @@ class ReadRTDose(object):
         Ensures correct physical orientation of the dose grid and fixes flips/rotations if needed.
         """
         shape = self.array.shape
-        origin = np.asarray(self.image_set[0]["ImagePositionPatient"].value)
+        if self.plane == 'Axial':
+            spacing = self.spacing
+        elif self.plane == 'Coronal':
+            spacing = [self.spacing[0], self.spacing[2], self.spacing[1]]
+        else:
+            spacing = [self.spacing[1], self.spacing[2], self.spacing[0]]
 
-        self.origin = origin
+        slices = shape[0] - 1
+        y = shape[1] - 1
+        x = shape[2] - 1
 
-    def _find_skipped_slices(self, slice_direction):
-        """
-        Detects irregular slice spacing in the dose grid.
-        """
-        base = None
+        origin = np.asarray(self.image_set[0]['ImagePositionPatient'].value)
 
-        for i in range(len(self.image_set) - 1):
-            p1 = np.dot(slice_direction, self.image_set[i].ImagePositionPatient)
-            p2 = np.dot(slice_direction, self.image_set[i + 1].ImagePositionPatient)
+        row_direction = self.orientation[:3]
+        column_direction = self.orientation[3:]
+        slice_direction = np.cross(row_direction, column_direction)
 
-            if i == 0:
-                base = p2 - p1
+        corners = np.zeros((8, 3))
+        corners[0] = origin
+        corners[1] = origin + (x * spacing[0] * row_direction)
+        corners[2] = origin + (y * spacing[1] * column_direction)
+        corners[3] = (origin + (x * spacing[0] * row_direction) + (y * spacing[1] * column_direction))
 
-            if i > 0 and abs(base - (p2 - p1)) > 0.01:
-                self.unverified = "Skipped"
-                self.skipped_slice = i + 1
+        corners[4] = origin + (slices * spacing[2] * slice_direction)
+        corners[5] = (origin + (slices * spacing[2] * slice_direction) + (x * spacing[0] * row_direction))
+        corners[6] = (origin + (slices * spacing[2] * slice_direction) + (y * spacing[1] * column_direction))
+        corners[7] = (origin + (slices * spacing[2] * slice_direction) + (x * spacing[0] * row_direction) +
+                      (y * spacing[1] * column_direction))
+
+        corner_idx = np.argmin(np.sum(corners, axis=1))
+        if corner_idx != 0:
+            self.origin = corners[corner_idx]
+            if self.plane == "Axial":
+                if corner_idx == 1:
+                    self.array = np.rot90(self.array, 1, (1, 2))
+                elif corner_idx == 2:
+                    self.array = np.rot90(self.array, 3, (1, 2))
+                else:
+                    self.array = np.rot90(self.array, 2, (1, 2))
+
+                if corner_idx < 4:
+                    square = corners[:4, :]
+                else:
+                    square = corners[4:, :]
+
+            elif self.plane == 'Coronal':
+                self.array = np.rot90(self.array, 1, (0, 1))
+
+                s1 = np.argsort(corners[:4, 2])
+                s2 = np.argsort(corners[4:, 2]) + 4
+
+                square = [corners[s1[0]], corners[s1[1]], corners[s2[0]], corners[s2[1]]]
+
+            else:
+                self.array = np.flip(np.rot90(self.array, 1, (0, 1)).transpose(0, 2, 1), axis=2)
+
+                s1 = np.argsort(corners[:4, 2])
+                s2 = np.argsort(corners[4:, 2]) + 4
+
+                square = [corners[s1[0]], corners[s1[1]], corners[s2[0]], corners[s2[1]]]
+
+            distances = np.asarray([np.linalg.norm(corners[corner_idx, :] - s) for s in square])
+            sorted_args = np.argsort(distances)
+
+            c1 = square[sorted_args[1]] - corners[corner_idx]
+            c2 = square[sorted_args[2]] - corners[corner_idx]
+
+            if np.abs(c1[0]) > np.abs(c2[0]):
+                self.orientation[:3] = c1 / (self.spacing[0] * self.dimensions[2])
+                self.orientation[3:] = c2 / (self.spacing[1] * self.dimensions[1])
+            else:
+                self.orientation[:3] = c2 / (self.spacing[0] * self.dimensions[2])
+                self.orientation[3:] = c1 / (self.spacing[1] * self.dimensions[1])
+
+        else:
+            self.origin = origin
 
 
 def create_image_name(modality):
