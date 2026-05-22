@@ -15,6 +15,7 @@ import os
 import copy
 
 import numpy as np
+import pandas as pd
 import SimpleITK as sitk
 
 import vtk
