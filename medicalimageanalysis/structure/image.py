@@ -30,6 +30,7 @@ from ..utils.roi.contour import contours_from_mask
 
 from .poi import Poi
 from .roi import Roi
+from ..data import Data
 
 
 class Display(object):
@@ -240,7 +241,6 @@ class Image(object):
 
         self.unverified = image.unverified
         self.skipped_slice = image.skipped_slice
-        self.sections = image.sections
         self.rgb = image.rgb
 
         self.camera_position = None
@@ -249,6 +249,17 @@ class Image(object):
         self.misc = {}
 
         self.display = Display(self)
+
+    def input_mhd(self, filename, roi_names, values, plane='Axial'):
+        roi_image = sitk.ReadImage(filename)
+        roi_array = sitk.GetArrayFromImage(roi_image)
+        for ii, roi_name in enumerate(roi_names):
+            if roi_name not in list(self.rois.keys()):
+                self.rois[roi_name] = Roi(self, name=roi_name, visible=True, filepaths=filename,
+                                          plane=plane)
+
+            roi_mask = roi_array == values[ii]
+            self.rois[roi_name].convert_mask(roi_mask)
 
     def input_rtstruct(self, rtstruct):
         for ii, roi_name in enumerate(rtstruct.roi_names):
@@ -261,15 +272,24 @@ class Image(object):
                 self.pois[poi_name] = Poi(self, position=rtstruct.points[ii], name=poi_name,
                                           color=rtstruct.poi_colors[ii], visible=False, filepaths=rtstruct.filepaths)
 
+        Data.match_rois()
+        Data.match_pois()
+
     def add_roi(self, roi_name=None, color=None, visible=False, path=None, contour=None, plane='Axial'):
         self.rois[roi_name] = Roi(self, position=contour, name=roi_name, color=color, visible=visible, filepaths=path,
                                   plane=plane)
+        Data.match_rois()
 
     def add_poi(self, poi_name=None, color=None, visible=False, path=None, point=None):
         self.pois[poi_name] = Poi(self, position=point, name=poi_name, color=color, visible=visible, filepaths=path)
+        Data.match_pois()
 
     def create_roi(self, name=None, color=None, visible=False, filepath=None):
         self.rois[name] = Roi(self, name=name, color=color, visible=visible, filepaths=filepath)
+        Data.match_rois()
+
+    def create_rtstruct(self, roi_names=None, poi_names=None):
+        pass
 
     def get_patient_name(self):
         if 'PatientName' in self.tags[0]:
@@ -496,7 +516,7 @@ class Image(object):
 
         return sitk_image
 
-    def create_rotated_sitk_image(self, empty=False):
+    def create_rotated_sitk_image(self):
         sitk_image = sitk.GetImageFromArray(self.array)
         matrix_flat = self.matrix.flatten(order='F')
         sitk_image.SetDirection([float(mat) for mat in matrix_flat])
