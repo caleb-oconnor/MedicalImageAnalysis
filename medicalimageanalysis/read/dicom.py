@@ -416,9 +416,6 @@ class DicomReader(object):
                 else:
                     print('dicom: rtstruct has no matching image')
 
-            Data.match_rois()
-            Data.match_pois()
-
         for modality in ['REG']:
             for image_set in self.ds_modality[modality]:
                 ReadREG(image_set, self.only_tags)
