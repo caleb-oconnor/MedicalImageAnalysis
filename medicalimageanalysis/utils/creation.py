@@ -17,7 +17,8 @@ import datetime
 
 import numpy as np
 import pydicom as dicom
-from pydicom.uid import generate_uid, UID, ExplicitVRLittleEndian
+from pydicom.uid import (generate_uid, UID, ExplicitVRLittleEndian, ImplicitVRLittleEndian, RTStructureSetStorage,
+                         CTImageStorage, MRImageStorage, PositronEmissionTomographyImageStorage)
 
 from ..data import Data
 from ..structure import Image
@@ -74,8 +75,14 @@ class CreateDicomImage(object):
 
             ds = dicom.Dataset()
             ds.file_meta = dicom.Dataset()
-            ds.file_meta.ImplementationClassUID = "1.2.3.4"
-            ds.file_meta.MediaStorageSOPClassUID = UID("1.2.840.10008.5.1.4.1.1.2")
+            ds.file_meta.ImplementationClassUID = generate_uid()
+            if modality == 'CT':
+                ds.file_meta.MediaStorageSOPClassUID = CTImageStorage
+            elif modality == 'MR':
+                ds.file_meta.MediaStorageSOPClassUID = MRImageStorage
+            else:
+                ds.file_meta.MediaStorageSOPClassUID = PositronEmissionTomographyImageStorage
+
             ds.file_meta.MediaStorageSOPInstanceUID = str(10000 + ii)
             ds.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
 
@@ -94,7 +101,7 @@ class CreateDicomImage(object):
             ds.StudyInstanceUID = self.study
             ds.SeriesInstanceUID = self.series
             ds.SOPInstanceUID = UID(str(10000 + ii))
-            ds.SOPClassUID = UID("1.2.840.10008.5.1.4.1.1.2")
+            ds.SOPClassUID = ds.file_meta.MediaStorageSOPClassUID
             ds.StudyID = '100'
 
             ds.FrameOfReferenceUID = self.frame
