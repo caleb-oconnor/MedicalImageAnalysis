@@ -1,6 +1,6 @@
 
-from .conversion import ContourToDiscreteMesh, ContourToMask, ModelToMask
-# from .creation import CreateDicomImage, CreateImageFromMask
+# from .conversion import ContourToDiscreteMesh, ContourToMask, ModelToMask
+from .convert.contour import ContourToDiscreteMesh, ContourToMask, MaskToContour, ModelToMask
 
 from .mesh.volume import Volume
 from .mesh.surface import Refinement
