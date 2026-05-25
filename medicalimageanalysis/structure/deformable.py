@@ -1,14 +1,18 @@
 """
-Morfeus lab
+Morfeus Lab
 The University of Texas
 MD Anderson Cancer Center
 Author - Caleb O'Connor
 Email - csoconnor@mdanderson.org
 
 Description:
+    Deformable image registration management and multi-planar display slice processing
+    for medical imaging datasets (CT/MR). This module handles displacement vector fields (DVFs),
+    rigid transform updates, and ROI mesh warping workflows.
 
 Structure:
-
+    * Display: Handles pixel, slice, and mesh projections across Axial, Coronal, and Sagittal planes.
+    * Deformable: Manages DVF computations, registration tracking, alignment corrections, and ROI transformations.
 """
 
 import os
@@ -18,9 +22,6 @@ import numpy as np
 import pandas as pd
 import SimpleITK as sitk
 
-import vtk
-from vtkmodules.util import numpy_support
-
 from pydicom.uid import generate_uid
 from scipy.ndimage import map_coordinates
 
@@ -29,7 +30,45 @@ from ..utils.deformable.simpleitk import DeformableITK
 
 
 class Display(object):
+    """
+    Handles coordinate mapping, data rendering, and slice extractions for viewing 3D volumes.
+
+    This class decouples volumetric deformable properties from viewport orientation, mapping
+    indices to physical coordinates across orthogonal imaging planes.
+
+    Attributes
+    ----------
+    deformable : Deformable
+        Parent deformable instance owning image metadata and DVF arrays.
+    origin : list or tuple
+        The physical world coordinate corresponding to index (0,0,0).
+    spacing : list or tuple
+        Voxel sizes in millimeters along the X, Y, and Z axes.
+    array : list of np.ndarray
+        Volumetric array instances captured at progressive transformation fractions.
+    image : SimpleITK.Image
+        Cached internal SimpleITK image reference.
+    matrix : np.ndarray
+        3x3 direction matrix relating voxel axes to physical spatial orientations.
+    slice_location : list of int
+        Current plane indices [Z, Y, X] selected for orthogonal viewing.
+    scroll_max : list of int
+        Maximum scroll index offsets allowed for each dimension.
+    offset : dict
+        Voxel coordinate translation shifts mapping the active array to a reference baseline image.
+    misc : dict
+        Storage area for arbitrary display properties or pipeline configurations.
+    """
+
     def __init__(self, deformable):
+        """
+        Initializes a Display viewport tracking manager for an active alignment context.
+
+        Parameters
+        ----------
+        deformable : Deformable
+            Parent deformable dataset object to inspect or slice.
+        """
         self.deformable = deformable
 
         self.origin = None
@@ -46,6 +85,27 @@ class Display(object):
         self.compute_scroll_max()
 
     def compute_array(self, slice_plane, portion=0):
+        """
+        Extracts a 2D intensity projection matrix matching a desired viewport orientation.
+
+        Parameters
+        ----------
+        slice_plane : str
+            The slicing orientation targeting array structures. Must be 'Axial', 'Coronal', or 'Sagittal'.
+        portion : int, optional
+            The target frame or incremental state index loaded inside `self.array`. Defaults to 0.
+
+        Returns
+        -------
+        np.ndarray
+            Floating-point 2D matrix representing structural voxel data across the selected section plane.
+            Returns None if index definitions or bounds fall outside volume ranges.
+
+        Examples
+        --------
+        >>> display_mgr.slice_location = [25, 0, 0]
+        >>> axial_slice = display_mgr.compute_array('Axial')
+        """
         array_slice = None
         if slice_plane == 'Axial':
             if 0 <= self.slice_location[0] < self.array[portion].shape[0]:
@@ -62,6 +122,14 @@ class Display(object):
         return array_slice
 
     def compute_deformation(self, division=1):
+        """
+        Samples the displacement field continuously over fractional timeline increments to extract morphed configurations.
+
+        Parameters
+        ----------
+        division : int, optional
+            The total number of evaluation subdivisions evaluated to build progressive frame states. Defaults to 1.
+        """
         for ii in range(division):
             ratio = (ii + 1) / division
             image = self.deformable.create_image(ratio=ratio)
@@ -73,6 +141,21 @@ class Display(object):
         self.compute_offset()
 
     def compute_grid(self, slice_plane='Axial', vector='x'):
+        """
+        Isolates directed scalar displacement components matching an explicit projection path.
+
+        Parameters
+        ----------
+        slice_plane : str, optional
+            Target spatial slicing plane. Must be 'Axial', 'Coronal', or 'Sagittal'. Defaults to 'Axial'.
+        vector : str, optional
+            Vector direction component to sample. Must be 'x', 'y', or 'z'. Defaults to 'x'.
+
+        Returns
+        -------
+        np.ndarray
+            Single-channel 2D matrix mapping local vector magnitudes (float32) intersecting the active viewer index.
+        """
         if slice_plane == 'Axial':
             dvf_plane = self.deformable.dvf[self.slice_location[0], :, :, :]
         elif slice_plane == 'Coronal':
@@ -90,6 +173,14 @@ class Display(object):
         return dvf_vector.astype(np.float32)
 
     def compute_matrix_pixel_to_position(self):
+        """
+        Calculates a 4x4 homogeneous matrix mapping discrete pixel indexes directly to continuous world coordinates.
+
+        Returns
+        -------
+        np.ndarray
+            Homogeneous 4x4 coordinate transformation array (float32).
+        """
         matrix = copy.deepcopy(self.matrix)
 
         pixel_to_position_matrix = np.identity(4, dtype=np.float32)
@@ -101,6 +192,14 @@ class Display(object):
         return pixel_to_position_matrix
 
     def compute_matrix_position_to_pixel(self):
+        """
+        Calculates a 4x4 homogeneous transform matrix mapping continuous physical spaces to matrix voxel indexes.
+
+        Returns
+        -------
+        np.ndarray
+            Homogeneous 4x4 mapping array (float32) handling spatial index inversions.
+        """
         matrix = copy.deepcopy(self.matrix)
 
         hold_matrix = np.identity(3, dtype=np.float32)
@@ -115,6 +214,25 @@ class Display(object):
         return position_to_pixel_matrix
 
     def compute_mesh_slice(self, roi_name=None, location=None, slice_plane=None, return_pixel=False):
+        """
+        Intersects 3D ROI structures using normal vectors to compute flat planar contours or local pixel contours.
+
+        Parameters
+        ----------
+        roi_name : str, optional
+            Key identifier pointing to the desired region of interest structure. Defaults to None.
+        location : list or np.ndarray, optional
+            Physical point intersection origin matching the cutting field. Defaults to None.
+        slice_plane : str, optional
+            Target viewing plane projection name. Must be 'Axial', 'Coronal', or 'Sagittal'. Defaults to None.
+        return_pixel : bool, optional
+            Converts structural 3D vertex contours back to local 2D view indexes if True. Defaults to False.
+
+        Returns
+        -------
+        PolyData or list
+            Returns a sliced surface model or a structured array list containing 2D cross-section coordinate steps.
+        """
         if self.deformable.rois[roi_name] is None:
             self.deformable.update_rois(roi_name=roi_name)
 
@@ -157,6 +275,9 @@ class Display(object):
             return roi_slice
 
     def compute_offset(self):
+        """
+        Aligns internal display coordinate matrices to a master background image dataset profile.
+        """
         if self.deformable.reference_name is not None:
             pos = Data.image[self.deformable.reference_name].origin
 
@@ -168,12 +289,34 @@ class Display(object):
             self.offset['Sagittal'][1] = (self.origin[2] - pos[2]) / self.spacing[2]
 
     def compute_slice_location(self, position=None):
+        """
+        Updates viewing indices by determining the closest voxel matrix intersection matching a physical landmark location.
+
+        Parameters
+        ----------
+        position : list or np.ndarray, optional
+            Physical 3D location target coordinates. If omitted, values sync
+            to structural values loaded inside `Data.image`. Defaults to None.
+        """
         if position is None:
             source_location = np.flip(Data.image[self.deformable.reference_name].display.slice_location)
             position = Data.image[self.deformable.reference_name].display.compute_index_positions(source_location)
         self.slice_location = np.flip(np.round((position - self.origin) / self.spacing).astype(np.int32))
 
     def compute_slice_origin(self, slice_plane):
+        """
+        Extracts continuous world position coordinates matching the precise origin boundaries of a selected slice index.
+
+        Parameters
+        ----------
+        slice_plane : str
+            Target viewing axis. Must be 'Axial', 'Coronal', or 'Sagittal'.
+
+        Returns
+        -------
+        np.ndarray
+            Vector containing the 3D continuous origin coordinate point, or None if conditions violate index limits.
+        """
         slice_origin = None
         if slice_plane == 'Axial' and 0 <= self.slice_location[0] <= self.scroll_max[0]:
             location = np.asarray([0, 0, self.slice_location[0]])
@@ -188,6 +331,9 @@ class Display(object):
         return slice_origin
 
     def compute_scroll_max(self):
+        """
+        Calculates spatial matrix limits to restrict viewport index steps within valid image array data blocks.
+        """
         if len(self.array) == 0:
             self.scroll_max = self.deformable.dimensions - 1
         else:
@@ -196,6 +342,19 @@ class Display(object):
                                self.array[-1].shape[2] - 1]
 
     def convert_position_to_pixel(self, position=None):
+        """
+        Maps continuous physical 3D vertices into structural array pixel coordinates.
+
+        Parameters
+        ----------
+        position : list of np.ndarray, optional
+            Collection of point arrays containing physical spatial entries. Defaults to None.
+
+        Returns
+        -------
+        list of np.ndarray
+            Modulated coordinate indexes tailored for plotting canvas elements.
+        """
         position_to_pixel_matrix = self.compute_matrix_position_to_pixel()
 
         pixel = []
@@ -207,6 +366,16 @@ class Display(object):
         return pixel
 
     def update_slice_location(self, scroll, slice_plane):
+        """
+        Manually forces a new tracking row or column view step offset index for display pipelines.
+
+        Parameters
+        ----------
+        scroll : int
+            The target matrix slice level index step parameter to set.
+        slice_plane : str
+            Orientation projection target. Must be 'Axial', 'Coronal', or 'Sagittal'.
+        """
         if slice_plane == 'Axial':
             self.slice_location[0] = scroll
         elif slice_plane == 'Coronal':
@@ -216,9 +385,58 @@ class Display(object):
 
 
 class Deformable(object):
+    """
+    Manages non-rigid transformation workflows, holding non-rigid fields, parameters, and morph functions.
+
+    This class provides wrappers around SimpleITK registration procedures, optimizing structural profiles
+    and propagating vector field movements across biological regions of interest.
+
+    Attributes
+    ----------
+    reference_name : str
+        Key label matching the static reference/fixed baseline scan profile.
+    reference_sops : list
+        DICOM Service-Object Pair Instance UIDs identifying source reference items.
+    moving_name : str
+        Key label identifying the structural target image volume undergoing registration adjustments.
+    moving_sops : list
+        DICOM Instance UIDs mapping back to components within the moving scan profile.
+    roi_names : list of str
+        Descriptive structural ROI names associated with the target datasets.
+    rigid_rois : dict
+        Intermediary cache tracking rigid positional adjustments prior to applying non-rigid deformations.
+    rois : dict
+        Active morph result paths mapping structured mesh entities to their non-rigid deformation positions.
+    reference_mesh : PolyData
+        Master structural surface reference asset definition tracking target anatomy elements.
+    moving_mesh : PolyData
+        Deformable structural mesh surface parameters tracking moving anatomical targets.
+    local_uid : str
+        Process UID token generated for system pipeline identification tasks.
+    modality : str
+        Medical imaging scan parameter type (e.g., 'CT', 'MR').
+    dvf : np.ndarray
+        Displacement Vector Field tensor tracking displacement coordinates across matrix nodes.
+    origin : list or tuple
+        Continuous spatial world coordinates matching index origin foundations.
+    spacing : list or tuple
+        Scale dimensions mapping voxels to metrics in physical dimensions.
+    dimensions : tuple or list
+        Voxel count indicators structural bounds.
+    rigid_matrix : np.ndarray
+        4x4 matrix executing introductory linear or rigid spatial corrections.
+    deformable_name : str
+        Registry ID tracking active parameters in runtime contexts.
+    display : Display
+        Viewing interface mapping structures across viewport projections.
+    """
+
     def __init__(self, dvf=None, origin=None, spacing=None, dimensions=None, roi_names=None,
                  rigid_matrix=None, dvf_matrix=None, registration_name=None, reference_name=None, moving_name=None,
                  reference_sops=None, moving_sops=None, reference_meshes=None, moving_meshes=None):
+        """
+        Initializes a Deformable registration record holding transformation parameters.
+        """
         self.reference_name = reference_name
         self.reference_sops = reference_sops
         self.moving_name = moving_name
@@ -259,6 +477,19 @@ class Deformable(object):
             self.update_rois()
 
     def add_deformable(self, deformable_name):
+        """
+        Registers this transformation instance inside the repository storage tracking framework.
+
+        Parameters
+        ----------
+        deformable_name : str
+            Preferred tracking title identity. If None, an identifier is generated.
+
+        Returns
+        -------
+        str
+            The final tracking registry label used to locate this specific deformable context.
+        """
         if deformable_name is None:
             if self.reference_name is None and self.moving_name is None:
                 deformable_name = 'DVF_Unknown'
@@ -280,6 +511,19 @@ class Deformable(object):
         return deformable_name
 
     def compute_aspect(self, slice_plane):
+        """
+        Extracts a pixel aspect scaling ratio tailored for displaying accurate image proportions.
+
+        Parameters
+        ----------
+        slice_plane : str
+            Targeting orientation axis. Must be 'Axial', 'Coronal', or 'Sagittal'.
+
+        Returns
+        -------
+        float
+            Voxel scale dimension multiplier ratio.
+        """
         if slice_plane == 'Axial':
             aspect = np.round(self.spacing[0] / self.spacing[1], 2)
         elif slice_plane == 'Coronal':
@@ -290,10 +534,37 @@ class Deformable(object):
         return aspect
 
     def compute_biomechanical(self):
+        """
+        Placeholder method for biomechanical simulation algorithms or finite element extensions.
+        """
         pass
 
     def compute_bspline(self, modality_gradient=True, sigma=2, control_spacing=None, mesh_size=None, gradient=1e-5,
                         iterations=100, crop=5):
+        """
+        Runs a B-Spline deformable registration workflow using metrics managed via SimpleITK components.
+
+        Parameters
+        ----------
+        modality_gradient : bool, optional
+            Evaluates multi-modality cross-corrections if True. Defaults to True.
+        sigma : float, optional
+            Gaussian blur kernel size applied across structural mask boundaries. Defaults to 2.
+        control_spacing : list, optional
+            Physical distance mapping parameters defining B-Spline grid densities. Defaults to None.
+        mesh_size : list, optional
+            Mesh node dimension parameters shaping transform density. Defaults to None.
+        gradient : float, optional
+            Optimization termination step tolerance. Defaults to 1e-5.
+        iterations : int, optional
+            Optimization limits capping evaluation routines. Defaults to 100.
+        crop : int, optional
+            Boundary truncation thickness processing parameters stripping edges. Defaults to 5.
+
+        Examples
+        --------
+        >>> deform_ctx.compute_bspline(iterations=250, sigma=3)
+        """
         ref_image = Data.image[self.reference_name].create_sitk_image()
         mov_image = Data.image[self.moving_name].create_sitk_image()
 
@@ -343,6 +614,30 @@ class Deformable(object):
 
     def compute_demons(self, method=None, modality_gradient=True, sigma=2, smooth=True, std=1, iterations=50,
                        intensity_threshold=0.001, step=2.0, crop=5):
+        """
+        Executes dense fluid registration variants including standard, fast, or diffeomorphic Demons models.
+
+        Parameters
+        ----------
+        method : str, optional
+            Target alignment flavor flag. Options include 'Demons' or 'Diffeomorphic'. Defaults to None.
+        modality_gradient : bool, optional
+            Integrates cross-modality intensity matching corrections if True. Defaults to True.
+        sigma : float, optional
+            Scale settings smoothing binary structural mask surfaces. Defaults to 2.
+        smooth : bool, optional
+            Smooths displacement entries post-iteration if True. Defaults to True.
+        std : float, optional
+            Standard deviation governing Gaussian field smoothing processes. Defaults to 1.
+        iterations : int, optional
+            Iteration runtime loop execution threshold limit bounds. Defaults to 50.
+        intensity_threshold : float, optional
+            Minimum intensity change required to continue evaluation steps. Defaults to 0.001.
+        step : float, optional
+            Field translation step scale factor. Defaults to 2.0.
+        crop : int, optional
+            Boundary exclusion padding pixel counts. Defaults to 5.
+        """
         ref = Data.image[self.reference_name]
         mov = Data.image[self.moving_name]
 
@@ -397,8 +692,24 @@ class Deformable(object):
     @staticmethod
     def correct_dvf_direction(dvf, spacing, origin, matrix):
         """
-        Rotate a DVF to a new direction, adjusting vectors and origin so that the DVF
+        Rotates a DVF to a new direction, adjusting vectors and origin so that the DVF
         stays aligned in physical space (rotation about the center of the volume).
+
+        Parameters
+        ----------
+        dvf : np.ndarray
+            Original displacement vector field matrix tensor.
+        spacing : list or tuple
+            Dimensional voxel sizing array parameters.
+        origin : list or tuple
+            Starting structural boundary spatial point.
+        matrix : np.ndarray
+            Target directional rotation transformation matrix mapping properties.
+
+        Returns
+        -------
+        tuple
+            Contains updated (dvf_rotated, spacing, origin_new, dimensions) structures.
         """
         D_new = np.identity(3)
         R = D_new @ np.linalg.inv(matrix)
@@ -419,6 +730,19 @@ class Deformable(object):
         return dvf_rotated, spacing, origin_new, dimensions
 
     def create_image(self, ratio=1):
+        """
+        Applies combined rigid parameters and displacement fields to resample the moving image volume.
+
+        Parameters
+        ----------
+        ratio : float, optional
+            Displacement vector field scaling factor. Defaults to 1.
+
+        Returns
+        -------
+        SimpleITK.Image
+            Resampled and transformed image data volume.
+        """
         R = self.rigid_matrix[:3, :3]
         t = self.rigid_matrix[:3, 3]
 
@@ -450,12 +774,39 @@ class Deformable(object):
         return sitk.Resample(resampled_image, dis_tx, sitk.sitkLinear, -3001, resampled_image.GetPixelID())
 
     def export_image(self, path=None):
+        """
+        Saves the transformed moving image to a specified file path.
+
+        Parameters
+        ----------
+        path : str, optional
+            Target file system write location destination path. Defaults to None.
+        """
         if self.moving_name is not None and path is not None:
             image = self.create_image()
 
             sitk.WriteImage(image, path)
 
     def retrieve_array_plane(self, slice_plane, solo=None, position=None, vector=None):
+        """
+        Extracts 2D array matrix representations matching an explicit slicing plane projection request.
+
+        Parameters
+        ----------
+        slice_plane : str
+            Target viewing axis. Must be 'Axial', 'Coronal', or 'Sagittal'.
+        solo : bool, optional
+            Disables coordinate indexing recalculations if true. Defaults to None.
+        position : list, optional
+            Alternative physical space alignment center options. Defaults to None.
+        vector : str, optional
+            Requests DVF flow fields instead of image structural grids if specified ('x', 'y', 'z'). Defaults to None.
+
+        Returns
+        -------
+        np.ndarray
+            Evaluated slice visualization array data.
+        """
         if len(self.display.array) == 0:
             self.display.compute_deformation()
             self.display.compute_slice_location()
@@ -475,12 +826,53 @@ class Deformable(object):
             return None
 
     def retrieve_grid(self, slice_plane='Axial', vector='x'):
+        """
+        Queries displacement values mapping across explicit slices.
+
+        Parameters
+        ----------
+        slice_plane : str, optional
+            Viewer selection slice identifier tracking. Defaults to 'Axial'.
+        vector : str, optional
+            Targeted vector direction key parameter channel ('x', 'y', 'z'). Defaults to 'x'.
+
+        Returns
+        -------
+        np.ndarray
+            Displacement scalar cross-section matrix.
+        """
         return self.display.compute_grid(slice_plane=slice_plane, vector=vector)
 
     def retrieve_offset(self, slice_plane):
+        """
+        Extracts translation pixel tracking indices relative to baseline configurations.
+
+        Parameters
+        ----------
+        slice_plane : str
+            Slice viewing target selection option parameter.
+
+        Returns
+        -------
+        list
+            Spatial indices indicating offset values.
+        """
         return self.display.offset[slice_plane]
 
     def retrieve_slice_location(self, slice_plane):
+        """
+        Queries the active integer index steps selected across viewport tracking variables.
+
+        Parameters
+        ----------
+        slice_plane : str
+            Target axis identifier name.
+
+        Returns
+        -------
+        int
+            Discrete array matrix location track marker step value.
+        """
         if slice_plane == 'Axial':
             return self.display.slice_location[0]
 
@@ -491,6 +883,19 @@ class Deformable(object):
             return self.display.slice_location[2]
 
     def retrieve_slice_position(self, slice_plane=None):
+        """
+        Maps current view tracking indices back into continuous physical world 3D position spaces.
+
+        Parameters
+        ----------
+        slice_plane : str, optional
+            Target viewport selection name profile tracker. Defaults to None.
+
+        Returns
+        -------
+        np.ndarray
+            Continuous 3D world coordinate vector.
+        """
         pixel_to_position_matrix = self.display.compute_matrix_pixel_to_position()
 
         if slice_plane is None:
@@ -509,6 +914,19 @@ class Deformable(object):
         return location.dot(pixel_to_position_matrix.T)[:3]
 
     def retrieve_scroll_max(self, slice_plane):
+        """
+        Queries tracking boundary limits capping viewport indices.
+
+        Parameters
+        ----------
+        slice_plane : str
+            Target viewport plane indicator tracking name.
+
+        Returns
+        -------
+        int
+            Maximum allowed scroll index step.
+        """
         if slice_plane == 'Axial':
             return self.display.scroll_max[0]
 
@@ -519,6 +937,14 @@ class Deformable(object):
             return self.display.scroll_max[2]
 
     def save_deformable(self, path):
+        """
+        Serializes structural transform attributes and displacement tensor files to disk.
+
+        Parameters
+        ----------
+        path : str
+            File system directory path destination target.
+        """
         variable_names = self.__dict__.keys()
         column_names = [name for name in variable_names if name not in ['rois',
                                                                         'display',
@@ -533,6 +959,19 @@ class Deformable(object):
         np.save(os.path.join(path, 'dvf.npy'), self.dvf, allow_pickle=True)
 
     def update_rois(self, roi_name=None, percent=100):
+        """
+        Applies field deformations to morph 3D region of interest surface meshes via coordinate mapping.
+
+        Transforms vertices through continuous spatial configurations using interpolation models
+        to track structural changes across target organs or annotations.
+
+        Parameters
+        ----------
+        roi_name : str, optional
+            Target organ model tracking key label identifier. If None, all instances are updated. Defaults to None.
+        percent : float, optional
+            Magnitude modifier scaling field vector step sizes. Defaults to 100.
+        """
         for name in list(self.rois.keys()):
             if name not in Data.roi_list:
                 del self.rois[name]

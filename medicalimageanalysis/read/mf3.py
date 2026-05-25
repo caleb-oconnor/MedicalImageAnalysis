@@ -48,7 +48,7 @@ import pyvista as pv
 
 from ..structure.image import Image
 from ..utils.creation import CreateImageFromMask
-from ..utils.conversion import ModelToMask
+from ..utils.convert.contour import ModelToMask
 
 from ..data import Data
 

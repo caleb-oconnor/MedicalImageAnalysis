@@ -6,9 +6,12 @@ Author - Caleb O'Connor
 Email - csoconnor@mdanderson.org
 
 Description:
+    Module for defining and manipulating Region of Interest (ROI) structures,
+    including coordinate conversions and mesh generations.
 
 Structure:
-
+    - random_color: Helper function to generate random RGB values.
+    - Roi: Core class managing volumetric region data, contours, and surface meshes.
 """
 
 import random
@@ -26,14 +29,21 @@ def random_color(rgb_255=True):
 
     Parameters
     ----------
-    rgb_255 : bool
+    rgb_255 : bool, default True
         True  -> returns integers in [0, 255]
         False -> returns floats in [0.0, 1.0]
 
     Returns
     -------
     tuple
-        (r, g, b)
+        A tuple of three elements containing (r, g, b) values.
+
+    Examples
+    --------
+    >>> random_color(rgb_255=True)
+    (142, 54, 210)
+    >>> random_color(rgb_255=False)
+    (0.421, 0.812, 0.119)
     """
     if rgb_255:
         return (
@@ -51,7 +61,30 @@ def random_color(rgb_255=True):
 
 
 class Roi(object):
+    """
+    Region of Interest (ROI) manager for internal image contours and 3D meshes.
+    """
     def __init__(self, image, position=None, name=None, color=None, visible=False, filepaths=None, plane=None):
+        """
+        Initialize the Roi object.
+
+        Parameters
+        ----------
+        image : object
+            The foundational image object with spatial attributes (spacing, origin, matrix).
+        position : list of numpy.ndarray, optional
+            A list containing spatial position contours.
+        name : str, optional
+            The display or identification name of the ROI.
+        color : tuple, optional
+            RGB representation of the ROI color. Generates a random color if None.
+        visible : bool, default False
+            Determines whether the ROI is visible within the viewport.
+        filepaths : list of str, optional
+            Associated source or configuration files for the ROI.
+        plane : str, optional
+            The orientation plane ('Axial', 'Coronal', or 'Sagittal'). Defaults to image plane.
+        """
         self.image = image
 
         self.name = name
@@ -84,6 +117,18 @@ class Roi(object):
         self.misc = {}
 
     def add_mesh(self, mesh):
+        """
+        Bind an existing mesh to the ROI and extract its spatial attributes.
+
+        Parameters
+        ----------
+        mesh : object
+            A mesh object containing structural parameters (volume, center, bounds).
+
+        Returns
+        -------
+        None
+        """
         self.mesh = mesh
 
         self.volume = mesh.volume
@@ -91,6 +136,17 @@ class Roi(object):
         self.bounds = mesh.bounds
 
     def clear(self):
+        """
+        Reset the geometric metrics, mesh, and structural bindings of the ROI.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         self.contour_position = None
         self.contour_pixel = None
 
@@ -104,6 +160,19 @@ class Roi(object):
         self.misc = {}
 
     def convert_position_to_pixel(self, position=None):
+        """
+        Convert world coordinates (positions) to image pixel indexes.
+
+        Parameters
+        ----------
+        position : list of numpy.ndarray, optional
+            A list of spatial position profiles to be converted.
+
+        Returns
+        -------
+        list of numpy.ndarray
+            A list of array points translated into the pixel grid coordinate space.
+        """
         position_to_pixel_matrix = self.image.display.compute_matrix_position_to_pixel()
 
         pixel = []
@@ -115,6 +184,19 @@ class Roi(object):
         return pixel
 
     def convert_pixel_to_position(self, pixel=None):
+        """
+        Convert pixel coordinates into physical spatial world coordinates.
+
+        Parameters
+        ----------
+        pixel : list of numpy.ndarray, optional
+            A list of image pixel-index matrices to be mapped.
+
+        Returns
+        -------
+        list of numpy.ndarray
+            The physical coordinates corresponding to the pixel indexes.
+        """
         pixel_to_position_matrix = self.image.display.compute_matrix_pixel_to_position()
 
         position = []
@@ -125,6 +207,22 @@ class Roi(object):
         return position
 
     def create_mesh(self, smoothing_iterations=20, smoothing_relaxation=.5, smoothing_distance=1):
+        """
+        Generate a smoothed 3D surface mesh from the current pixel contours.
+
+        Parameters
+        ----------
+        smoothing_iterations : int, default 20
+            The total number of iterative smoothing steps to apply to the geometry.
+        smoothing_relaxation : float, default 0.5
+            Relaxation factor controlling structural changes during smoothing.
+        smoothing_distance : float/int, default 1
+            Maximum movement/distance constraints for the mesh smoothing step.
+
+        Returns
+        -------
+        None
+        """
         meshing = ContourToDiscreteMesh(contour_pixel=self.contour_pixel,
                                         spacing=self.image.spacing,
                                         origin=self.image.origin,
@@ -139,6 +237,17 @@ class Roi(object):
         self.bounds = self.mesh.bounds
 
     def create_discrete_mesh(self):
+        """
+        Compute an un-smoothed, step-like discrete mesh straight from pixel contour tracks.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
         meshing = ContourToDiscreteMesh(contour_pixel=self.contour_pixel,
                                         spacing=self.image.spacing,
                                         origin=self.image.origin,
@@ -152,10 +261,41 @@ class Roi(object):
         self.bounds = self.mesh.bounds
 
     def create_display_mesh(self, iterations=20, angle=60, passband=0.001):
+        """
+        Refine and smooth the loaded mesh for optimized presentation and rendering.
+
+        Parameters
+        ----------
+        iterations : int, default 20
+            The iteration loop limit assigned to the mesh smoothing system.
+        angle : float/int, default 60
+            Feature angle threshold to protect defined corners/edges.
+        passband : float, default 0.001
+            Low-pass filter frequency option specifying overall detail preservation.
+
+        Returns
+        -------
+        None
+        """
         refine = Refinement(self.mesh)
         self.mesh = refine.smooth(iterations=iterations, angle=angle, passband=passband)
 
     def create_decimate_mesh(self, percent=None, set_mesh=False):
+        """
+        Reduce the poly/triangle count of the active mesh framework.
+
+        Parameters
+        ----------
+        percent : float, optional
+            Decimation target coefficient. Calculated based on total nodes if None.
+        set_mesh : bool, default False
+            If True, overrides `self.mesh` directly with the decimated structure.
+
+        Returns
+        -------
+        object
+            The decimated mesh instance.
+        """
         if percent is None:
             points = np.round(10 * np.sqrt(self.mesh.number_of_points))
             percent = 1 - (points / self.mesh.number_of_points)
@@ -167,6 +307,21 @@ class Roi(object):
         return mesh
 
     def create_cluster_mesh(self, points=None, set_mesh=False):
+        """
+        Cluster vertices across the mesh workspace to modify structural density.
+
+        Parameters
+        ----------
+        points : int, optional
+            Target total cluster sample instances to evaluate.
+        set_mesh : bool, default False
+            If True, overrides `self.mesh` directly with the output cluster mesh.
+
+        Returns
+        -------
+        object
+            The clustered mesh instance.
+        """
         refine = Refinement(self.mesh)
         mesh = refine.cluster(points=points)
         if set_mesh:
@@ -175,6 +330,21 @@ class Roi(object):
         return mesh
 
     def compute_contour(self, slice_location, offset=0):
+        """
+        Extract specific loop coordinates along a given anatomical frame intersection.
+
+        Parameters
+        ----------
+        slice_location : int
+            The dimensional location slice coordinate to evaluate.
+        offset : int/float, default 0
+            Coordinate indexing padding offset adjustments.
+
+        Returns
+        -------
+        list of numpy.ndarray
+            Extracted closed loops representing the slice intersection.
+        """
         contour_list = []
         if self.contour_pixel is not None:
             if self.plane == 'Axial':
@@ -212,6 +382,18 @@ class Roi(object):
         return contour_list
 
     def compute_mask(self):
+        """
+        Generate a binary voxel index mask reflecting the active contour perimeter profile.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        numpy.ndarray
+            A binary segmentation volume masking the underlying dataset space.
+        """
         mask = ContourToDiscreteMesh(contour_pixel=self.contour_pixel,
                                      spacing=self.image.spacing,
                                      origin=self.image.origin,
@@ -222,6 +404,25 @@ class Roi(object):
         return mask.mask
 
     def compute_mesh_slice(self, location=None, slice_plane=None, offset=0, return_pixel=False):
+        """
+        Slice the internal 3D mesh volume along an orthogonal viewing section.
+
+        Parameters
+        ----------
+        location : float/list, optional
+            The exact 3D location positioning context mapping the cross-section plane.
+        slice_plane : str, optional
+            Target orientation plane ('Axial', 'Coronal', or 'Sagittal').
+        offset : int/float, default 0
+            Padding vector adjustments applied to output indexing paths.
+        return_pixel : bool, default False
+            If True, calculates and formats structural data outputs as pixel indexes.
+
+        Returns
+        -------
+        tuple
+            (pixel_corrected, colors) if return_pixel is True, otherwise (roi_slice, colors).
+        """
         matrix = np.linalg.inv(self.image.display.matrix)
         if slice_plane == 'Axial':
             normal = matrix[:3, 2]
@@ -241,18 +442,18 @@ class Roi(object):
 
                 # colors = None
                 # if self.multi_color:
-                #     strip_colors = roi_strip['colors']
+                #      strip_colors = roi_strip['colors']
                 #
-                #     position = []
-                #     colors = []
-                #     for cell in roi_strip.cell:
-                #         position += [np.asarray(roi_strip.points[cell.point_ids])]
-                #         colors += [np.asarray(strip_colors[cell.point_ids])]
+                #      position = []
+                #      colors = []
+                #      for cell in roi_strip.cell:
+                #          position += [np.asarray(roi_strip.points[cell.point_ids])]
+                #          colors += [np.asarray(strip_colors[cell.point_ids])]
                 #
                 # else:
-                #     position = []
-                #     for cell in roi_strip.cell:
-                #         position += [np.asarray(roi_strip.points[cell.point_ids])]
+                #      position = []
+                #      for cell in roi_strip.cell:
+                #          position += [np.asarray(roi_strip.points[cell.point_ids])]
 
                 colors = None
                 position = [np.asarray(c.points) for c in roi_strip.cell]
@@ -280,11 +481,23 @@ class Roi(object):
         else:
             colors = None
             # if self.multi_color:
-            #     colors = roi_slice['colors']
+            #      colors = roi_slice['colors']
 
             return roi_slice, colors
 
     def create_sitk_mask(self):
+        """
+        Build an object instance conforming to a dedicated SimpleITK Image representation format.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        SimpleITK.Image
+            An image structure mapped into SimpleITK space containing metadata properties.
+        """
         mask = self.compute_mask()
 
         matrix_flat = self.image.matrix.flatten(order='F')
@@ -296,6 +509,18 @@ class Roi(object):
         return sitk_mask
 
     def convert_mask(self, mask):
+        """
+        Deconstruct a spatial binary mask array template back into contours and updated tracking meshes.
+
+        Parameters
+        ----------
+        mask : numpy.ndarray
+            The volumetric matrix profile used to update contour paths.
+
+        Returns
+        -------
+        None
+        """
         mask_to_contour = MaskToContour(mask, spacing=self.image.spacing, origin=self.image.origin,
                                         matrix=self.image.matrix, plane=self.plane)
         self.contour_pixel, self.contour_position = mask_to_contour.create_contours()
@@ -310,6 +535,20 @@ class Roi(object):
             self.bounds = None
 
     def update_pixel(self, pixel, plane='Axial'):
+        """
+        Manually assign a new configuration of pixel layers and regenerate corresponding meshes.
+
+        Parameters
+        ----------
+        pixel : list of numpy.ndarray
+            The target dataset coordinates to update the contours with.
+        plane : str, default 'Axial'
+            The new structural evaluation orientation workspace.
+
+        Returns
+        -------
+        None
+        """
         self.plane = plane
         self.contour_pixel = pixel
         self.contour_position = self.convert_pixel_to_position(pixel=pixel)
@@ -318,6 +557,18 @@ class Roi(object):
         self.create_display_mesh()
 
     def update_mesh(self, mesh):
+        """
+        Manually substitute an external tracking mesh structure and update metadata attributes.
+
+        Parameters
+        ----------
+        mesh : object
+            The physical alternative surface mesh properties database.
+
+        Returns
+        -------
+        None
+        """
         self.mesh = mesh
         self.volume = mesh.volume
         self.com = mesh.center

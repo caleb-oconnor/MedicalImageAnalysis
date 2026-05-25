@@ -6,9 +6,12 @@ Author - Caleb O'Connor
 Email - csoconnor@mdanderson.org
 
 Description:
+    Tools for generating DICOM image datasets and converting internal masks/arrays
+    into standard DICOM image structures compatible with internal framework models.
 
 Structure:
-
+    - CreateDicomImage: Class to generate and write physical .dcm slice files from an array.
+    - CreateImageFromMask: Class to instantiate frame-of-reference compliant dataset models.
 """
 
 import os
@@ -25,6 +28,28 @@ from ..structure import Image
 
 
 class CreateDicomImage(object):
+    """
+    Handles the generation and physical serialization of standard DICOM images from voxel data.
+
+    Parameters
+    ----------
+    output_dir : str
+        The target directory path where generated DICOM (.dcm) files will be saved.
+    data : numpy.ndarray
+        A 3D numpy array representing image voxel intensities across slices.
+    study : str, optional
+        Unique identifier for the study UID. Generates automatically if None.
+    series : str, optional
+        Unique identifier for the series UID. Generates automatically if None.
+    frame : str, optional
+        Unique identifier for the frame of reference UID. Generates automatically if None.
+    origin : list of float, optional
+        The patient coordinates (X, Y, Z) of the first transmitted voxel. Defaults to [0, 0, 0].
+    spacing : list of float, optional
+        The physical distance (X, Y) between adjacent pixels. Defaults to [1, 1].
+    thickness : float, optional
+        The nominal thickness of the image slice along the Z-axis. Defaults to 1.
+    """
     def __init__(self, output_dir, data, study=None, series=None, frame=None, origin=None, spacing=None,
                  thickness=None):
         self.output_dir = output_dir
@@ -39,24 +64,99 @@ class CreateDicomImage(object):
         self.orientation = [1, 0, 0, 0, 1, 0]
 
     def set_study(self, study):
+        """
+        Sets the Study Instance UID.
+
+        Parameters
+        ----------
+        study : str
+            The new Study Instance UID.
+        """
         self.study = study
 
     def set_series(self, series):
+        """
+        Sets the Series Instance UID.
+
+        Parameters
+        ----------
+        series : str
+            The new Series Instance UID.
+        """
         self.series = series
 
     def set_frame(self, frame):
+        """
+        Sets the Frame of Reference UID.
+
+        Parameters
+        ----------
+        frame : str
+            The new Frame of Reference UID.
+        """
         self.frame = frame
 
     def set_origin(self, origin):
+        """
+        Sets the physical image origin coordinates.
+
+        Parameters
+        ----------
+        origin : list of float
+            The [X, Y, Z] components of the new origin.
+        """
         self.origin = origin
 
     def set_spacing(self, spacing):
+        """
+        Sets the internal pixel grid resolution spacing.
+
+        Parameters
+        ----------
+        spacing : list of float
+            The [X, Y] spacing components.
+        """
         self.spacing = spacing
 
     def set_thickness(self, thickness):
+        """
+        Sets the thickness configuration for each slice.
+
+        Parameters
+        ----------
+        thickness : float
+            The thickness value.
+        """
         self.thickness = thickness
 
     def run(self, patient_name='Test', patient_id='Test', modality='CT', description='', sex='M'):
+        """
+        Executes the DICOM generation routine, writing each slice as an individual file to disk.
+
+        Parameters
+        ----------
+        patient_name : str, optional
+            The Patient Name attribute value. Defaults to 'Test'.
+        patient_id : str, optional
+            The Patient ID identifier string. Defaults to 'Test'.
+        modality : str, optional
+            The target modality code (e.g., 'CT', 'MR'). Defaults to 'CT'.
+        description : str, optional
+            A descriptive label for the generated series. Defaults to ''.
+        sex : str, optional
+            The Patient Sex demographic value ('M', 'F', 'O'). Defaults to 'M'.
+
+        Returns
+        -------
+        None
+
+        Examples
+        --------
+        >>> import numpy as np
+        >>> voxels = np.zeros((10, 512, 512), dtype=np.int16)
+        >>> generator = CreateDicomImage('/path/to/output', voxels)
+        >>> generator.run(patient_name='Doe^John', modality='MR')
+        """
         if self.study is None:
             self.study = generate_uid()
         if self.series is None:
@@ -130,6 +230,30 @@ class CreateDicomImage(object):
 
 
 class CreateImageFromMask(object):
+    """
+    Constructs an internal image coordinate frame context from segmentation masks.
+
+    Parameters
+    ----------
+    array : numpy.ndarray
+        The input matrix data containing volume or binary masks.
+    origin : list or numpy.ndarray
+        The spatial starting point (X, Y, Z) coordinates of the matrix field.
+    spacing : list or numpy.ndarray
+        Voxel resolution spacing components [X_spacing, Y_spacing, Z_thickness].
+    image_name : str
+        The dictionary identifier key to assign this volume state inside `Data`.
+    dimensions : tuple of int, optional
+        Explicit spatial dimensions. Defaults to the shape layout of `array` if None.
+    orientation : list of float, optional
+        Six floating value components for orientation vectors. Defaults to identity mapping.
+    plane : str, optional
+        Anatomical viewing plane classification description string. Defaults to 'Axial'.
+    description : str, optional
+        Textual details stored in the Series Description metadata field. Defaults to 'Mask to Image'.
+    modality : str, optional
+        Target medical system scan string abbreviation. Defaults to 'CT'.
+    """
     def __init__(self, array, origin, spacing, image_name, dimensions=None, orientation=None, plane='Axial',
                  description='Mask to Image', modality='CT'):
         self.rois = {}
@@ -241,18 +365,52 @@ class CreateImageFromMask(object):
         self.image_set = dicoms
 
     def add_image(self):
+        """
+        Registers the configured mask instance directly to global tracking states.
+
+        Returns
+        -------
+        None
+        """
         Data.image[self.image_name] = Image(self)
         Data.image_list += [self.image_name]
 
     def add_mesh_roi(self, mesh, roi_name):
+        """
+        Appends complex physical 3D mesh elements inside sub-region tracking fields.
+
+        Parameters
+        ----------
+        mesh : object
+            A mesh structure instance exposing metric fields (.volume, .center, .bounds).
+        roi_name : str
+            The lookup dictionary sub-key label name assigned to this ROI.
+
+        Returns
+        -------
+        None
+        """
         Data.image[self.image_name].create_roi(self, name=roi_name, color=[0, 0, 255], visible=False, filepath=None)
         self.rois[roi_name].mesh = mesh
-        
+
         self.rois[roi_name].volume = mesh.volume
         self.rois[roi_name].com = mesh.center
         self.rois[roi_name].bounds = mesh.bounds
 
     def compute_position(self, z):
+        """
+        Calculates the real-world spatial position context of a slice index.
+
+        Parameters
+        ----------
+        z : int or float
+            The slice layer index stepping component along the direction axis.
+
+        Returns
+        -------
+        numpy.ndarray
+            A 3-element vector array denoting coordinates [X, Y, Z].
+        """
         matrix = copy.deepcopy(self.image_matrix)
 
         pixel_to_position_matrix = np.identity(4, dtype=np.float32)
