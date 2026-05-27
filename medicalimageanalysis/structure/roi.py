@@ -551,10 +551,16 @@ class Roi(object):
         """
         self.plane = plane
         self.contour_pixel = pixel
-        self.contour_position = self.convert_pixel_to_position(pixel=pixel)
 
-        self.create_discrete_mesh()
-        self.create_display_mesh()
+        if pixel is not None and len(pixel) > 0:
+            self.contour_position = self.convert_pixel_to_position(pixel=pixel)
+
+            self.create_discrete_mesh()
+            self.create_display_mesh()
+        else:
+            self.contour_pixel = None
+            self.contour_position = None
+            self.mesh = None
 
     def update_mesh(self, mesh):
         """
