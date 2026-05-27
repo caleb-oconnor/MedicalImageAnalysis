@@ -400,12 +400,12 @@ class Image(object):
         None
         """
         for ii, roi_name in enumerate(rtstruct.roi_names):
-            if roi_name not in list(self.rois.keys()):
+            if roi_name not in list(self.rois.keys()) or self.rois[roi_name].contour_position is None:
                 self.rois[roi_name] = Roi(self, position=rtstruct.contours[ii], name=roi_name,
                                           color=rtstruct.roi_colors[ii], visible=False, filepaths=rtstruct.filepaths)
 
         for ii, poi_name in enumerate(rtstruct.poi_names):
-            if poi_name not in list(self.pois.keys()):
+            if poi_name not in list(self.pois.keys()) or self.pois[poi_name].point_position is None:
                 self.pois[poi_name] = Poi(self, position=rtstruct.points[ii], name=poi_name,
                                           color=rtstruct.poi_colors[ii], visible=False, filepaths=rtstruct.filepaths)
 
