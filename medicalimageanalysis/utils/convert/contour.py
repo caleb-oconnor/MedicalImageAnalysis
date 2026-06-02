@@ -86,7 +86,7 @@ class ContourToDiscreteMesh(object):
                 cv2.fillPoly(image, new_contour, 1)
 
                 slice_num = int(np.round(c[0, 0]))
-                hold_mask[slice_num] = np.logical_xor(hold_mask[slice_num], image)
+                hold_mask[slice_num, :, :] = np.logical_xor(hold_mask[slice_num, :, :], image)
 
         elif self.plane == 'Coronal':
             for c in self.contour_pixel:
