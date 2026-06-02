@@ -79,32 +79,35 @@ class ContourToDiscreteMesh(object):
         """
         hold_mask = np.zeros([self.dimensions[0], self.dimensions[1], self.dimensions[2]], dtype=np.uint8)
         if self.plane == 'Axial':
+            image = np.zeros([self.dimensions[1], self.dimensions[2]], dtype=np.uint8)
             for c in self.contour_pixel:
-                contour_stacked = np.vstack((c[:, 1:], c[0, 1:]))
+                contour_stacked = np.vstack((c[:, 0:2], c[0, 0:2]))
                 new_contour = np.array([contour_stacked], dtype=np.int32)
-                image = np.zeros([self.dimensions[1], self.dimensions[2]], dtype=np.uint8)
+                image.fill(0)
                 cv2.fillPoly(image, new_contour, 1)
 
-                slice_num = int(np.round(c[0, 0]))
+                slice_num = int(np.round(c[0, 2]))
                 hold_mask[slice_num, :, :] = np.logical_xor(hold_mask[slice_num, :, :], image)
 
         elif self.plane == 'Coronal':
+            image = np.zeros([self.dimensions[0], self.dimensions[2]], dtype=np.uint8)
             for c in self.contour_pixel:
                 stack_1 = np.vstack((c[:, 0], c[:, 2])).T
                 stack_2 = np.asarray([c[0, 0], c[0, 2]])
                 contour_stacked = np.vstack((stack_1, stack_2))
                 new_contour = np.array([contour_stacked], dtype=np.int32)
-                image = np.zeros([self.dimensions[0], self.dimensions[2]], dtype=np.uint8)
+                image.fill(0)
                 cv2.fillPoly(image, new_contour, 1)
 
                 slice_num = int(np.round(c[0, 1]))
                 hold_mask[:, slice_num, :] = np.logical_xor(hold_mask[:, slice_num, :], image)
 
         else:
+            image = np.zeros([self.dimensions[0], self.dimensions[1]], dtype=np.uint8)
             for c in self.contour_pixel:
                 contour_stacked = np.vstack((c[:, 1:], c[0, 1:]))
                 new_contour = np.array([contour_stacked], dtype=np.int32)
-                image = np.zeros([self.dimensions[0], self.dimensions[1]], dtype=np.uint8)
+                image.fill(0)
                 cv2.fillPoly(image, new_contour, 1)
 
                 slice_num = int(np.round(c[0, 0]))
@@ -212,32 +215,35 @@ class ContourToMask(object):
         """
         hold_mask = np.zeros([self.dimensions[0], self.dimensions[1], self.dimensions[2]], dtype=np.uint8)
         if self.plane == 'Axial':
+            image = np.zeros([self.dimensions[1], self.dimensions[2]], dtype=np.uint8)
             for c in self.contour_pixel:
-                contour_stacked = np.vstack((c[:, 1:], c[0, 1:]))
+                contour_stacked = np.vstack((c[:, 0:2], c[0, 0:2]))
                 new_contour = np.array([contour_stacked], dtype=np.int32)
-                image = np.zeros([self.dimensions[1], self.dimensions[2]], dtype=np.uint8)
+                image.fill(0)
                 cv2.fillPoly(image, new_contour, 1)
 
-                slice_num = int(np.round(c[0, 0]))
+                slice_num = int(np.round(c[0, 2]))
                 hold_mask[slice_num, :, :] = np.logical_xor(hold_mask[slice_num, :, :], image)
 
         elif self.plane == 'Coronal':
+            image = np.zeros([self.dimensions[0], self.dimensions[2]], dtype=np.uint8)
             for c in self.contour_pixel:
                 stack_1 = np.vstack((c[:, 0], c[:, 2])).T
                 stack_2 = np.asarray([c[0, 0], c[0, 2]])
                 contour_stacked = np.vstack((stack_1, stack_2))
                 new_contour = np.array([contour_stacked], dtype=np.int32)
-                image = np.zeros([self.dimensions[0], self.dimensions[2]], dtype=np.uint8)
+                image.fill(0)
                 cv2.fillPoly(image, new_contour, 1)
 
                 slice_num = int(np.round(c[0, 1]))
                 hold_mask[:, slice_num, :] = np.logical_xor(hold_mask[:, slice_num, :], image)
 
         else:
+            image = np.zeros([self.dimensions[0], self.dimensions[1]], dtype=np.uint8)
             for c in self.contour_pixel:
                 contour_stacked = np.vstack((c[:, 1:], c[0, 1:]))
                 new_contour = np.array([contour_stacked], dtype=np.int32)
-                image = np.zeros([self.dimensions[0], self.dimensions[1]], dtype=np.uint8)
+                image.fill(0)
                 cv2.fillPoly(image, new_contour, 1)
 
                 slice_num = int(np.round(c[0, 0]))
