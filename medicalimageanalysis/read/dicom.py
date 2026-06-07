@@ -734,6 +734,8 @@ class Read3D(object):
                 self.orientation[:3] = c2 / (self.spacing[0] * self.dimensions[2])
                 self.orientation[3:] = c1 / (self.spacing[1] * self.dimensions[1])
 
+            self.image_matrix = self._compute_image_matrix()
+
         else:
             self.origin = origin
 
@@ -2101,6 +2103,8 @@ class ReadRTDose(object):
             else:
                 self.orientation[:3] = c2 / (self.spacing[0] * self.dimensions[2])
                 self.orientation[3:] = c1 / (self.spacing[1] * self.dimensions[1])
+
+            self.image_matrix = self._compute_image_matrix()
 
         else:
             self.origin = origin
