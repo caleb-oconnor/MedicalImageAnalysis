@@ -20,7 +20,7 @@ import SimpleITK as sitk
 
 
 from ..utils.mesh.surface import Refinement
-from ..utils.convert.contour import ContourToDiscreteMesh, MaskToContour
+from ..utils.convert.contour import ContourToDiscreteMesh, ContourToMask, MaskToContour
 
 
 def random_color(rgb_255=True):
@@ -329,6 +329,31 @@ class Roi(object):
 
         return mesh
 
+    def compute_bounding_box(self, position=True):
+        """
+        Compute the 3D bounding box coordinates from the contour data.
+
+        Parameters
+        ----------
+        position : bool, default True
+            If True, evaluates physical position coordinates (`self.contour_position`).
+            If False, evaluates pixel-space coordinates (`self.contour_pixel`).
+
+        Returns
+        -------
+        tuple
+            The bounding box boundaries ordered as (xmin, xmax, ymin, ymax, zmin, zmax).
+        """
+        if position:
+            contour_stacked = np.vstack(self.contour_position)
+        else:
+            contour_stacked = np.vstack(self.contour_pixel)
+
+        contour_min = np.min(contour_stacked, axis=0)
+        contour_max = np.max(contour_stacked, axis=0)
+
+        return contour_min[0], contour_max[0], contour_min[1], contour_max[1], contour_min[2], contour_max[2]
+
     def compute_contour(self, slice_location, offset=0):
         """
         Extract specific loop coordinates along a given anatomical frame intersection.
@@ -381,25 +406,30 @@ class Roi(object):
 
         return contour_list
 
-    def compute_mask(self):
+    def compute_mask(self, dimensions=None):
         """
         Generate a binary voxel index mask reflecting the active contour perimeter profile.
 
         Parameters
         ----------
-        None
+        dimensions - list of size in z, y, x order. Allows user to upsample or downsample mask
 
         Returns
         -------
         numpy.ndarray
             A binary segmentation volume masking the underlying dataset space.
         """
-        mask = ContourToDiscreteMesh(contour_pixel=self.contour_pixel,
-                                     spacing=self.image.spacing,
-                                     origin=self.image.origin,
-                                     dimensions=self.image.dimensions,
-                                     matrix=self.image.matrix,
-                                     plane=self.plane)
+
+        if dimensions is None:
+            dimensions = self.image.dimensions
+
+        mask = ContourToMask(contour_pixel=self.contour_pixel,
+                             spacing=self.image.spacing,
+                             origin=self.image.origin,
+                             dimensions=dimensions,
+                             matrix=self.image.matrix,
+                             plane=self.plane)
+        mask.compute_mask()
 
         return mask.mask
 
