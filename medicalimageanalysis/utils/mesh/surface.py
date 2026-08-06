@@ -381,6 +381,58 @@ def only_main_component(mesh):
         return new_mesh.extract_surface()
 
 
+def component_overlap(components_1, components_2, min_distance=0):
+    matches = []
+    for ii, c1 in enumerate(components_1):
+        for jj, c2 in enumerate(components_2):
+
+            ax0, ax1, ay0, ay1, az0, az1 = c1.bounds
+            bx0, bx1, by0, by1, bz0, bz1 = c2.bounds
+            if not (ax0 <= bx1 and ax1 >= bx0 and ay0 <= by1 and ay1 >= by0 and az0 <= bz1 and az1 >= bz0):
+                continue
+
+            surf1 = c1.extract_surface()
+            surf2 = c2.extract_surface()
+
+            result = surf1.intersection(surf2)
+            intersection_mesh = result[0]
+            surface_intersection = (intersection_mesh.n_cells > 0)
+
+            pts1 = pv.PolyData(c1.points)
+            inside2 = surf2.select_enclosed_points(pts1, tolerance=1e-5,check_surface=False)
+            pts_inside_2 = ( inside2["SelectedPoints"] > 0 )
+            frac1_in_2 = pts_inside_2.mean()
+            pts2 = pv.PolyData(c2.points)
+
+            inside1 = surf1.select_enclosed_points( pts2, tolerance=1e-5, check_surface=False)
+            pts_inside_1 = (inside1["SelectedPoints"] > 0)
+            frac2_in_1 = pts_inside_1.mean()
+
+            overlap = (surface_intersection or frac1_in_2 > 0 or frac2_in_1 > 0)
+            if overlap:
+                matches += [{"Components_1": ii, "Components_2": jj, 'distance_mm': 0}]
+
+    matched1 = {m["Components_1"] for m in matches}
+    matched2 = {m["Components_2"] for m in matches}
+
+    unmatched1 = [ii for ii in range(len(components_1)) if ii not in matched1]
+    unmatched2 = [jj for jj in range(len(components_2)) if jj not in matched2]
+
+    for ii in unmatched1:
+        for jj in unmatched2:
+
+            surf1 = components_1[ii].extract_surface()
+            surf2 = components_2[jj].extract_surface()
+
+            # Distance from every point on surf1 to surf2
+            dist = surf1.compute_implicit_distance(surf2)
+            d = np.abs(dist["implicit_distance"]).min()
+
+            if d <= min_distance:  # mm
+                matches += [{"Components_1": ii, "Components_2": jj, 'distance_mm': d}]
+
+
+
 def compute_components(mesh):
     conn = mesh.connectivity(label_regions=True)
     region_ids = np.unique(conn["RegionId"])
