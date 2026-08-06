@@ -379,3 +379,10 @@ def only_main_component(mesh):
         new_mesh = multi_block[int(idx)]
 
         return new_mesh.extract_surface()
+
+
+def compute_components(mesh):
+    conn = mesh.connectivity(label_regions=True)
+    region_ids = np.unique(conn["RegionId"])
+
+    return [conn.threshold((rid, rid), scalars="RegionId") for rid in region_ids]

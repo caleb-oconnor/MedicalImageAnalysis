@@ -18,14 +18,17 @@ Structure:
 import os
 import copy
 
+import vtk
 import numpy as np
 import pandas as pd
 import SimpleITK as sitk
 
+from vtk.util import numpy_support
 from pydicom.uid import generate_uid
 from scipy.ndimage import map_coordinates
 
 from ..data import Data
+from ..utils.mesh.surface import compute_components
 from ..utils.deformable.simpleitk import DeformableITK
 
 
@@ -689,6 +692,13 @@ class Deformable(object):
         self.spacing = dvf_image.GetSpacing()
         self.dvf = sitk.GetArrayFromImage(dvf_image)
 
+    def compute_components(self, roi_name):
+        if self.rois[roi_name] is not None:
+            return compute_components(self.rois[roi_name])
+
+        else:
+            return None
+
     @staticmethod
     def correct_dvf_direction(dvf, spacing, origin, matrix):
         """
@@ -772,6 +782,42 @@ class Deformable(object):
         dis_tx = sitk.DisplacementFieldTransform(sitk.Cast(invert_dvf, sitk.sitkVectorFloat64))
 
         return sitk.Resample(resampled_image, dis_tx, sitk.sitkLinear, -3001, resampled_image.GetPixelID())
+
+    def create_roi_image(self, roi_name, sitk_image=True):
+        mesh = self.rois[roi_name].triangulate()
+
+        image = vtk.vtkImageData()
+        image.SetDimensions(np.flip(Data.image[self.reference_name].dimensions))
+        image.SetSpacing(Data.image[self.reference_name].spacing)
+        image.SetOrigin(Data.image[self.reference_name].origin)
+        image.AllocateScalars(vtk.VTK_UNSIGNED_CHAR, 1)
+
+        pdts = vtk.vtkPolyDataToImageStencil()
+        pdts.SetInputData(mesh)
+        pdts.SetOutputOrigin(image.GetOrigin())
+        pdts.SetOutputSpacing(image.GetSpacing())
+        pdts.SetOutputWholeExtent(image.GetExtent())
+        pdts.Update()
+
+        stencil = vtk.vtkImageStencil()
+        stencil.SetInputData(image)
+        stencil.SetStencilConnection(pdts.GetOutputPort())
+        stencil.ReverseStencilOn()
+        stencil.SetBackgroundValue(1)
+        stencil.Update()
+        out = stencil.GetOutput()
+        array = numpy_support.vtk_to_numpy(out.GetPointData().GetScalars())
+        mask = array.reshape(Data.image[self.reference_name].dimensions)  # z,y,x
+
+        if sitk_image:
+            ref_image = Data.image[self.reference_name].create_sitk_image()
+            mask_image = sitk.GetImageFromArray(mask)
+            mask_image.CopyInformation(ref_image)
+
+            return mask_image
+
+        else:
+            return mask
 
     def export_image(self, path=None):
         """

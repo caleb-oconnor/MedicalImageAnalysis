@@ -19,7 +19,7 @@ import numpy as np
 import SimpleITK as sitk
 
 
-from ..utils.mesh.surface import Refinement
+from ..utils.mesh.surface import Refinement, compute_components
 from ..utils.convert.contour import ContourToDiscreteMesh, ContourToMask, MaskToContour
 
 
@@ -353,6 +353,13 @@ class Roi(object):
         contour_max = np.max(contour_stacked, axis=0)
 
         return contour_min[0], contour_max[0], contour_min[1], contour_max[1], contour_min[2], contour_max[2]
+
+    def compute_components(self):
+        if self.mesh is not None:
+            return compute_components(self.mesh)
+
+        else:
+            return None
 
     def compute_contour(self, slice_location, offset=0):
         """
