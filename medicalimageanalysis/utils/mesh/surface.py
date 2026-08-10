@@ -432,7 +432,6 @@ def component_overlap(components_1, components_2, min_distance=0):
                 matches += [{"Components_1": ii, "Components_2": jj, 'distance_mm': d}]
 
 
-
 def compute_components(mesh):
     conn = mesh.connectivity(label_regions=True)
     region_ids = np.unique(conn["RegionId"])

@@ -910,7 +910,6 @@ class ReadXRay(object):
         Data.image[self.image_name] = image
         Data.image_list.append(self.image_name)
 
-
     def _compute_plane(self):
         """
         Determine anatomical plane from PatientOrientation tag.
