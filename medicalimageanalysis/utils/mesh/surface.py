@@ -431,6 +431,8 @@ def component_overlap(components_1, components_2, min_distance=0):
             if d <= min_distance:  # mm
                 matches += [{"Components_1": ii, "Components_2": jj, 'distance_mm': d}]
 
+    return matches
+
 
 def compute_components(mesh):
     conn = mesh.connectivity(label_regions=True)
