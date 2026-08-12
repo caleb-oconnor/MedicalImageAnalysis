@@ -467,6 +467,7 @@ class Deformable(object):
             self.origin = origin
             self.spacing = spacing
             self.dimensions = dimensions
+        self.inverted_dvf = None
 
         if rigid_matrix is None:
             self.rigid_matrix = np.identity(4)
@@ -832,6 +833,65 @@ class Deformable(object):
             image = self.create_image()
 
             sitk.WriteImage(image, path)
+
+    def compute_inverted_dvf(self, iterations=50, mean_tolerance=1e-3, max_tolerance=1e-1, set_inverted=True):
+        """
+        dvf: numpy array, shape (Z, Y, X, 3), displacement in mm, ordered (dx, dy, dz)
+        Returns inverted DVF as a numpy array of the same shape/ordering.
+        """
+        # SimpleITK vector image expects component order matching physical axes (x,y,z)
+        dvf_sitk = sitk.GetImageFromArray(self.dvf, isVector=True)
+        dvf_sitk.SetSpacing(self.spacing)
+        dvf_sitk.SetOrigin(self.origin)
+
+        inverter = sitk.InvertDisplacementFieldImageFilter()
+        inverter.SetMaximumNumberOfIterations(iterations)
+        inverter.SetMeanErrorToleranceThreshold(mean_tolerance)
+        inverter.SetMaxErrorToleranceThreshold(max_tolerance)
+        inverted_sitk = inverter.Execute(dvf_sitk)
+
+        if set_inverted:
+            self.inverted_dvf = sitk.GetArrayFromImage(inverted_sitk)
+
+        return sitk.GetArrayFromImage(inverted_sitk)
+
+    def map_mesh(self, roi_name, percent=100, set_moving=True, return_mesh=False):
+        if self.rois[roi_name] is None:
+            self.update_rois(roi_name)
+
+        if self.rois[roi_name] is None or self.dvf is None:
+            return None
+
+        if self.inverted_dvf is not None:
+            self.compute_inverted_dvf()
+
+        deformed_points = np.asarray(self.rois[roi_name].mesh.points)
+
+        voxel_coords = (deformed_points - self.origin) / self.spacing
+        disp = np.empty_like(deformed_points)
+        for i in range(3):
+            disp[:, i] = map_coordinates(
+                (percent * self.inverted_dvf[..., i]) / 100,
+                [voxel_coords[:, 2], voxel_coords[:, 1], voxel_coords[:, 0]],
+                order=1,
+                mode='nearest'
+            )
+
+        rigid_points = deformed_points - disp
+
+        self.rigid_rois[roi_name] = copy.deepcopy(self.rois[roi_name])
+        self.rigid_rois[roi_name].points = rigid_points
+
+        # undo rigid: forward transform undoes the inv() applied originally
+        mapped_mesh = copy.deepcopy(self.rigid_rois[roi_name])
+        mapped_mesh.transform(self.rigid_matrix, inplace=True)
+        if set_moving:
+            Data.image[self.moving_name].rois[roi_name].update_mesh(mapped_mesh)
+
+        if return_mesh:
+            return mapped_mesh
+        else:
+            return None
 
     def retrieve_array_plane(self, slice_plane, solo=None, position=None, vector=None):
         """
