@@ -700,6 +700,27 @@ class Deformable(object):
         else:
             return None
 
+    def compute_inverted_dvf(self, iterations=50, mean_tolerance=1e-3, max_tolerance=1e-1, set_inverted=True):
+        """
+        dvf: numpy array, shape (Z, Y, X, 3), displacement in mm, ordered (dx, dy, dz)
+        Returns inverted DVF as a numpy array of the same shape/ordering.
+        """
+        # SimpleITK vector image expects component order matching physical axes (x,y,z)
+        dvf_sitk = sitk.GetImageFromArray(self.dvf, isVector=True)
+        dvf_sitk.SetSpacing(self.spacing)
+        dvf_sitk.SetOrigin(self.origin)
+
+        inverter = sitk.InvertDisplacementFieldImageFilter()
+        inverter.SetMaximumNumberOfIterations(iterations)
+        inverter.SetMeanErrorToleranceThreshold(mean_tolerance)
+        inverter.SetMaxErrorToleranceThreshold(max_tolerance)
+        inverted_sitk = inverter.Execute(dvf_sitk)
+
+        if set_inverted:
+            self.inverted_dvf = sitk.GetArrayFromImage(inverted_sitk)
+
+        return sitk.GetArrayFromImage(inverted_sitk)
+
     @staticmethod
     def correct_dvf_direction(dvf, spacing, origin, matrix):
         """
@@ -834,27 +855,6 @@ class Deformable(object):
 
             sitk.WriteImage(image, path)
 
-    def compute_inverted_dvf(self, iterations=50, mean_tolerance=1e-3, max_tolerance=1e-1, set_inverted=True):
-        """
-        dvf: numpy array, shape (Z, Y, X, 3), displacement in mm, ordered (dx, dy, dz)
-        Returns inverted DVF as a numpy array of the same shape/ordering.
-        """
-        # SimpleITK vector image expects component order matching physical axes (x,y,z)
-        dvf_sitk = sitk.GetImageFromArray(self.dvf, isVector=True)
-        dvf_sitk.SetSpacing(self.spacing)
-        dvf_sitk.SetOrigin(self.origin)
-
-        inverter = sitk.InvertDisplacementFieldImageFilter()
-        inverter.SetMaximumNumberOfIterations(iterations)
-        inverter.SetMeanErrorToleranceThreshold(mean_tolerance)
-        inverter.SetMaxErrorToleranceThreshold(max_tolerance)
-        inverted_sitk = inverter.Execute(dvf_sitk)
-
-        if set_inverted:
-            self.inverted_dvf = sitk.GetArrayFromImage(inverted_sitk)
-
-        return sitk.GetArrayFromImage(inverted_sitk)
-
     def map_mesh(self, roi_name, percent=100, set_moving=True, return_mesh=False):
         if self.rois[roi_name] is None:
             self.update_rois(roi_name)
@@ -862,10 +862,10 @@ class Deformable(object):
         if self.rois[roi_name] is None or self.dvf is None:
             return None
 
-        if self.inverted_dvf is not None:
+        if self.inverted_dvf is None:
             self.compute_inverted_dvf()
 
-        deformed_points = np.asarray(self.rois[roi_name].mesh.points)
+        deformed_points = np.asarray(self.rois[roi_name].points)
 
         voxel_coords = (deformed_points - self.origin) / self.spacing
         disp = np.empty_like(deformed_points)
