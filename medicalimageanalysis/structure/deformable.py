@@ -877,7 +877,7 @@ class Deformable(object):
                 mode='nearest'
             )
 
-        rigid_points = deformed_points - disp
+        rigid_points = deformed_points + disp
 
         self.rigid_rois[roi_name] = copy.deepcopy(self.rois[roi_name])
         self.rigid_rois[roi_name].points = rigid_points
