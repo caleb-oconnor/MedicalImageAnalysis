@@ -222,8 +222,8 @@ class ThreeMfReader(object):
 
         new_image = CreateImageFromMask(
             mask,
-            model_to_mask.origin,
-            model_to_mask.spacing,
+            np.asarray(model_to_mask.origin),
+            np.asarray(model_to_mask.spacing),
             image_name
         )
 
