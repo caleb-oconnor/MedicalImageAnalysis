@@ -61,27 +61,23 @@ class MeshToContour:
         matrix : np.ndarray (4, 4)
             The current active Rigid registration matrix.
         """
-        # 1. Transform plane equation into mesh's local reference frame
         inv_mat = np.linalg.inv(matrix)
 
         normal_h = np.append(normal, 0.0)
         origin_h = np.append(origin, 1.0)
 
-        local_normal = (inv_mat.T @ normal_h)[:3]
+        local_normal = (matrix.T @ normal_h)[:3]
         local_origin = (inv_mat @ origin_h)[:3]
 
-        # 2. Update persistent plane parameters
         self.plane.SetNormal(*local_normal)
         self.plane.SetOrigin(*local_origin)
 
-        # 3. Fast execution using cached sphere tree
         self.cutter.Update()
 
         output = self.cutter.GetOutput()
         if output is None or output.GetNumberOfCells() == 0:
-            return pv.PolyData()  # Return empty PyVista mesh
+            return pv.PolyData()
 
-        # Wrap the direct vtkPolyData slice
         contour = pv.wrap(output)
         contour.transform(matrix, inplace=True)
 
