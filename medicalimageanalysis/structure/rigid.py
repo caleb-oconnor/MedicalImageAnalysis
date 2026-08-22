@@ -19,6 +19,8 @@ import copy
 
 import numpy as np
 import pandas as pd
+import pyvista as pv
+
 
 import vtk
 from vtkmodules.util import numpy_support
@@ -27,6 +29,7 @@ from pydicom.uid import generate_uid
 from scipy.spatial.transform import Rotation
 
 from ..utils.rigid.icp import ICP
+from ..utils.convert.contour import MeshToContour
 from ..data import Data
 
 
@@ -47,6 +50,7 @@ class Display(object):
         self.spacing = None
         self.array = None
         self.matrix = np.identity(4)
+        self.cutter = None
 
         self.slice_location = [0, 0, 0]
         self.scroll_max = [0, 0, 0]
@@ -107,53 +111,19 @@ class Display(object):
         self.offset['Sagittal'][1] = (self.origin[2] - pos[2]) / self.spacing[2]
 
     def compute_matrix_pixel_to_position(self):
-        """
-        Generates a 4x4 homogeneous transform mapping voxel coordinates to 3D world space.
-
-        Parameters
-        ----------
-        None
-
-        Returns
-        -------
-        numpy.ndarray
-            A 4x4 coordinate projection matrix in float32 format.
-        """
-        if self.rigid.inverse:
-            matrix = copy.deepcopy(Data.image[self.rigid.reference_name].matrix)
-        else:
-            matrix = copy.deepcopy(Data.image[self.rigid.moving_name].matrix)
-
         pixel_to_position_matrix = np.identity(4, dtype=np.float32)
-        pixel_to_position_matrix[:3, 0] = matrix[0, :] * self.spacing[0]
-        pixel_to_position_matrix[:3, 1] = matrix[1, :] * self.spacing[1]
-        pixel_to_position_matrix[:3, 2] = matrix[2, :] * self.spacing[2]
+        pixel_to_position_matrix[0, 0] = self.spacing[0]
+        pixel_to_position_matrix[1, 1] = self.spacing[1]
+        pixel_to_position_matrix[2, 2] = self.spacing[2]
         pixel_to_position_matrix[:3, 3] = self.origin
 
         return pixel_to_position_matrix
 
     def compute_matrix_position_to_pixel(self):
-        """
-        Generates a 4x4 homogeneous transform mapping 3D world space down to voxel indices.
-
-        Parameters
-        ----------
-        None
-
-        Returns
-        -------
-        numpy.ndarray
-            A 4x4 inverse coordinate projection matrix in float32 format.
-        """
-        if self.rigid.inverse:
-            matrix = copy.deepcopy(Data.image[self.rigid.reference_name].matrix)
-        else:
-            matrix = copy.deepcopy(Data.image[self.rigid.moving_name].matrix)
-
         hold_matrix = np.identity(3, dtype=np.float32)
-        hold_matrix[0, :] = matrix[0, :] / self.spacing[0]
-        hold_matrix[1, :] = matrix[1, :] / self.spacing[1]
-        hold_matrix[2, :] = matrix[2, :] / self.spacing[2]
+        hold_matrix[0, 0] = 1.0 / self.spacing[0]
+        hold_matrix[1, 1] = 1.0 / self.spacing[1]
+        hold_matrix[2, 2] = 1.0 / self.spacing[2]
 
         position_to_pixel_matrix = np.identity(4, dtype=np.float32)
         position_to_pixel_matrix[:3, :3] = hold_matrix
@@ -164,25 +134,11 @@ class Display(object):
     def compute_mesh_slice(self, roi_name=None, location=None, slice_plane=None, return_pixel=False):
         """
         Slices a 3D ROI surface mesh with a plane equation to yield 2D contours.
-
-        Parameters
-        ----------
-        roi_name : str, optional
-            The lookup key identifier for the region of interest.
-        location : array_like, optional
-            A 3D spatial vector tracking the intersection point of the plane.
-        slice_plane : str, optional
-            The slicing view orientation. Options: 'Axial', 'Coronal', 'Sagittal'.
-        return_pixel : bool, default False
-            If True, transforms output coordinates into 2D display pixel indices.
-
-        Returns
-        -------
-        list or pyvista.PolyData
-            List of 2D coordinates if return_pixel is True, otherwise a clipped VTK mesh object.
+        This is the rigid-aware path -- uses self.rigid.matrix/combo_matrix.
         """
-        if self.rigid.rois[roi_name] is None:
-            self.rigid.update_rois(roi_name=roi_name)
+        roi = Data.image[self.rigid.moving_name].rois[roi_name]
+        if roi.cutter is None:
+            roi.cutter = MeshToContour(roi.mesh)
 
         if slice_plane == 'Axial':
             normal = self.matrix[:3, 2]
@@ -191,34 +147,33 @@ class Display(object):
         else:
             normal = self.matrix[:3, 0]
 
-        roi_slice = self.rigid.rois[roi_name].slice(normal=normal, origin=location)
+        combined = self.rigid.matrix @ self.rigid.combo_matrix
+        if self.rigid.inverse:
+            active_matrix = combined
+        else:
+            active_matrix = np.linalg.inv(combined)
+
+        roi_slice = roi.cutter.slice_transformed(normal=normal, origin=location, matrix=active_matrix)
 
         if return_pixel:
             if roi_slice.number_of_points > 0:
                 roi_strip = roi_slice.strip(max_length=10000000)
-
                 position = [np.asarray(c.points) for c in roi_strip.cell]
                 pixels = self.convert_position_to_pixel(position=position)
                 pixel_corrected = []
                 for pixel in pixels:
-
-                    if slice_plane in 'Axial':
+                    if slice_plane == 'Axial':
                         pixel_reshape = pixel[:, :2]
                         pixel_corrected += [np.asarray([pixel_reshape[:, 0], pixel_reshape[:, 1]]).T]
-
                     elif slice_plane == 'Coronal':
                         pixel_reshape = np.column_stack((pixel[:, 0], pixel[:, 2]))
                         pixel_corrected += [pixel_reshape]
-
                     else:
                         pixel_reshape = pixel[:, 1:]
                         pixel_corrected += [pixel_reshape]
-
                 return pixel_corrected
-
             else:
                 return []
-
         else:
             return roi_slice
 
@@ -828,27 +783,31 @@ class Rigid(object):
 
         return self.display.compute_array_slice(slice_plane=slice_plane)
 
-    def retrieve_center(self):
+    def retrieve_center(self, slice_plane=None, location=None):
         """
-        Calculates 3D spatial coordinate centers across composite structural transformations.
-
-        Parameters
-        ----------
-        None
-
-        Returns
-        -------
-        numpy.ndarray
-            A 3D vector coordinates array tracking the calculated geometric transform origin.
+        Pivot for manual rotation: the center of the FIXED image (reference,
+        or moving if self.inverse), projected onto the plane of the slice
+        currently being rotated on. The fixed image never moves, so its
+        center is used as-is -- no registration matrix applied to it.
         """
-        if self.inverse:
-            image_name = self.moving_name
+        fixed_name = self.moving_name if self.inverse else self.reference_name
+        fixed_center = np.asarray(Data.image[fixed_name].compute_center(), dtype=float)
+
+        if slice_plane is None or location is None:
+            return fixed_center
+
+        if slice_plane == 'Axial':
+            normal = self.display.matrix[:3, 2]
+        elif slice_plane == 'Coronal':
+            normal = self.display.matrix[:3, 1]
         else:
-            image_name = self.reference_name
+            normal = self.display.matrix[:3, 0]
 
-        original_center = Data.image[image_name].compute_center()
-        center_h = np.array([original_center[0], original_center[1], original_center[2], 1.0])
-        center = (self.matrix @ self.combo_matrix @ center_h)[:3]
+        normal_hat = normal / np.linalg.norm(normal)
+        location = np.asarray(location, dtype=float)
+
+        offset = np.dot(fixed_center - location, normal_hat)
+        center = fixed_center - offset * normal_hat
 
         return center
 
@@ -893,18 +852,9 @@ class Rigid(object):
 
     def retrieve_slice_position(self, slice_plane=None):
         """
-        Converts pixel layout values to 3D world space coordinates.
-
-        Parameters
-        ----------
-        slice_plane : str, optional
-            The viewer orientation tracker identifier. If None, computes along all 3 tracking axes.
-
-        Returns
-        -------
-        numpy.ndarray
-            A 3D spatial position tracking vector.
+        Converts pixel layout values to 3D world space coordinates. Unchanged.
         """
+        self.display.compute_slice_location()  # always fresh — don't rely on solo/image_number timing elsewhere
         pixel_to_position_matrix = self.display.compute_matrix_pixel_to_position()
 
         if slice_plane is None:
@@ -916,7 +866,6 @@ class Rigid(object):
                 location = np.asarray([0, 0, self.display.slice_location[0], 1])
             elif slice_plane == 'Coronal':
                 location = np.asarray([0, self.display.slice_location[1], 0, 1])
-                print(location)
             else:
                 location = np.asarray([self.display.slice_location[2], 0, 0, 1])
 
@@ -998,27 +947,12 @@ class Rigid(object):
 
         df.to_pickle(os.path.join(path, 'info.p'))
 
-    def update_rotation(self, center=None, r_x=0, r_y=0, r_z=0):
+    def update_rotation(self, center=None, r_x=0, r_y=0, r_z=0, slice_plane=None, location=None):
         """
-        Applies incremental Euler adjustments around a focal origin space.
-
-        Parameters
-        ----------
-        center : array_like, optional
-            A 3D spatial rotation center point coordinates vector. Defaults to auto-calculated image centers.
-        r_x : float, default 0
-            The pitch rotation component tracking changes in degrees.
-        r_y : float, default 0
-            The roll rotation component tracking changes in degrees.
-        r_z : float, default 0
-            The yaw rotation component tracking changes in degrees.
-
-        Returns
-        -------
-        None
+        Applies incremental Euler adjustments around a per-slice fixed-image pivot.
         """
         if center is None:
-            center = self.retrieve_center()
+            center = self.retrieve_center(slice_plane=slice_plane, location=location)
 
         R_mat = Rotation.from_euler('xyz', [r_x, r_y, r_z], degrees=True).as_matrix()
         R = np.identity(4)
@@ -1026,61 +960,38 @@ class Rigid(object):
 
         T_neg = np.identity(4)
         T_neg[:3, 3] = -np.array(center)
-
         T_pos = np.identity(4)
         T_pos[:3, 3] = np.array(center)
         transform = T_pos @ R @ T_neg
 
-        self.matrix = transform @ self.matrix
+        if self.inverse:
+            self.matrix = transform @ self.matrix
+        else:
+            self.matrix = self.matrix @ np.linalg.inv(transform)
 
         self.display.compute_reslice()
         self.display.compute_scroll_max()
         self.update_rois()
 
     def update_translation(self, t_x=0, t_y=0, t_z=0):
-        """
-        Updates global transformation values with new structural translations.
-
-        Parameters
-        ----------
-        t_x : float, default 0
-            The linear displacement offset length traversing across X axes.
-        t_y : float, default 0
-            The linear displacement offset length traversing across Y axes.
-        t_z : float, default 0
-            The linear displacement offset length traversing across Z axes.
-
-        Returns
-        -------
-        None
-        """
         T = np.identity(4)
         T[0, 3] = t_x
         T[1, 3] = t_y
         T[2, 3] = t_z
 
-        self.matrix = self.matrix @ T
+        if self.inverse:
+            self.matrix = T @ self.matrix
+        else:
+            self.matrix = self.matrix @ np.linalg.inv(T)
 
-        self.display.origin[0] -= t_x
-        self.display.origin[1] -= t_y
-        self.display.origin[2] -= t_z
-
-        self.display.compute_offset()
+        self.display.compute_reslice()  # CHANGED — real recompute, matches update_rotation
         self.display.compute_scroll_max()
         self.update_rois()
 
     def update_rois(self, roi_name=None):
         """
         Re-evaluates surface mesh conversions across updated registration transformation settings.
-
-        Parameters
-        ----------
-        roi_name : str, optional
-            Target structural tracking label identifier to process. If None, refreshes all structural mappings.
-
-        Returns
-        -------
-        None
+        (This one was never broken -- included for completeness, unchanged.)
         """
         for name in list(self.rois.keys()):
             if name not in Data.roi_list:
