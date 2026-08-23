@@ -785,16 +785,21 @@ class Rigid(object):
 
     def retrieve_center(self, slice_plane=None, location=None):
         """
-        Pivot for manual rotation: the center of the FIXED image (reference,
-        or moving if self.inverse), projected onto the plane of the slice
-        currently being rotated on. The fixed image never moves, so its
-        center is used as-is -- no registration matrix applied to it.
+        Pivot for manual rotation: the rigid (moving/target) image's own
+        center, transformed by the current registration matrix, then
+        projected onto the plane of the slice currently being rotated on.
         """
-        fixed_name = self.moving_name if self.inverse else self.reference_name
-        fixed_center = np.asarray(Data.image[fixed_name].compute_center(), dtype=float)
+        target_center = np.asarray(Data.image[self.moving_name].compute_center(), dtype=float)
+        center_h = np.array([target_center[0], target_center[1], target_center[2], 1.0])
+
+        combined = self.matrix @ self.combo_matrix
+        if self.inverse:
+            target_center_displayed = (combined @ center_h)[:3]
+        else:
+            target_center_displayed = (np.linalg.inv(combined) @ center_h)[:3]
 
         if slice_plane is None or location is None:
-            return fixed_center
+            return target_center_displayed
 
         if slice_plane == 'Axial':
             normal = self.display.matrix[:3, 2]
@@ -806,8 +811,8 @@ class Rigid(object):
         normal_hat = normal / np.linalg.norm(normal)
         location = np.asarray(location, dtype=float)
 
-        offset = np.dot(fixed_center - location, normal_hat)
-        center = fixed_center - offset * normal_hat
+        offset = np.dot(target_center_displayed - location, normal_hat)
+        center = target_center_displayed - offset * normal_hat
 
         return center
 
