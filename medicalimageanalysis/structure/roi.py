@@ -15,12 +15,13 @@ Structure:
 """
 
 import random
+
 import numpy as np
 import SimpleITK as sitk
 
 
 from ..utils.mesh.surface import Refinement, compute_components
-from ..utils.convert.contour import ContourToDiscreteMesh, ContourToMask, MaskToContour
+from ..utils.convert.contour import ContourToDiscreteMesh, ContourToMask, MaskToContour, MeshToContour
 
 
 def random_color(rgb_255=True):
@@ -57,7 +58,6 @@ def random_color(rgb_255=True):
             random.random(),
             random.random()
         )
-
 
 
 class Roi(object):
@@ -108,6 +108,7 @@ class Roi(object):
             self.color = random_color()
 
         self.mesh = None
+        self.cutter = None
         self.volume = None
         self.com = None
         self.bounds = None
@@ -151,6 +152,7 @@ class Roi(object):
         self.contour_pixel = None
 
         self.mesh = None
+        self.cutter = None
         self.volume = None
         self.com = None
         self.bounds = None
@@ -460,6 +462,12 @@ class Roi(object):
         tuple
             (pixel_corrected, colors) if return_pixel is True, otherwise (roi_slice, colors).
         """
+
+        if self.mesh is None:
+            return ([], []) if return_pixel else (None, None)
+        elif self.cutter is None:
+            self.cutter = MeshToContour(self.mesh)
+
         matrix = np.linalg.inv(self.image.display.matrix)
         if slice_plane == 'Axial':
             normal = matrix[:3, 2]
@@ -468,58 +476,32 @@ class Roi(object):
         else:
             normal = matrix[:3, 0]
 
-        if self.mesh is not None:
-            roi_slice = self.mesh.slice(normal=normal, origin=location)
-        else:
-            return [], []
+        # Execute fast inverse-plane slicing using cached cutter
+        rotation_matrix = np.identity(4)  # the rotation matrix is really for slicing in rigid
+        roi_slice = self.cutter.slice_transformed(normal=normal, origin=location, matrix=rotation_matrix)
 
+        colors = None
         if return_pixel:
             if roi_slice.number_of_points > 0:
                 roi_strip = roi_slice.strip(max_length=10000000)
-
-                # colors = None
-                # if self.multi_color:
-                #      strip_colors = roi_strip['colors']
-                #
-                #      position = []
-                #      colors = []
-                #      for cell in roi_strip.cell:
-                #          position += [np.asarray(roi_strip.points[cell.point_ids])]
-                #          colors += [np.asarray(strip_colors[cell.point_ids])]
-                #
-                # else:
-                #      position = []
-                #      for cell in roi_strip.cell:
-                #          position += [np.asarray(roi_strip.points[cell.point_ids])]
-
-                colors = None
                 position = [np.asarray(c.points) for c in roi_strip.cell]
                 pixels = self.convert_position_to_pixel(position=position)
                 pixel_corrected = []
                 for pixel in pixels:
-
                     if slice_plane == 'Axial':
                         pixel_reshape = pixel[:, :2] + offset
                         pixel_corrected += [np.asarray([pixel_reshape[:, 0], pixel_reshape[:, 1]]).T]
-
                     elif slice_plane == 'Coronal':
                         pixel_reshape = np.column_stack((pixel[:, 0] + offset, pixel[:, 2] + offset))
                         pixel_corrected += [pixel_reshape]
-
                     else:
                         pixel_reshape = pixel[:, 1:] + offset
                         pixel_corrected += [pixel_reshape]
 
                 return pixel_corrected, colors
-
             else:
-                return [], None
-
+                return [], colors
         else:
-            colors = None
-            # if self.multi_color:
-            #      colors = roi_slice['colors']
-
             return roi_slice, colors
 
     def create_sitk_mask(self):
@@ -616,6 +598,7 @@ class Roi(object):
         self.volume = mesh.volume
         self.com = mesh.center
         self.bounds = mesh.bounds
+
 
         self.contour_pixel = None
         self.contour_position = None
