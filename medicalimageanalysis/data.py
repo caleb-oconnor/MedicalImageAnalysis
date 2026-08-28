@@ -123,24 +123,33 @@ class Data(object):
             3. Injects missing ROI definitions into images that lack them,
                preserving visual consistency across the session.
         """
-        image_rois = [list(cls.image[image_name].rois.keys()) for image_name in list(cls.image.keys())]
-        roi_names = list({x for r in image_rois for x in r})
+        roi_names = list(Data.roi_list)
+
+        for image_name in cls.image:
+            for roi_name in cls.image[image_name].rois:
+                if roi_name not in roi_names:
+                    roi_names.append(roi_name)
+
         Data.roi_list = roi_names
 
-        color = [[128, 128, 128]] * len(roi_names)
-        visible = [False] * len(roi_names)
-        for ii, roi_name in enumerate(roi_names):
-            for image_name in list(cls.image.keys()):
-                rois_on_image = list(cls.image[image_name].rois.keys())
-                if roi_name in rois_on_image:
-                    if cls.image[image_name].rois[roi_name].color is not None:
-                        color[ii] = cls.image[image_name].rois[roi_name].color
-                        visible[ii] = cls.image[image_name].rois[roi_name].visible
+        # Determine authoritative color/visibility for each ROI
+        color = [[128, 128, 128] for _ in roi_names]
+        visible = [False for _ in roi_names]
 
         for ii, roi_name in enumerate(roi_names):
-            for image_name in list(cls.image.keys()):
-                rois_on_image = list(cls.image[image_name].rois.keys())
-                if roi_name not in rois_on_image:
+            for image_name in cls.image:
+                if roi_name in cls.image[image_name].rois:
+                    roi = cls.image[image_name].rois[roi_name]
+
+                    if roi.color is not None:
+                        color[ii] = roi.color
+                        visible[ii] = roi.visible
+                        break
+
+        # Add missing ROIs to each image
+        for ii, roi_name in enumerate(roi_names):
+            for image_name in cls.image:
+                if roi_name not in cls.image[image_name].rois:
                     cls.image[image_name].add_roi(roi_name=roi_name, color=color[ii], visible=visible[ii])
 
     @classmethod
