@@ -66,6 +66,244 @@ from ..structure.rigid import Rigid
 from ..data import Data
 
 
+def get_modality(series_sop_class):
+    # --- Computed/Digital Radiography ---
+    cr_sop_class = ["1.2.840.10008.5.1.4.1.1.1"]
+
+    dx_sop_class = ["1.2.840.10008.5.1.4.1.1.1.1", "1.2.840.10008.5.1.4.1.1.1.1.1"]
+
+    mammo_sop_class = ["1.2.840.10008.5.1.4.1.1.1.2", "1.2.840.10008.5.1.4.1.1.1.2.1"]
+
+    intraoral_sop_class = ["1.2.840.10008.5.1.4.1.1.1.3", "1.2.840.10008.5.1.4.1.1.1.3.1"]
+
+    # --- CT ---
+    ct_sop_class = ["1.2.840.10008.5.1.4.1.1.2", "1.2.840.10008.5.1.4.1.1.2.3"]
+    ct_sop_class_enhanced = ["1.2.840.10008.5.1.4.1.1.2.1", "1.2.840.10008.5.1.4.1.1.2.2",
+                             "1.2.840.10008.5.1.4.1.1.2.4", "1.2.840.10008.5.1.4.1.1.2.5"]
+
+    # --- Ultrasound ---
+    us_sop_class = ["1.2.840.10008.5.1.4.1.1.6.1", "1.2.840.10008.5.1.4.1.1.3.1"]
+    us_sop_class_enhanced = ["1.2.840.10008.5.1.4.1.1.6.2", "1.2.840.10008.5.1.4.1.1.6.3"]
+
+    # --- MR ---
+    mr_sop_class = ["1.2.840.10008.5.1.4.1.1.4", "1.2.840.10008.5.1.4.1.1.4.2"]
+    mr_sop_class_enhanced = ["1.2.840.10008.5.1.4.1.1.4.1", "1.2.840.10008.5.1.4.1.1.4.3",
+                             "1.2.840.10008.5.1.4.1.1.4.4"]
+
+    # --- Secondary Capture ---
+    sc_sop_class = ["1.2.840.10008.5.1.4.1.1.7", "1.2.840.10008.5.1.4.1.1.7.1",
+                    "1.2.840.10008.5.1.4.1.1.7.2", "1.2.840.10008.5.1.4.1.1.7.3",
+                    "1.2.840.10008.5.1.4.1.1.7.4"]
+
+    # --- Waveforms ---
+    waveform_sop_class = ["1.2.840.10008.5.1.4.1.1.9.1.1", "1.2.840.10008.5.1.4.1.1.9.1.2",
+                          "1.2.840.10008.5.1.4.1.1.9.1.3", "1.2.840.10008.5.1.4.1.1.9.1.4",
+                          "1.2.840.10008.5.1.4.1.1.9.2.1", "1.2.840.10008.5.1.4.1.1.9.3.1",
+                          "1.2.840.10008.5.1.4.1.1.9.4.1", "1.2.840.10008.5.1.4.1.1.9.4.2",
+                          "1.2.840.10008.5.1.4.1.1.9.5.1", "1.2.840.10008.5.1.4.1.1.9.6.1",
+                          "1.2.840.10008.5.1.4.1.1.9.6.2", "1.2.840.10008.5.1.4.1.1.9.7.1",
+                          "1.2.840.10008.5.1.4.1.1.9.7.2", "1.2.840.10008.5.1.4.1.1.9.7.3",
+                          "1.2.840.10008.5.1.4.1.1.9.7.4", "1.2.840.10008.5.1.4.1.1.9.8.1"]
+
+    # --- Presentation States ---
+    presentation_state_sop_class = ["1.2.840.10008.5.1.4.1.1.9.100.1", "1.2.840.10008.5.1.4.1.1.9.100.2",
+                                    "1.2.840.10008.5.1.4.1.1.11.1", "1.2.840.10008.5.1.4.1.1.11.2",
+                                    "1.2.840.10008.5.1.4.1.1.11.3", "1.2.840.10008.5.1.4.1.1.11.4",
+                                    "1.2.840.10008.5.1.4.1.1.11.5", "1.2.840.10008.5.1.4.1.1.11.6",
+                                    "1.2.840.10008.5.1.4.1.1.11.7", "1.2.840.10008.5.1.4.1.1.11.8",
+                                    "1.2.840.10008.5.1.4.1.1.11.9", "1.2.840.10008.5.1.4.1.1.11.10",
+                                    "1.2.840.10008.5.1.4.1.1.11.11", "1.2.840.10008.5.1.4.1.1.11.12"]
+
+    # --- Angiography / Fluoro ---
+    xa_sop_class = ["1.2.840.10008.5.1.4.1.1.12.1"]
+    xa_sop_class_enhanced = ["1.2.840.10008.5.1.4.1.1.12.1.1"]
+
+    xrf_sop_class = ["1.2.840.10008.5.1.4.1.1.12.2"]
+    xrf_sop_class_enhanced = ["1.2.840.10008.5.1.4.1.1.12.2.1"]
+
+    # --- X-Ray 3D / Breast Tomosynthesis ---
+    x3d_sop_class = ["1.2.840.10008.5.1.4.1.1.13.1.1", "1.2.840.10008.5.1.4.1.1.13.1.2"]
+
+    tomosynthesis_sop_class = ["1.2.840.10008.5.1.4.1.1.13.1.3"]
+
+    breast_projection_sop_class = ["1.2.840.10008.5.1.4.1.1.13.1.4", "1.2.840.10008.5.1.4.1.1.13.1.5"]
+
+    # --- Intravascular OCT ---
+    ivoct_sop_class = ["1.2.840.10008.5.1.4.1.1.14.1", "1.2.840.10008.5.1.4.1.1.14.2"]
+
+    # --- Nuclear Medicine ---
+    nm_sop_class = ["1.2.840.10008.5.1.4.1.1.20"]
+
+    # --- Parametric Map / Raw / Registration / Segmentation ---
+    parametric_map_sop_class = ["1.2.840.10008.5.1.4.1.1.30"]
+
+    raw_data_sop_class = ["1.2.840.10008.5.1.4.1.1.66"]
+
+    registration_sop_class = ["1.2.840.10008.5.1.4.1.1.66.1", "1.2.840.10008.5.1.4.1.1.66.2",
+                              "1.2.840.10008.5.1.4.1.1.66.3"]
+
+    segmentation_sop_class = ["1.2.840.10008.5.1.4.1.1.66.4", "1.2.840.10008.5.1.4.1.1.66.5",
+                              "1.2.840.10008.5.1.4.1.1.66.6", "1.2.840.10008.5.1.4.1.1.66.7",
+                              "1.2.840.10008.5.1.4.1.1.66.8"]
+
+    real_world_value_sop_class = ["1.2.840.10008.5.1.4.1.1.67"]
+
+    surface_scan_sop_class = ["1.2.840.10008.5.1.4.1.1.68.1", "1.2.840.10008.5.1.4.1.1.68.2"]
+
+    # --- Visible Light ---
+    vl_endoscopic_sop_class = ["1.2.840.10008.5.1.4.1.1.77.1.1", "1.2.840.10008.5.1.4.1.1.77.1.1.1"]
+
+    vl_microscopic_sop_class = ["1.2.840.10008.5.1.4.1.1.77.1.2", "1.2.840.10008.5.1.4.1.1.77.1.2.1",
+                                "1.2.840.10008.5.1.4.1.1.77.1.3"]
+
+    vl_photographic_sop_class = ["1.2.840.10008.5.1.4.1.1.77.1.4", "1.2.840.10008.5.1.4.1.1.77.1.4.1"]
+
+    whole_slide_sop_class = ["1.2.840.10008.5.1.4.1.1.77.1.6"]
+
+    dermoscopic_sop_class = ["1.2.840.10008.5.1.4.1.1.77.1.7"]
+
+    confocal_microscopy_sop_class = ["1.2.840.10008.5.1.4.1.1.77.1.8", "1.2.840.10008.5.1.4.1.1.77.1.9"]
+
+    # --- Ophthalmic Photography / Imaging ---
+    ophthalmic_photo_sop_class = ["1.2.840.10008.5.1.4.1.1.77.1.5.1", "1.2.840.10008.5.1.4.1.1.77.1.5.2",
+                                  "1.2.840.10008.5.1.4.1.1.77.1.5.3", "1.2.840.10008.5.1.4.1.1.77.1.5.4",
+                                  "1.2.840.10008.5.1.4.1.1.77.1.5.5", "1.2.840.10008.5.1.4.1.1.77.1.5.6",
+                                  "1.2.840.10008.5.1.4.1.1.77.1.5.7", "1.2.840.10008.5.1.4.1.1.77.1.5.8"]
+
+    # --- Ophthalmic Measurements ---
+    ophthalmic_measurement_sop_class = ["1.2.840.10008.5.1.4.1.1.78.1", "1.2.840.10008.5.1.4.1.1.78.2",
+                                        "1.2.840.10008.5.1.4.1.1.78.3", "1.2.840.10008.5.1.4.1.1.78.4",
+                                        "1.2.840.10008.5.1.4.1.1.78.5", "1.2.840.10008.5.1.4.1.1.78.6",
+                                        "1.2.840.10008.5.1.4.1.1.78.7", "1.2.840.10008.5.1.4.1.1.78.8",
+                                        "1.2.840.10008.5.1.4.1.1.79.1", "1.2.840.10008.5.1.4.1.1.80.1",
+                                        "1.2.840.10008.5.1.4.1.1.81.1", "1.2.840.10008.5.1.4.1.1.82.1"]
+
+    # --- Structured Reports ---
+    sr_sop_class = ["1.2.840.10008.5.1.4.1.1.88.11", "1.2.840.10008.5.1.4.1.1.88.22",
+                    "1.2.840.10008.5.1.4.1.1.88.33", "1.2.840.10008.5.1.4.1.1.88.34",
+                    "1.2.840.10008.5.1.4.1.1.88.35", "1.2.840.10008.5.1.4.1.1.88.40",
+                    "1.2.840.10008.5.1.4.1.1.88.50", "1.2.840.10008.5.1.4.1.1.88.59",
+                    "1.2.840.10008.5.1.4.1.1.88.65", "1.2.840.10008.5.1.4.1.1.88.67",
+                    "1.2.840.10008.5.1.4.1.1.88.68", "1.2.840.10008.5.1.4.1.1.88.69",
+                    "1.2.840.10008.5.1.4.1.1.88.70", "1.2.840.10008.5.1.4.1.1.88.71",
+                    "1.2.840.10008.5.1.4.1.1.88.72", "1.2.840.10008.5.1.4.1.1.88.73",
+                    "1.2.840.10008.5.1.4.1.1.88.74", "1.2.840.10008.5.1.4.1.1.88.75",
+                    "1.2.840.10008.5.1.4.1.1.88.76", "1.2.840.10008.5.1.4.1.1.88.77"]
+
+    # --- Content Assessment / Microscopy Annotations ---
+    content_assessment_sop_class = ["1.2.840.10008.5.1.4.1.1.90.1"]
+
+    microscopy_annotation_sop_class = ["1.2.840.10008.5.1.4.1.1.91.1"]
+
+    # --- Encapsulated Documents ---
+    encapsulated_doc_sop_class = ["1.2.840.10008.5.1.4.1.1.104.1", "1.2.840.10008.5.1.4.1.1.104.2",
+                                  "1.2.840.10008.5.1.4.1.1.104.3", "1.2.840.10008.5.1.4.1.1.104.4",
+                                  "1.2.840.10008.5.1.4.1.1.104.5"]
+
+    # --- PET ---
+    pet_sop_class = ["1.2.840.10008.5.1.4.1.1.128"]
+    pet_sop_class_enhanced = ["1.2.840.10008.5.1.4.1.1.130", "1.2.840.10008.5.1.4.1.1.128.1"]
+
+    # --- Structured Display ---
+    structured_display_sop_class = ["1.2.840.10008.5.1.4.1.1.131"]
+
+    # --- Performed Procedure Protocols ---
+    performed_protocol_sop_class = ["1.2.840.10008.5.1.4.1.1.200.2", "1.2.840.10008.5.1.4.1.1.200.8"]
+
+    # --- Radiotherapy (RT) ---
+    rt_image_sop_class = ["1.2.840.10008.5.1.4.1.1.481.1"]
+    rt_image_sop_class_enhanced = ["1.2.840.10008.5.1.4.1.1.481.23", "1.2.840.10008.5.1.4.1.1.481.24"]
+
+    rt_dose_sop_class = ["1.2.840.10008.5.1.4.1.1.481.2"]
+
+    rt_structure_set_sop_class = ["1.2.840.10008.5.1.4.1.1.481.3"]
+
+    rt_plan_sop_class = ["1.2.840.10008.5.1.4.1.1.481.5"]
+    rt_ion_plan_sop_class = ["1.2.840.10008.5.1.4.1.1.481.8"]
+
+    rt_treatment_record_sop_class = ["1.2.840.10008.5.1.4.1.1.481.4", "1.2.840.10008.5.1.4.1.1.481.6",
+                                     "1.2.840.10008.5.1.4.1.1.481.7", "1.2.840.10008.5.1.4.1.1.481.9"]
+
+    rt_intent_annotation_sop_class = ["1.2.840.10008.5.1.4.1.1.481.10", "1.2.840.10008.5.1.4.1.1.481.11"]
+
+    rt_radiation_set_sop_class = ["1.2.840.10008.5.1.4.1.1.481.12", "1.2.840.10008.5.1.4.1.1.481.16",
+                                  "1.2.840.10008.5.1.4.1.1.481.17", "1.2.840.10008.5.1.4.1.1.481.21"]
+
+    rt_radiation_sop_class = ["1.2.840.10008.5.1.4.1.1.481.13", "1.2.840.10008.5.1.4.1.1.481.14",
+                              "1.2.840.10008.5.1.4.1.1.481.15"]
+
+    rt_radiation_record_sop_class = ["1.2.840.10008.5.1.4.1.1.481.18", "1.2.840.10008.5.1.4.1.1.481.19",
+                                     "1.2.840.10008.5.1.4.1.1.481.20"]
+
+    rt_treatment_prep_sop_class = ["1.2.840.10008.5.1.4.1.1.481.22", "1.2.840.10008.5.1.4.1.1.481.25"]
+
+    rt_beams_delivery_instruction_sop_class = ["1.2.840.10008.5.1.4.34.7", "1.2.840.10008.5.1.4.34.10"]
+
+    _SOP_CLASS_GROUPS = {
+        "CR": (cr_sop_class, None),
+        "DX": (dx_sop_class, None),
+        "MG": (mammo_sop_class, None),
+        "IO": (intraoral_sop_class, None),
+        "CT": (ct_sop_class, ct_sop_class_enhanced),
+        "US": (us_sop_class, us_sop_class_enhanced),
+        "MR": (mr_sop_class, mr_sop_class_enhanced),
+        "SC": (sc_sop_class, None),
+        "WAVEFORM": (waveform_sop_class, None),
+        "PR": (presentation_state_sop_class, None),
+        "XA": (xa_sop_class, xa_sop_class_enhanced),
+        "RF": (xrf_sop_class, xrf_sop_class_enhanced),
+        "X3D": (x3d_sop_class, None),
+        "TOMOSYNTHESIS": (tomosynthesis_sop_class, None),
+        "BREAST_PROJECTION": (breast_projection_sop_class, None),
+        "IVOCT": (ivoct_sop_class, None),
+        "NM": (nm_sop_class, None),
+        "PARAMETRIC_MAP": (parametric_map_sop_class, None),
+        "RAW": (raw_data_sop_class, None),
+        "REG": (registration_sop_class, None),
+        "SEG": (segmentation_sop_class, None),
+        "RWV": (real_world_value_sop_class, None),
+        "SURFACE_SCAN": (surface_scan_sop_class, None),
+        "VL_ENDOSCOPIC": (vl_endoscopic_sop_class, None),
+        "VL_MICROSCOPIC": (vl_microscopic_sop_class, None),
+        "VL_PHOTOGRAPHIC": (vl_photographic_sop_class, None),
+        "WHOLE_SLIDE": (whole_slide_sop_class, None),
+        "DERMOSCOPIC": (dermoscopic_sop_class, None),
+        "CONFOCAL": (confocal_microscopy_sop_class, None),
+        "OPHTHALMIC_PHOTO": (ophthalmic_photo_sop_class, None),
+        "OPHTHALMIC_MEASUREMENT": (ophthalmic_measurement_sop_class, None),
+        "SR": (sr_sop_class, None),
+        "CONTENT_ASSESSMENT": (content_assessment_sop_class, None),
+        "MICROSCOPY_ANNOTATION": (microscopy_annotation_sop_class, None),
+        "ENCAPSULATED_DOC": (encapsulated_doc_sop_class, None),
+        "PET": (pet_sop_class, pet_sop_class_enhanced),
+        "STRUCTURED_DISPLAY": (structured_display_sop_class, None),
+        "PERFORMED_PROTOCOL": (performed_protocol_sop_class, None),
+        "RTIMAGE": (rt_image_sop_class, rt_image_sop_class_enhanced),
+        "RTDOSE": (rt_dose_sop_class, None),
+        "RTSTRUCT": (rt_structure_set_sop_class, None),
+        "RTPLAN": (rt_plan_sop_class, None),
+        "RTIONPLAN": (rt_ion_plan_sop_class, None),
+        "RT_TREATMENT_RECORD": (rt_treatment_record_sop_class, None),
+        "RT_INTENT_ANNOTATION": (rt_intent_annotation_sop_class, None),
+        "RT_RADIATION_SET": (rt_radiation_set_sop_class, None),
+        "RT_RADIATION": (rt_radiation_sop_class, None),
+        "RT_RADIATION_RECORD": (rt_radiation_record_sop_class, None),
+        "RT_TREATMENT_PREP": (rt_treatment_prep_sop_class, None),
+        "RT_BEAMS_DELIVERY_INSTRUCTION": (rt_beams_delivery_instruction_sop_class, None),
+    }
+
+    # Flatten into a single UID -> (modality, enhanced) lookup dict, built once.
+    _SOP_CLASS_LOOKUP = {}
+    for _modality, (_plain, _enhanced) in _SOP_CLASS_GROUPS.items():
+        for _uid in _plain:
+            _SOP_CLASS_LOOKUP[_uid] = (_modality, False)
+        if _enhanced:
+            for _uid in _enhanced:
+                _SOP_CLASS_LOOKUP[_uid] = (_modality, True)
+
+    return _SOP_CLASS_LOOKUP.get(series_sop_class, (None, None))
+
+
 def sort_images_by_datetime():
     """
     Reorder the global `Data.image` dictionary and `Data.image_list`
@@ -227,7 +465,9 @@ class DicomReader(object):
         - Stores results in `self.ds_modality`
         """
         for modality in list(self.ds_modality.keys()):
-            images_in_modality = [d for d in self.ds if (0x0008, 0x0060) in d and d['Modality'].value == modality]
+            images_in_modality = [d for d in self.ds if (0x0008, 0x0016) in d
+                                  if get_modality(d[0x0008, 0x0016].value)[0] in modality]
+
             if len(images_in_modality) > 0 and modality in self.only_modality:
                 if modality in ['US', 'DX', 'RF', 'CR', 'RTSTRUCT', 'REG', 'RTDOSE']:
                     for image in images_in_modality:
