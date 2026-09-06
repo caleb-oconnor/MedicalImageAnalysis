@@ -16,13 +16,15 @@ Structure:
 
 import os
 import copy
+import blosc2
+import pickle
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 import numpy as np
 import pandas as pd
 import pyvista as pv
 import SimpleITK as sitk
 
-from pydicom.uid import generate_uid
 from scipy.spatial.transform import Rotation
 
 import vtk
@@ -321,6 +323,7 @@ class Image(object):
 
         self.tags = image.image_set
         self.array = image.array
+        self.array_dtype = str(self.array.dtype)
 
         self.image_name = image.image_name
         self.modality = image.modality
@@ -345,18 +348,30 @@ class Image(object):
         self.origin = image.origin
         self.matrix = image.image_matrix
 
-        self.unverified = image.unverified
         self.skipped_slice = image.skipped_slice
         self.rgb = image.rgb
 
-        self.local_uid = generate_uid()
         self.local_name = None
-        self.camera_position = None
+        self.serialization_version = 1
 
         self.visual = {'colormap': 'gray', 'bounds': None}
         self.misc = {}
 
         self.display = Display(self)
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state.pop("array", None)
+        state.pop("rois", None)
+        state.pop("pois", None)
+
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self.array = None
+        self.rois = {}
+        self.pois = {}
 
     def input_mhd(self, filename, roi_names, values, plane='Axial'):
         """
@@ -706,7 +721,44 @@ class Image(object):
         else:
             return None
 
-    def save_image(self, path, rois=True, pois=True):
+    def save(self, folder_path, key, clevel=5):
+        aes = AESGCM(key)
+
+        metadata = pickle.dumps(self)
+        nonce = os.urandom(12)
+        metadata = nonce + aes.encrypt(nonce, metadata, None)
+        with open(os.path.join(folder_path, 'metadata.enc'), "wb") as f:
+            f.write(metadata)
+
+        raw = self.array.tobytes(order="C")
+        compressed = blosc2.compress(raw, typesize=self.array.itemsize,
+                                     codec=blosc2.Codec.ZSTD, clevel=clevel, filter=blosc2.Filter.BITSHUFFLE)
+
+        nonce = os.urandom(12)
+        encrypted = nonce + aes.encrypt(nonce, compressed, None)
+        with open(os.path.join(folder_path, 'array.enc'), "wb") as f:
+            f.write(encrypted)
+
+    def load_metadata(self, metadata_path, key):
+        with open(metadata_path, "rb") as f:
+            data = f.read()
+
+        nonce, encrypted = data[:12], data[12:]
+        loaded = pickle.loads(AESGCM(key).decrypt(nonce, encrypted, None))
+        self.__setstate__(loaded.__dict__)
+
+        Data.image[self.image_name] = self
+        Data.image_list.append(self.image_name)
+
+    def load_array(self, array_path, key):
+        with open(array_path, "rb") as f:
+            data = f.read()
+
+        nonce, encrypted = data[:12], data[12:]
+        raw = blosc2.decompress(AESGCM(key).decrypt(nonce, encrypted, None))
+        self.array = np.frombuffer(raw, dtype=self.array_dtype).reshape(self.dimensions).copy()
+
+    def save_unencrypted(self, path, rois=True, pois=True):
         """
         Serializes data matrices, tags, metadata frames, and ROI trackers directly onto storage directories.
 
@@ -740,7 +792,7 @@ class Image(object):
         if pois:
             self.save_pois(path, create_main_folder=True)
 
-    def save_rois(self, path, create_main_folder=False):
+    def save_unencrypted_rois(self, path, create_main_folder=False):
         """
         Iterates over trackable ROI dictionary values to store serialized NumPy matrices configurations.
 
@@ -772,7 +824,7 @@ class Image(object):
                         np.array(self.rois[name].contour_position, dtype=object),
                         allow_pickle=True)
 
-    def save_pois(self, path, create_main_folder=False):
+    def save_unencrypted_pois(self, path, create_main_folder=False):
         """
         Saves individual Point of Interest coordinate datasets to disk.
 
@@ -801,7 +853,7 @@ class Image(object):
             np.save(os.path.join(poi_path, 'filepaths.npy'), self.pois[name].filepaths, allow_pickle=True)
             np.save(os.path.join(poi_path, 'point_position.npy'), self.pois[name].point_position, allow_pickle=True)
 
-    def load_image(self, image_path, rois=True, pois=True):
+    def load_unencrypted_image(self, image_path, rois=True, pois=True):
         """
         Loads and populates volumetric imaging elements out from saved system processing sub-directories.
 
@@ -834,7 +886,7 @@ class Image(object):
             for name in roi_names:
                 self.load_pois(os.path.join(image_path, 'POIs', name))
 
-    def load_rois(self, roi_path):
+    def load_unencrypted_rois(self, roi_path):
         """
         Parses archived individual target ROI binary properties, formatting components to avoid index namespace conflicts.
 
@@ -869,7 +921,7 @@ class Image(object):
             self.rois[name].contour_position = list(np.load(os.path.join(roi_path, 'contour_position.npy'),
                                                             allow_pickle=True))
 
-    def load_pois(self, poi_path):
+    def load_unencrypted_pois(self, poi_path):
         """
         Parses archived single target landmark configurations from disk.
 
@@ -894,7 +946,7 @@ class Image(object):
                     name = new_name
                     n = -1
 
-        self.pois[name] = poi(self)
+        self.pois[name] = Poi(self)
         self.pois[name].name = name
         self.pois[name].visible = bool(np.load(os.path.join(poi_path, 'visible.npy'), allow_pickle=True))
         self.pois[name].color = list(np.load(os.path.join(poi_path, 'color.npy'), allow_pickle=True))
