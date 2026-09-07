@@ -39,274 +39,241 @@ from ..data import Data
 
 
 class Display(object):
-    """
-    Handles slice viewing states, image coordinate spaces, and off-axis reslicing updates.
-
-    Parameters
-              ----------
-    image : Image
-        The parent Image instance containing the underlying data matrix and metadata.
-    """
     def __init__(self, image):
         self.image = image
+        self.matrix = np.eye(3)
+        self.spacing = copy.deepcopy(image.spacing)
+        self.rotation_center = np.asarray(image.get_center(), dtype=float)
+        self.crosshair = self.rotation_center.copy()
 
-        self.matrix = copy.deepcopy(self.image.matrix)
-        self.spacing = copy.deepcopy(self.image.spacing)
-        self.origin = copy.deepcopy(self.image.origin)
+        self.axes = {'Axial':    (0, 1, 2),
+                     'Coronal':  (0, 2, 1),
+                     'Sagittal': (1, 2, 0)}
 
-        self.slice_location = self.image.compute_center(position=False, zyx=True)
-        self.scroll_max = [self.image.dimensions[0] - 1,
-                           self.image.dimensions[1] - 1,
-                           self.image.dimensions[2] - 1]
-        self.secondary_array = None
-        self.misc = {}
+        self.reslice = vtk.vtkImageReslice()
+        self.reslice.SetInputData(image.vtk_image)
+        self.reslice.SetOutputDimensionality(2)
+        self.reslice.SetInterpolationModeToLinear()
+        self.reslice.AutoCropOutputOn()          # never crop, any orientation
+        self.reslice.SetBackgroundLevel(-3001)
 
-    def compute_matrix_pixel_to_position(self):
+    @staticmethod
+    def _axes_from_normal(normal, up=(0.0, 1.0, 0.0)):
+        """Escape hatch: build an orthonormal basis from a bare normal, for reference views that intentionally ignore
+        shared rotation."""
+
+        normal = np.asarray(normal, dtype=float)
+        normal = normal / np.linalg.norm(normal)
+        up = np.asarray(up, dtype=float)
+
+        if abs(np.dot(normal, up)) > 0.999:
+            up = np.array([1.0, 0.0, 0.0])
+
+        x_axis = np.cross(up, normal); x_axis /= np.linalg.norm(x_axis)
+        y_axis = np.cross(normal, x_axis)
+
+        return np.stack([x_axis, y_axis, normal], axis=1)   # columns = (x, y, normal)
+
+    def _get_axis_aligned_array(self, plane, position):
+        pixel = self.image.compute_pixel(position)
+        x_idx, y_idx, z_idx = (int(round(pixel[0])), int(round(pixel[1])), int(round(pixel[2])))
+
+        if plane == 'Axial' and 0 <= z_idx <= self.image.array.shape[0]:
+            return self.image.array[z_idx, :, :]
+        elif plane == 'Coronal' and 0 <= y_idx <= self.image.array.shape[1]:
+            return self.image.array[:, y_idx, :]
+        elif  0 <= x_idx <= self.image.array.shape[2]:
+            return self.image.array[:, :, x_idx]
+
+        return None
+
+    @staticmethod
+    def _intersection_line(active_plane, crossing_plane):
+        n1, p1 = active_plane['normal'], active_plane['origin']
+        n2, p2 = crossing_plane['normal'], crossing_plane['origin']
+        u = np.cross(n1, n2)
+        u_sq = np.dot(u, u)
+        if u_sq < 1e-10:
+            return None
+
+        d1, d2 = np.dot(n1, p1), np.dot(n2, p2)
+        p0 = (d1 * np.cross(n2, u) + d2 * np.cross(u, n1)) / u_sq
+        direction = u / np.linalg.norm(u)
+
+        sx, sy = active_plane['spacing'][0], active_plane['spacing'][1]
+        v = p0 - active_plane['origin']
+        col0 = np.dot(v, active_plane['x_axis']) / sx
+        row0 = np.dot(v, active_plane['y_axis']) / sy
+        dcol = np.dot(direction, active_plane['x_axis']) / sx
+        drow = np.dot(direction, active_plane['y_axis']) / sy
+
+        return {'pos': (col0, row0), 'angle': np.degrees(np.arctan2(drow, dcol))}
+
+    def compute_plane_geometry(self, plane, position, matrix_override=None):
         """
-        Computes the $4 \times 4$ homogeneous matrix converting pixel indices to physical coordinates.
-
-        Returns
-        -------
-        numpy.ndarray
-            A 4x4 matrix mapping [x, y, z, 1] index spaces to physical space.
-
-        Examples
-        --------
-        >>> disp = Display(img)
-        >>> tf_matrix = disp.compute_matrix_pixel_to_position()
+        Used by get_slice: position = this plane's actual reslice origin (top-left corner), needed to place the VTK
+        output correctly.
         """
-        matrix = copy.deepcopy(self.matrix)
-        spacing = self.spacing
 
-        pixel_to_position_matrix = np.identity(4, dtype=np.float32)
-        pixel_to_position_matrix[:3, 0] = matrix[0, :] * spacing[0]
-        pixel_to_position_matrix[:3, 1] = matrix[1, :] * spacing[1]
-        pixel_to_position_matrix[:3, 2] = matrix[2, :] * spacing[2]
-        pixel_to_position_matrix[:3, 3] = self.origin
+        m = matrix_override if matrix_override is not None else self.matrix
+        xi, yi, ni = self.axes[plane]
 
-        return pixel_to_position_matrix
+        return {'origin': np.asarray(position, dtype=float),
+                'x_axis': m[:, xi],
+                'y_axis': m[:, yi],
+                'normal': m[:, ni],
+                'spacing': self.spacing,}
 
-    def compute_matrix_position_to_pixel(self):
+    def _compute_plane_geometry_for_lines(self, plane):
         """
-        Computes the $4 \times 4$ homogeneous transformation matrix from physical coordinates to pixel space.
-
-        Returns
-        -------
-        numpy.ndarray
-            A 4x4 inverse coordinate transformation matrix.
+        Used by compute_slice_lines: origin = rotation_center (the shared pivot every plane passes through), NOT the
+        widget's top-left reslice origin. x_axis/y_axis/normal still come live from self.matrix, so lines rotate
+        correctly with any applied rotation.
         """
-        matrix = copy.deepcopy(self.matrix)
-        spacing = self.spacing
 
-        hold_matrix = np.identity(3, dtype=np.float32)
-        hold_matrix[0, :] = matrix[0, :] / spacing[0]
-        hold_matrix[1, :] = matrix[1, :] / spacing[1]
-        hold_matrix[2, :] = matrix[2, :] / spacing[2]
+        xi, yi, ni = self.axes[plane]
 
-        position_to_pixel_matrix = np.identity(4, dtype=np.float32)
-        position_to_pixel_matrix[:3, :3] = hold_matrix
-        position_to_pixel_matrix[:3, 3] = np.asarray(self.origin).dot(-hold_matrix.T)
+        return {'origin': self.rotation_center,
+                'x_axis': self.matrix[:, xi],
+                'y_axis': self.matrix[:, yi],
+                'normal': self.matrix[:, ni],
+                'spacing': self.spacing }
 
-        return position_to_pixel_matrix
-
-    def compute_array(self, slice_plane):
+    def compute_slice_lines(self, plane, position):
         """
-        Extracts a single 2D slice from the volume on the specified anatomical standard plane.
-
-        Parameters
-        ----------
-        slice_plane : str
-            The desired orientation view plane. Options: 'Axial', 'Coronal', 'Sagittal'.
-
-        Returns
-        -------
-        numpy.ndarray
-            A float32 2D image matrix at the current active tracking slice location.
+        position : THIS plane's own top-left origin (for correct pixel conversion of the line into this widget's
+        coordinates). The crossing planes are defined via the SHARED crosshair + matrix no other widget's position is
+        needed.
         """
-        if self.secondary_array is None:
-            if slice_plane == 'Axial':
-                array = self.image.array[self.slice_location[0], :, :]
-            elif slice_plane == 'Coronal':
-                array = self.image.array[:, self.slice_location[1], :]
-            else:
-                array = self.image.array[:, :, self.slice_location[2]]
-        else:
-            if slice_plane == 'Axial':
-                array = self.secondary_array[self.slice_location[0], :, :]
-            elif slice_plane == 'Coronal':
-                array = self.secondary_array[:, self.slice_location[1], :]
-            else:
-                array = self.secondary_array[:, :, self.slice_location[2]]
+        xi, yi, ni = self.axes[plane]
+        active = {'origin': np.asarray(position, dtype=float),
+                  'x_axis': self.matrix[:, xi],
+                  'y_axis': self.matrix[:, yi],
+                  'normal': self.matrix[:, ni],
+                  'spacing': self.spacing}
 
-        return array.astype(np.float32)
+        lines = {}
+        for other in ('Axial', 'Sagittal', 'Coronal'):
+            if other == plane:
+                continue
 
-    def compute_index_positions(self, xyz):
+            oxi, oyi, oni = self.axes[other]
+            crossing = {'origin': self.crosshair,
+                        'x_axis': self.matrix[:, oxi],
+                        'y_axis': self.matrix[:, oyi],
+                        'normal': self.matrix[:, oni],
+                        'spacing': self.spacing}
+
+            line = self._intersection_line(active, crossing)
+            if line is not None:
+                lines[other] = line
+
+        return lines
+
+    def get_position(self, plane):
+        return self._positions.get(plane)
+
+    def compute_array(self, plane, position, matrix_override=None, as_array=True, as_vtk=False, copy_array=True,
+                  force_reslice=False):
         """
-        Converts pixel coordinates to an absolute physical 3D coordinate vector.
-
-        Parameters
-        ----------
-        xyz : array_like
-            A 3-element pixel coordinate vector representing [x, y, z] indexes.
-
-        Returns
-        -------
-        numpy.ndarray
-            A length-3 array containing the physical position values.
+        plane, position supplied by the caller each call. Orientation comes from self.matrix (shared) unless
+        matrix_override is given.
         """
-        pixel_to_position_matrix = self.compute_matrix_pixel_to_position()
-        location = np.asarray([xyz[0], xyz[1], xyz[2], 1])
+        m = matrix_override if matrix_override is not None else self.matrix
+        is_identity = np.allclose(m, np.eye(3), atol=1e-6)
 
-        return location.dot(pixel_to_position_matrix.T)[:3]
+        if is_identity and not force_reslice:
+            arr = self._get_axis_aligned_array(plane, position)
+            result = {'dimensions': (arr.shape[1], arr.shape[0]), 'spacing': self.spacing}
+            if as_array:
+                result['array'] = arr.copy() if copy_array else arr
+            return result
 
-    def compute_offaxis_array(self):
+        geom = self.compute_plane_geometry(plane, position, matrix_override=m)
+        axes = vtk.vtkMatrix4x4()
+        axes.Identity()
+        for col, vec in enumerate((geom['x_axis'], geom['y_axis'], geom['normal'])):
+            axes.SetElement(0, col, vec[0]); axes.SetElement(1, col, vec[1]); axes.SetElement(2, col, vec[2])
+        axes.SetElement(0, 3, geom['origin'][0]); axes.SetElement(1, 3, geom['origin'][1]); axes.SetElement(2, 3, geom['origin'][2])
+
+        self.reslice.SetResliceAxes(axes)
+        self.reslice.SetOutputSpacing(*self.spacing)
+        self.reslice.Update()
+
+        output = self.reslice.GetOutput()
+        dims = output.GetDimensions()
+        scalars = output.GetPointData().GetScalars()
+        if scalars is None or 0 in dims:
+            return None   # plane doesn't intersect the volume
+
+        result = {'dimensions': (dims[0], dims[1]),
+                  'spacing': self.spacing,
+                  'x_axis': geom['x_axis'],
+                  'y_axis': geom['y_axis'],
+                  'normal': geom['normal'],
+                  'origin': geom['origin']}
+
+        if as_array:
+            arr = numpy_support.vtk_to_numpy(scalars).reshape(dims[1], dims[0])
+            result['array'] = arr.copy() if copy else arr
+
+        if as_vtk:
+            vtk_out = vtk.vtkImageData()
+            vtk_out.DeepCopy(output)
+            result['vtk_image'] = vtk_out
+
+        return result
+
+    def pivot_position(self, position, R):
         """
-        Applies a VTK Reslice pipeline to interpolate the image volume data across non-orthogonal viewing axes.
-
-        Returns
-        -------
-        None
+        Repositions one widget's origin around self.rotation_center using incremental rotation R (from
+        update_rotation's return value).
+        Caller applies this to every widget's position right after calling update_rotation.
         """
-        loc = np.flip(self.slice_location)
-        base_position_matrix = self.compute_matrix_pixel_to_position()
-        slice_position = np.asarray([loc[0], loc[1], loc[2], 1]).dot(base_position_matrix.T)[:3]
+        position = np.asarray(position, dtype=float)
 
-        matrix_reshape = self.image.matrix.reshape(1, 9)[0]
-        vtk_image = vtk.vtkImageData()
-        vtk_image.SetSpacing(self.image.spacing)
-        vtk_image.SetDirectionMatrix(matrix_reshape)
-        vtk_image.SetDimensions(np.flip(self.image.array.shape))
-        vtk_image.SetOrigin(self.image.origin)
-        vtk_image.GetPointData().SetScalars(numpy_support.numpy_to_vtk(self.image.array.flatten(order="C")))
+        return R.dot(position - self.rotation_center) + self.rotation_center
 
-        matrix = vtk.vtkMatrix4x4()
-        for i in range(3):
-            for j in range(3):
-                matrix.SetElement(i, j, self.matrix[i, j])
-
-        transform = vtk.vtkTransform()
-        transform.SetMatrix(matrix)
-        transform.Inverse()
-
-        vtk_reslice = vtk.vtkImageReslice()
-        vtk_reslice.SetInputData(vtk_image)
-        vtk_reslice.SetResliceTransform(transform)
-        vtk_reslice.SetInterpolationModeToLinear()
-        vtk_reslice.SetOutputSpacing(self.image.spacing)
-        vtk_reslice.AutoCropOutputOn()
-        vtk_reslice.SetBackgroundLevel(-3001)
-        vtk_reslice.Update()
-
-        reslice_data = vtk_reslice.GetOutput()
-        new_origin = reslice_data.GetOrigin()
-        self.origin = transform.TransformPoint(new_origin)
-        dimensions = reslice_data.GetDimensions()
-
-        position_to_pixel_matrix = self.compute_matrix_position_to_pixel()
-        location = np.asarray([slice_position[0], slice_position[1], slice_position[2], 1])
-        self.slice_location = list(np.flip(np.round(location.dot(position_to_pixel_matrix.T)[:3])).astype(np.int32))
-        self.scroll_max = [dimensions[2] - 1, dimensions[1] - 1, dimensions[0] - 1]
-        if self.slice_location[0] > dimensions[2] - 1:
-            self.slice_location[0] = dimensions[2] - 1
-        if self.slice_location[1] > dimensions[1] - 1:
-            self.slice_location[1] = dimensions[1] - 1
-        if self.slice_location[2] > dimensions[0] - 1:
-            self.slice_location[2] = dimensions[0] - 1
-
-        scalars = reslice_data.GetPointData().GetScalars()
-        self.secondary_array = numpy_support.vtk_to_numpy(scalars).reshape(dimensions[2], dimensions[1], dimensions[0])
-
-    def compute_scroll_max(self):
+    def publish_position(self, plane, position):
         """
-        Recalculates maximum layout frame index limits for structural scroll interfaces.
-
-        Returns
-        -------
-        None
+        Widget calls this whenever its own position changes (after scroll, after pivot_position, etc), so other
+        widgets/compute_slice_lines can see it without needing direct references to each other.
         """
-        if self.secondary_array is not None:
-            self.scroll_max = [self.secondary_array.shape[0] - 1,
-                               self.secondary_array.shape[1] - 1,
-                               self.secondary_array.shape[2] - 1]
-        else:
-            self.scroll_max = [self.image.dimensions[0] - 1,
-                               self.image.dimensions[1] - 1,
-                               self.image.dimensions[2] - 1]
 
-    def compute_vtk_slice(self, slice_plane):
+        self._positions[plane] = np.asarray(position, dtype=float)
+
+    def set_rotation_center(self, center):
+        """Call when the user picks a new pivot (click, ROI centroid, a Rigid instance's target center, etc)."""
+        self.rotation_center = np.asarray(center, dtype=float)
+        self.crosshair = self.rotation_center.copy()
+
+    def update_rotation(self, r_x=0, r_y=0, r_z=0):
         """
-        Builds an independent 2D `vtkImageData` instance representing an individual orientation viewport plane.
+        Rotates the SHARED matrix (affects every plane) and pivots the shared crosshair around rotation_center using
+        this increment.
 
-        Parameters
-        ----------
-        slice_plane : str
-            Target view plane orientation slice context. Options: 'Axial', 'Coronal', 'Sagittal'.
-
-        Returns
-        -------
-        vtk.vtkImageData
-            The structural 2D imaging data formatted explicitly for VTK pipeline visualization elements.
+        Returns incremental R so callers can pivot their own widget positions the same way.
         """
-        matrix_reshape = np.linalg.inv(self.matrix).reshape(1, 9)[0]
-        pixel_to_position_matrix = self.compute_matrix_pixel_to_position()
-        if slice_plane == 'Axial':
-            location = np.asarray([0, 0, self.slice_location[0], 1])
-            if self.secondary_array is None:
-                array_slice = self.image.array[self.slice_location[0], :, :]
-            else:
-                array_slice = self.secondary_array[self.slice_location[0], :, :]
-            array_shape = array_slice.shape
-            dim = [array_shape[1], array_shape[0], 1]
-        elif slice_plane == 'Coronal':
-            location = np.asarray([0, self.slice_location[1], 0, 1])
-            if self.secondary_array is None:
-                array_slice = self.image.array[:, self.slice_location[1], :]
-            else:
-                array_slice = self.secondary_array[:, self.slice_location[1], :]
-            array_shape = array_slice.shape
-            dim = [array_shape[1], 1, array_shape[0]]
-        else:
-            location = np.asarray([self.slice_location[2], 0, 0, 1])
-            if self.secondary_array is None:
-                array_slice = self.image.array[:, :, self.slice_location[2]]
-            else:
-                array_slice = self.secondary_array[:, :, self.slice_location[2]]
-            array_shape = array_slice.shape
-            dim = [1, array_shape[1], array_shape[0]]
+        R = Rotation.from_euler('xyz', [r_x, r_y, r_z], degrees=True).as_matrix()
+        self.matrix = R @ self.matrix
+        self.crosshair = R.dot(self.crosshair - self.rotation_center) + self.rotation_center
 
-        slice_origin = location.dot(pixel_to_position_matrix.T)[:3]
+        return R
 
-        vtk_test = vtk.vtkImageData()
-        vtk_test.SetSpacing(self.image.spacing)
-        vtk_test.SetDirectionMatrix(matrix_reshape)
-        vtk_test.SetDimensions(dim)
-        vtk_test.SetOrigin(slice_origin)
-        vtk_test.GetPointData().SetScalars(numpy_support.numpy_to_vtk(array_slice.flatten(order="C")))
-
-        return vtk_test
-
-    def update_slice_location(self, scroll, slice_plane):
+    def wheel_position(self, plane, position, steps=1):
         """
-        Updates the internal frame index for a targeted display plane view interface.
-
-        Parameters
-        ----------
-        scroll : int
-            The new coordinate plane view array frame index value.
-        slice_plane : str
-            Anatomical view tracking target label. Options: 'Axial', 'Coronal', 'Sagittal'.
-
-        Returns
-        -------
-        None
+        Moves `position` (widget's own top-left origin) along `plane`'s CURRENT normal by `steps` voxels, and moves
+        the shared crosshair by the same delta, so scrolling one plane correctly shifts the
+        intersection lines on the other two.
         """
-        if slice_plane == 'Axial':
-            self.slice_location[0] = scroll
-        elif slice_plane == 'Coronal':
-            self.slice_location[1] = scroll
-        else:
-            self.slice_location[2] = scroll
+        _, _, ni = self.axes[plane]
+        normal = self.matrix[:, ni]
+        normal_hat = normal / np.linalg.norm(normal)
+        delta = normal_hat * self.spacing[ni] * steps
 
+        self.crosshair = self.crosshair + delta
+
+        return np.asarray(position, dtype=float) + delta
 
 class Image(object):
     """
@@ -1046,136 +1013,29 @@ class Image(object):
         self.rois[name].contour_position = positions
         self.rois[name].create_discrete_mesh()
 
-    def compute_aspect(self, slice_plane):
+    def compute_initial_origin(self, plane):
         """
-        Calculates viewport pixel aspect ratios required to prevent image skewing during display stretching.
+        Top-left corner of this plane's slice, at the volume's center index
+        along the plane's normal.
 
-        Parameters
-        ----------
-        slice_plane : str
-            The viewport display target orientation frame. Options: 'Axial', 'Coronal', 'Sagittal'.
-
-        Returns
-        -------
-        float
-            The proportion scalar value rounded strictly to 2 decimal points.
+        self.display.image.dimensions is (z, y, x).
+        compute_position expects pixel index as [x, y, z].
+        axes gives (xi, yi, ni) in xyz terms, so the matching
+        dimensions slot for a given xyz index i is dimensions[2 - i].
         """
-        if slice_plane == 'Axial':
-            aspect = np.round(self.spacing[0] / self.spacing[1], 2)
-        elif slice_plane == 'Coronal':
-            aspect = np.round(self.spacing[0] / self.spacing[2], 2)
-        else:
-            aspect = np.round(self.spacing[1] / self.spacing[2], 2)
 
-        return aspect
+        axes = {'Axial':    (0, 1, 2),
+                'Coronal':  (0, 2, 1),
+                'Sagittal': (1, 2, 0)}
 
-    def compute_bounds(self):
-        """
-        Calculates absolute spatial bounding box ranges using VTK internal volume tracking logic.
+        xi, yi, ni = axes[plane]
+        dims = self.dimensions  # (z, y, x)
 
-        Returns
-        -------
-        list of float
-            A 6-element list tracking spatial limits: [x_min, x_max, y_min, y_max, z_min, z_max].
-        """
-        shape = self.array.shape
-        matrix_reshape = self.matrix.reshape(1, 9)[0]
-        vtk_image = vtk.vtkImageData()
-        vtk_image.SetSpacing(self.spacing)
-        vtk_image.SetDirectionMatrix(matrix_reshape)
-        vtk_image.SetDimensions([shape[1], shape[2], shape[0]])
-        vtk_image.SetOrigin(self.origin)
+        idx_xyz = np.zeros(3)
+        idx_xyz[ni] = dims[2 - ni] / 2  # center index along the through-plane axis
+        # xi/yi stay 0 -- top-left corner in-plane
 
-        x_min, x_max, y_min, y_max, z_min, z_max = vtk_image.GetBounds()
-
-        return [x_min, x_max, y_min, y_max, z_min, z_max]
-
-    def compute_center(self, position=True, zyx=False):
-        """
-        Identifies mid-volume coordinate points in either pixel space grids or absolute physical systems.
-
-        Parameters
-        ----------
-        position : bool, default True
-            When True, transforms center coordinates into millimeter space. Otherwise keeps pixel indexes.
-        zyx : bool, default False
-            Flips positional vectors to sequence coordinates along inverted index trajectories.
-
-        Returns
-        -------
-        list of int or numpy.ndarray
-            The length-3 mid-volume structural position elements.
-        """
-        pixel_index = [int(self.dimensions[2] / 2),
-                       int(self.dimensions[1] / 2),
-                       int(self.dimensions[0] / 2)]
-
-        if position:
-            pixel_to_position_matrix = self.display.compute_matrix_pixel_to_position()
-            location = np.asarray([pixel_index[0], pixel_index[1], pixel_index[2], 1])
-
-            center = location.dot(pixel_to_position_matrix.T)[:3]
-            if zyx:
-                return np.flip(center)
-            else:
-                return center
-
-        else:
-            if zyx:
-                return [pixel_index[2], pixel_index[1], pixel_index[0]]
-            else:
-                return pixel_index
-
-    def compute_corner_positions(self):
-        """
-        Calculates explicit 3D physical location tracking positions for the eight bounding volume corners.
-
-        Returns
-        -------
-        list of tuple
-            A list containing eight distinct length-3 coordinate measurement tuples.
-        """
-        shape = self.array.shape
-        matrix_reshape = self.matrix.reshape(1, 9)[0]
-        vtk_image = vtk.vtkImageData()
-        vtk_image.SetSpacing(self.spacing)
-        vtk_image.SetDirectionMatrix(matrix_reshape)
-        vtk_image.SetDimensions([shape[1], shape[2], shape[0]])
-        vtk_image.SetOrigin(self.origin)
-
-        x_min, x_max, y_min, y_max, z_min, z_max = vtk_image.GetBounds()
-
-        corner_points = [(x_min, y_min, z_min),
-                         (x_max, y_min, z_min),
-                         (x_max, y_max, z_min),
-                         (x_min, y_max, z_min),
-                         (x_min, y_min, z_max),
-                         (x_max, y_min, z_max),
-                         (x_max, y_max, z_max),
-                         (x_min, y_max, z_max)]
-
-        return corner_points
-
-    def compute_corner_sides(self):
-        """
-        Generates a PyVista visual wireframe bounding box tracking the extreme dimensional corners.
-
-        Returns
-        -------
-        pyvista.PolyData
-            The generated surface data object ready for rendering pipelines.
-        """
-        corner_points = self.compute_corner_positions()
-        points = [corner_points[0], corner_points[4], corner_points[7], corner_points[3],
-                  corner_points[1], corner_points[2], corner_points[6], corner_points[5]]
-        faces = [4, 0, 1, 2, 3,
-                 4, 4, 5, 6, 7,
-                 4, 0, 4, 7, 1,
-                 4, 3, 2, 6, 5,
-                 4, 0, 3, 5, 4,
-                 4, 1, 7, 6, 2]
-
-        return pv.PolyData(points, faces)
+        return self.compute_position(idx_xyz)
 
     def compute_pixel(self, position):
         """
@@ -1193,18 +1053,15 @@ class Image(object):
         """
         matrix = copy.deepcopy(self.matrix)
 
-        hold_matrix = np.identity(3, dtype=np.float32)
-        hold_matrix[0, :] = matrix[0, :] / self.spacing[0]
-        hold_matrix[1, :] = matrix[1, :] / self.spacing[1]
-        hold_matrix[2, :] = matrix[2, :] / self.spacing[2]
+        hold = np.eye(3)
+        hold[0, :] = matrix[0, :] / self.spacing[0]
+        hold[1, :] = matrix[1, :] / self.spacing[1]
+        hold[2, :] = matrix[2, :] / self.spacing[2]
+        pos2pix = np.eye(4)
+        pos2pix[:3, :3] = hold
+        pos2pix[:3, 3] = np.asarray(self.origin).dot(-hold.T)
 
-        position_to_pixel_matrix = np.identity(4, dtype=np.float32)
-        position_to_pixel_matrix[:3, :3] = hold_matrix
-        position_to_pixel_matrix[:3, 3] = np.asarray(self.origin).dot(-hold_matrix.T)
-
-        location = np.asarray([position[0], position[1], position[2], 1])
-
-        return (np.round(location.dot(position_to_pixel_matrix.T)[:3])).astype(np.int32)
+        return pos2pix.dot([*position, 1])[:3]
 
     def compute_position(self, xyz):
         """
@@ -1222,16 +1079,13 @@ class Image(object):
         """
         matrix = copy.deepcopy(self.matrix)
 
-        pixel_to_position_matrix = np.identity(4, dtype=np.float32)
-        pixel_to_position_matrix[:3, 0] = matrix[0, :] * self.spacing[0]
-        pixel_to_position_matrix[:3, 1] = matrix[1, :] * self.spacing[1]
-        pixel_to_position_matrix[:3, 2] = matrix[2, :] * self.spacing[2]
-        pixel_to_position_matrix[:3, 3] = self.origin
+        p2p = np.eye(4)
+        p2p[:3, 0] = matrix[0, :] * self.spacing[0]
+        p2p[:3, 1] = matrix[1, :] * self.spacing[1]
+        p2p[:3, 2] = matrix[2, :] * self.spacing[2]
+        p2p[:3, 3] = self.origin
 
-        pixel_to_position_matrix = self.compute_matrix_pixel_to_position()
-        location = np.asarray([xyz[0], xyz[1], xyz[2], 1])
-
-        return location.dot(pixel_to_position_matrix.T)[:3]
+        return p2p.dot([*xyz, 1])[:3]
 
     def compute_matrix_pixel_to_position(self):
         """
@@ -1273,7 +1127,127 @@ class Image(object):
         position_to_pixel_matrix[:3, :3] = hold_matrix
         position_to_pixel_matrix[:3, 3] = np.asarray(self.origin).dot(-hold_matrix.T)
 
-    def reset_array(self):
+    def get_aspect(self, slice_plane):
+        """
+        Calculates viewport pixel aspect ratios required to prevent image skewing during display stretching.
+
+        Parameters
+        ----------
+        slice_plane : str
+            The viewport display target orientation frame. Options: 'Axial', 'Coronal', 'Sagittal'.
+
+        Returns
+        -------
+        float
+            The proportion scalar value rounded strictly to 2 decimal points.
+        """
+        if slice_plane == 'Axial':
+            aspect = np.round(self.spacing[0] / self.spacing[1], 2)
+        elif slice_plane == 'Coronal':
+            aspect = np.round(self.spacing[0] / self.spacing[2], 2)
+        else:
+            aspect = np.round(self.spacing[1] / self.spacing[2], 2)
+
+        return aspect
+
+    def get_bounds(self):
+        """
+        Calculates absolute spatial bounding box ranges using VTK internal volume tracking logic.
+
+        Returns
+        -------
+        list of float
+            A 6-element list tracking spatial limits: [x_min, x_max, y_min, y_max, z_min, z_max].
+        """
+        shape = self.array.shape
+        matrix_reshape = self.matrix.reshape(1, 9)[0]
+        vtk_image = vtk.vtkImageData()
+        vtk_image.SetSpacing(self.spacing)
+        vtk_image.SetDirectionMatrix(matrix_reshape)
+        vtk_image.SetDimensions([shape[1], shape[2], shape[0]])
+        vtk_image.SetOrigin(self.origin)
+
+        x_min, x_max, y_min, y_max, z_min, z_max = vtk_image.GetBounds()
+
+        return [x_min, x_max, y_min, y_max, z_min, z_max]
+
+    def get_center(self, position=True, zyx=False):
+        """
+        Identifies mid-volume coordinate points in either pixel space grids or absolute physical systems.
+
+        Parameters
+        ----------
+        position : bool, default True
+            When True, transforms center coordinates into millimeter space. Otherwise keeps pixel indexes.
+        zyx : bool, default False
+            Flips positional vectors to sequence coordinates along inverted index trajectories.
+
+        Returns
+        -------
+        list of int or numpy.ndarray
+            The length-3 mid-volume structural position elements.
+        """
+        pixel_index = [int(self.dimensions[2] / 2),
+                       int(self.dimensions[1] / 2),
+                       int(self.dimensions[0] / 2)]
+
+        if position:
+            center = self.compute_position(pixel_index)
+            if zyx:
+                return np.flip(center)
+            else:
+                return center
+
+        else:
+            if zyx:
+                return [pixel_index[2], pixel_index[1], pixel_index[0]]
+            else:
+                return pixel_index
+
+    def get_corner_positions(self):
+        """
+        Calculates explicit 3D physical location tracking positions for the eight bounding volume corners.
+
+        Returns
+        -------
+        list of tuple
+            A list containing eight distinct length-3 coordinate measurement tuples.
+        """
+        x_min, x_max, y_min, y_max, z_min, z_max = self.display.vtk_image.GetBounds()
+
+        corner_points = [(x_min, y_min, z_min),
+                         (x_max, y_min, z_min),
+                         (x_max, y_max, z_min),
+                         (x_min, y_max, z_min),
+                         (x_min, y_min, z_max),
+                         (x_max, y_min, z_max),
+                         (x_max, y_max, z_max),
+                         (x_min, y_max, z_max)]
+
+        return corner_points
+
+    def get_corner_sides(self):
+        """
+        Generates a PyVista visual wireframe bounding box tracking the extreme dimensional corners.
+
+        Returns
+        -------
+        pyvista.PolyData
+            The generated surface data object ready for rendering pipelines.
+        """
+        corner_points = self.compute_corner_positions()
+        points = [corner_points[0], corner_points[4], corner_points[7], corner_points[3],
+                  corner_points[1], corner_points[2], corner_points[6], corner_points[5]]
+        faces = [4, 0, 1, 2, 3,
+                 4, 4, 5, 6, 7,
+                 4, 0, 4, 7, 1,
+                 4, 3, 2, 6, 5,
+                 4, 0, 3, 5, 4,
+                 4, 1, 7, 6, 2]
+
+        return pv.PolyData(points, faces)
+
+    def reset_display(self):
         """
         Clears out off-axis reslice transformations to re-establish standard viewing orientations.
 
@@ -1281,10 +1255,9 @@ class Image(object):
         -------
         None
         """
-        self.display.secondary_array = None
-        self.display.matrix = copy.deepcopy(self.matrix)
-        self.display.origin = copy.deepcopy(self.origin)
-        self.display.slice_location = self.compute_center(position=False, zyx=True)
+        self.display.matrix = np.eye(3)
+        self.display._positions = {}
+        self.display.rotation_center = np.asarray(self.get_center(), dtype=float)
 
     def retrieve_angles(self, order='ZXY'):
         """
@@ -1303,163 +1276,3 @@ class Image(object):
         rotation = Rotation.from_matrix(self.display.matrix[:3, :3])
 
         return rotation.as_euler(order, degrees=True)
-
-    def retrieve_array_plane(self, slice_plane):
-        """
-        Retrieves the 2D image pixel tracking block matching specified active orientations.
-
-        Parameters
-        ----------
-        slice_plane : str
-            Target viewing matrix tracking context. Options: 'Axial', 'Coronal', 'Sagittal'.
-
-        Returns
-        -------
-        numpy.ndarray
-            The localized matrix tracking slice views.
-        """
-        return self.display.compute_array(slice_plane=slice_plane)
-
-    def retrieve_slice_location(self, slice_plane):
-        """
-        Queries active coordinate locations for specific viewport projection elements.
-
-        Parameters
-        ----------
-        slice_plane : str
-            Desired standard anatomic plane descriptor profile label.
-
-        Returns
-        -------
-        int
-            The currently indexed matrix location tracking number.
-        """
-        if slice_plane == 'Axial':
-            return self.display.slice_location[0]
-
-        elif slice_plane == 'Coronal':
-            return self.display.slice_location[1]
-
-        else:
-            return self.display.slice_location[2]
-
-    def retrieve_slice_position(self, slice_plane=None):
-        """
-        Determines localized 3D physical position coordinates for tracking items across active planes.
-
-        Parameters
-        ----------
-        slice_plane : str, optional
-            Target structural monitoring views. Options: 'Axial', 'Coronal', 'Sagittal'.
-
-        Returns
-        -------
-        numpy.ndarray
-            The length-3 physical coordinate position vector tracking items.
-        """
-        pixel_to_position_matrix = self.display.compute_matrix_pixel_to_position()
-
-        if slice_plane is None:
-            location = np.asarray([self.display.slice_location[2],
-                                   self.display.slice_location[1],
-                                   self.display.slice_location[0], 1])
-        else:
-            if slice_plane == 'Axial':
-                location = np.asarray([0, 0, self.display.slice_location[0], 1])
-            elif slice_plane == 'Coronal':
-                location = np.asarray([0, self.display.slice_location[1], 0, 1])
-                print(location)
-            else:
-                location = np.asarray([self.display.slice_location[2], 0, 0, 1])
-
-        return location.dot(pixel_to_position_matrix.T)[:3]
-
-    def retrieve_scroll_max(self, slice_plane):
-        """
-        Exposes extreme valid coordinate positions tracking specific frame scroll bounds.
-
-        Parameters
-        ----------
-        slice_plane : str
-            Target system mapping plane tracking labels.
-
-        Returns
-        -------
-        int
-            The maximum available structural index value.
-        """
-        if slice_plane == 'Axial':
-            return self.display.scroll_max[0]
-
-        elif slice_plane == 'Coronal':
-            return self.display.scroll_max[1]
-
-        else:
-            return self.display.scroll_max[2]
-
-    def retrieve_vtk_slice(self, slice_plane):
-        """
-        Direct wrapper passing calls to compile structural VTK image slices.
-
-        Parameters
-        ----------
-        slice_plane : str
-            The targeted anatomical plane tracking descriptor.
-
-        Returns
-        -------
-        vtk.vtkImageData
-            The structural VTK slice dataset object.
-        """
-        return self.display.compute_vtk_slice(slice_plane)
-
-    def retrieve_vtk_volume(self, slice_plane):
-        """
-        Placeholder configuration mapping intended to provide automated support for full VTK volume blocks.
-
-        Parameters
-        ----------
-        slice_plane : str
-            Target orientation view labels tracker context.
-
-        Returns
-        -------
-        object
-            Downstream pipeline structural container components output.
-        """
-        return self.display.compute_vtk_volume(slice_plane)
-
-    def update_rotation(self, r_x=0, r_y=0, r_z=0, base=True):
-        """
-        Applies incremental rotation updates across viewing matrices, triggering data interpolation pipelines.
-
-        Parameters
-        ----------
-        r_x : float, default 0
-            Rotation component applied explicitly around X-axis tracking paths in degrees.
-        r_y : float, default 0
-            Rotation component tracking Y-axis movements in degrees.
-        r_z : float, default 0
-            Rotation component tracking Z-axis movements in degrees.
-        base : bool, default True
-            When True, evaluates incremental modifications directly from original root geometry transforms.
-
-        Returns
-        -------
-        None
-        """
-        if r_x != 0 or r_y != 0 or r_z != 0:
-            r = Rotation.from_euler('xyz', [r_x, r_y, r_z], degrees=True)
-            new_matrix = r.as_matrix()
-
-            if base:
-                base_matrix = copy.deepcopy(self.matrix)
-                self.display.matrix = new_matrix @ base_matrix
-            else:
-                self.display.matrix = new_matrix @ self.display.matrix
-
-            self.display.compute_offaxis_array()
-            self.display.compute_scroll_max()
-        else:
-            self.display.compute_scroll_max()
-            self.reset_array()
