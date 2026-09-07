@@ -50,11 +50,14 @@ class Display(object):
                      'Coronal':  (0, 2, 1),
                      'Sagittal': (1, 2, 0)}
 
+        self.vtk_image = None
+        self._build_vtk_image()
+
         self.reslice = vtk.vtkImageReslice()
-        self.reslice.SetInputData(image.vtk_image)
+        self.reslice.SetInputData(self.vtk_image)
         self.reslice.SetOutputDimensionality(2)
         self.reslice.SetInterpolationModeToLinear()
-        self.reslice.AutoCropOutputOn()          # never crop, any orientation
+        self.reslice.AutoCropOutputOn()  # never crop, any orientation
         self.reslice.SetBackgroundLevel(-3001)
 
     @staticmethod
@@ -73,6 +76,19 @@ class Display(object):
         y_axis = np.cross(normal, x_axis)
 
         return np.stack([x_axis, y_axis, normal], axis=1)   # columns = (x, y, normal)
+
+    def _build_vtk_image(self):
+        """Shallow-wraps self.array into a vtkImageData. Zero-copy — self.array
+        must stay alive for the lifetime of this object (it does, via self.array)."""
+        matrix_reshape = self.matrix.reshape(1, 9)[0]
+
+        vtk_image = vtk.vtkImageData()
+        vtk_image.SetSpacing(self.spacing)
+        vtk_image.SetDirectionMatrix(matrix_reshape)
+        vtk_image.SetDimensions(np.flip(self.image.array.shape))
+        vtk_image.SetOrigin(self.image.origin)
+        vtk_image.GetPointData().SetScalars(numpy_support.numpy_to_vtk( self.image.array.ravel(order="C"), deep=False))
+        self.vtk_image = vtk_image
 
     def _get_axis_aligned_array(self, plane, position):
         pixel = self.image.compute_pixel(position)
