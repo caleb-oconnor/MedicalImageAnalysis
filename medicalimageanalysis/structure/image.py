@@ -46,9 +46,12 @@ class Display(object):
         self.rotation_center = np.asarray(image.get_center(), dtype=float)
         self.crosshair = self.rotation_center.copy()
 
+        self.position = {'Axial':    self.image.compute_initial_origin('Axial'),
+                         'Sagittal': self.image.compute_initial_origin('Sagittal'),
+                         'Coronal':  self.image.compute_initial_origin('Coronal')}
         self.axes = {'Axial':    (0, 1, 2),
-                     'Coronal':  (0, 2, 1),
-                     'Sagittal': (1, 2, 0)}
+                     'Sagittal': (1, 2, 0),
+                     'Coronal':  (0, 2, 1)}
 
         self.vtk_image = None
         self._build_vtk_image()
@@ -90,6 +93,21 @@ class Display(object):
         vtk_image.GetPointData().SetScalars(numpy_support.numpy_to_vtk( self.image.array.ravel(order="C"), deep=False))
         self.vtk_image = vtk_image
 
+    def _compute_plane_geometry_for_lines(self, plane):
+        """
+        Used by compute_slice_lines: origin = rotation_center (the shared pivot every plane passes through), NOT the
+        widget's top-left reslice origin. x_axis/y_axis/normal still come live from self.matrix, so lines rotate
+        correctly with any applied rotation.
+        """
+
+        xi, yi, ni = self.axes[plane]
+
+        return {'origin': self.rotation_center,
+                'x_axis': self.matrix[:, xi],
+                'y_axis': self.matrix[:, yi],
+                'normal': self.matrix[:, ni],
+                'spacing': self.spacing }
+
     def _get_axis_aligned_array(self, plane, position):
         pixel = self.image.compute_pixel(position)
         x_idx, y_idx, z_idx = (int(round(pixel[0])), int(round(pixel[1])), int(round(pixel[2])))
@@ -125,71 +143,7 @@ class Display(object):
 
         return {'pos': (col0, row0), 'angle': np.degrees(np.arctan2(drow, dcol))}
 
-    def compute_plane_geometry(self, plane, position, matrix_override=None):
-        """
-        Used by get_slice: position = this plane's actual reslice origin (top-left corner), needed to place the VTK
-        output correctly.
-        """
-
-        m = matrix_override if matrix_override is not None else self.matrix
-        xi, yi, ni = self.axes[plane]
-
-        return {'origin': np.asarray(position, dtype=float),
-                'x_axis': m[:, xi],
-                'y_axis': m[:, yi],
-                'normal': m[:, ni],
-                'spacing': self.spacing,}
-
-    def _compute_plane_geometry_for_lines(self, plane):
-        """
-        Used by compute_slice_lines: origin = rotation_center (the shared pivot every plane passes through), NOT the
-        widget's top-left reslice origin. x_axis/y_axis/normal still come live from self.matrix, so lines rotate
-        correctly with any applied rotation.
-        """
-
-        xi, yi, ni = self.axes[plane]
-
-        return {'origin': self.rotation_center,
-                'x_axis': self.matrix[:, xi],
-                'y_axis': self.matrix[:, yi],
-                'normal': self.matrix[:, ni],
-                'spacing': self.spacing }
-
-    def compute_slice_lines(self, plane, position):
-        """
-        position : THIS plane's own top-left origin (for correct pixel conversion of the line into this widget's
-        coordinates). The crossing planes are defined via the SHARED crosshair + matrix no other widget's position is
-        needed.
-        """
-        xi, yi, ni = self.axes[plane]
-        active = {'origin': np.asarray(position, dtype=float),
-                  'x_axis': self.matrix[:, xi],
-                  'y_axis': self.matrix[:, yi],
-                  'normal': self.matrix[:, ni],
-                  'spacing': self.spacing}
-
-        lines = {}
-        for other in ('Axial', 'Sagittal', 'Coronal'):
-            if other == plane:
-                continue
-
-            oxi, oyi, oni = self.axes[other]
-            crossing = {'origin': self.crosshair,
-                        'x_axis': self.matrix[:, oxi],
-                        'y_axis': self.matrix[:, oyi],
-                        'normal': self.matrix[:, oni],
-                        'spacing': self.spacing}
-
-            line = self._intersection_line(active, crossing)
-            if line is not None:
-                lines[other] = line
-
-        return lines
-
-    def get_position(self, plane):
-        return self._positions.get(plane)
-
-    def compute_array(self, plane, position, matrix_override=None, as_array=True, as_vtk=False, copy_array=True,
+    def compute_array(self, plane, position, matrix_override=None, as_array=True, as_vtk=False, copy_array=False,
                   force_reslice=False):
         """
         plane, position supplied by the caller each call. Orientation comes from self.matrix (shared) unless
@@ -240,6 +194,52 @@ class Display(object):
 
         return result
 
+    def compute_plane_geometry(self, plane, position, matrix_override=None):
+        """
+        Used by get_slice: position = this plane's actual reslice origin (top-left corner), needed to place the VTK
+        output correctly.
+        """
+
+        m = matrix_override if matrix_override is not None else self.matrix
+        xi, yi, ni = self.axes[plane]
+
+        return {'origin': np.asarray(position, dtype=float),
+                'x_axis': m[:, xi],
+                'y_axis': m[:, yi],
+                'normal': m[:, ni],
+                'spacing': self.spacing,}
+
+    def compute_slice_lines(self, plane, position):
+        """
+        position : THIS plane's own top-left origin (for correct pixel conversion of the line into this widget's
+        coordinates). The crossing planes are defined via the SHARED crosshair + matrix no other widget's position is
+        needed.
+        """
+        xi, yi, ni = self.axes[plane]
+        active = {'origin': np.asarray(position, dtype=float),
+                  'x_axis': self.matrix[:, xi],
+                  'y_axis': self.matrix[:, yi],
+                  'normal': self.matrix[:, ni],
+                  'spacing': (self.spacing[xi], self.spacing[yi])}
+
+        lines = {}
+        for other in ('Axial', 'Coronal', 'Sagittal'):
+            if other == plane:
+                continue
+
+            oxi, oyi, oni = self.axes[other]
+            crossing = {'origin': self.crosshair,
+                        'x_axis': self.matrix[:, oxi],
+                        'y_axis': self.matrix[:, oyi],
+                        'normal': self.matrix[:, oni],
+                        'spacing': (self.spacing[oxi], self.spacing[oyi])}
+
+            line = self._intersection_line(active, crossing)
+            if line is not None:
+                lines[other] = line
+
+        return lines
+
     def pivot_position(self, position, R):
         """
         Repositions one widget's origin around self.rotation_center using incremental rotation R (from
@@ -249,14 +249,6 @@ class Display(object):
         position = np.asarray(position, dtype=float)
 
         return R.dot(position - self.rotation_center) + self.rotation_center
-
-    def publish_position(self, plane, position):
-        """
-        Widget calls this whenever its own position changes (after scroll, after pivot_position, etc), so other
-        widgets/compute_slice_lines can see it without needing direct references to each other.
-        """
-
-        self._positions[plane] = np.asarray(position, dtype=float)
 
     def set_rotation_center(self, center):
         """Call when the user picks a new pivot (click, ROI centroid, a Rigid instance's target center, etc)."""
@@ -276,7 +268,7 @@ class Display(object):
 
         return R
 
-    def wheel_position(self, plane, position, steps=1):
+    def wheel_position(self, plane, position, steps=1, main=True):
         """
         Moves `position` (widget's own top-left origin) along `plane`'s CURRENT normal by `steps` voxels, and moves
         the shared crosshair by the same delta, so scrolling one plane correctly shifts the
@@ -289,7 +281,12 @@ class Display(object):
 
         self.crosshair = self.crosshair + delta
 
-        return np.asarray(position, dtype=float) + delta
+        new_position = np.asarray(position, dtype=float) + delta
+        if main:
+            self.position = new_position
+
+        return new_position
+
 
 class Image(object):
     """
@@ -1041,8 +1038,8 @@ class Image(object):
         """
 
         axes = {'Axial':    (0, 1, 2),
-                'Coronal':  (0, 2, 1),
-                'Sagittal': (1, 2, 0)}
+                'Sagittal': (1, 2, 0),
+                'Coronal':  (0, 2, 1)}
 
         xi, yi, ni = axes[plane]
         dims = self.dimensions  # (z, y, x)
@@ -1142,6 +1139,8 @@ class Image(object):
         position_to_pixel_matrix = np.identity(4, dtype=np.float32)
         position_to_pixel_matrix[:3, :3] = hold_matrix
         position_to_pixel_matrix[:3, 3] = np.asarray(self.origin).dot(-hold_matrix.T)
+
+        return position_to_pixel_matrix
 
     def get_aspect(self, slice_plane):
         """
@@ -1272,7 +1271,6 @@ class Image(object):
         None
         """
         self.display.matrix = np.eye(3)
-        self.display._positions = {}
         self.display.rotation_center = np.asarray(self.get_center(), dtype=float)
 
     def retrieve_angles(self, order='ZXY'):
