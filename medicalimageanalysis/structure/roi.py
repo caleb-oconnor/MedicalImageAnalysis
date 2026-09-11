@@ -99,7 +99,7 @@ class Roi(object):
 
         if position is not None:
             self.contour_position = position
-            self.contour_pixel = self.convert_position_to_pixel(position)
+            self.contour_pixel = self.convert_position_to_pixel(position, base=True)
         else:
             self.contour_position = None
             self.contour_pixel = None
@@ -161,29 +161,33 @@ class Roi(object):
         self.visual = {'2d': None, '3d': None, 'opacity': None, 'multicolor': None}
         self.misc = {}
 
-    def convert_position_to_pixel(self, position=None):
-        """
-        Convert world coordinates (positions) to image pixel indexes.
+    def convert_position_to_pixel(self, points, base=True, plane=None, origin=None):
+        if base:
+            position_to_pixel_matrix = self.image.compute_matrix_position_to_pixel()
+            pixel = []
+            for pos in points:
+                p_concat = np.concatenate((pos, np.ones((pos.shape[0], 1))), axis=1)
+                pixel_3_axis = p_concat.dot(position_to_pixel_matrix.T)[:, :3]
+                pixel += [np.vstack((pixel_3_axis, pixel_3_axis[0, :]))]
 
-        Parameters
-        ----------
-        position : list of numpy.ndarray, optional
-            A list of spatial position profiles to be converted.
+            return pixel
 
-        Returns
-        -------
-        list of numpy.ndarray
-            A list of array points translated into the pixel grid coordinate space.
-        """
-        position_to_pixel_matrix = self.image.display.compute_matrix_position_to_pixel()
+        else:
+            axes = {'Axial': (0, 1, 2), 'Sagittal': (1, 2, 0), 'Coronal': (0, 2, 1)}
+            xi, yi, ni = axes[plane]
+            m = self.image.display.matrix
+            x_axis, y_axis = m[:, xi], m[:, yi]
+            sx, sy = self.image.spacing[xi], self.image.spacing[yi]
 
-        pixel = []
-        for ii, pos in enumerate(position):
-            p_concat = np.concatenate((pos, np.ones((pos.shape[0], 1))), axis=1)
-            pixel_3_axis = p_concat.dot(position_to_pixel_matrix.T)[:, :3]
-            pixel += [np.vstack((pixel_3_axis, pixel_3_axis[0, :]))]
+            pixel = []
+            for pos in points:
+                v = np.asarray(pos) - np.asarray(origin)
+                col = v.dot(x_axis) / sx
+                row = v.dot(y_axis) / sy
+                xy = np.stack([col, row], axis=-1)
+                pixel += [np.vstack((xy, xy[0, :]))]
 
-        return pixel
+            return pixel
 
     def convert_pixel_to_position(self, pixel=None):
         """
@@ -199,7 +203,7 @@ class Roi(object):
         list of numpy.ndarray
             The physical coordinates corresponding to the pixel indexes.
         """
-        pixel_to_position_matrix = self.image.display.compute_matrix_pixel_to_position()
+        pixel_to_position_matrix = self.image.compute_matrix_pixel_to_position()
 
         position = []
         for ii, pix in enumerate(pixel):
@@ -442,14 +446,14 @@ class Roi(object):
 
         return mask.mask
 
-    def compute_mesh_slice(self, location=None, slice_plane=None, offset=0, return_pixel=False):
+    def compute_mesh_slice(self, origin=None, slice_plane=None, offset=0, return_pixel=False):
         """
         Slice the internal 3D mesh volume along an orthogonal viewing section.
 
         Parameters
         ----------
-        location : float/list, optional
-            The exact 3D location positioning context mapping the cross-section plane.
+        origin : float/list, optional
+            The exact 3D origin positioning context mapping the cross-section plane.
         slice_plane : str, optional
             Target orientation plane ('Axial', 'Coronal', or 'Sagittal').
         offset : int/float, default 0
@@ -468,35 +472,28 @@ class Roi(object):
         elif self.cutter is None:
             self.cutter = MeshToContour(self.mesh)
 
-        matrix = np.linalg.inv(self.image.display.matrix)
-        if slice_plane == 'Axial':
-            normal = matrix[:3, 2]
-        elif slice_plane == 'Coronal':
-            normal = matrix[:3, 1]
-        else:
-            normal = matrix[:3, 0]
+        axes = {'Axial': (0, 1, 2), 'Sagittal': (1, 2, 0), 'Coronal': (0, 2, 1)}
+        xi, yi, ni = axes[slice_plane]
+        m = self.image.display.matrix
+        x_axis, y_axis, normal = m[:, xi], m[:, yi], m[:, ni]
 
         # Execute fast inverse-plane slicing using cached cutter
         rotation_matrix = np.identity(4)  # the rotation matrix is really for slicing in rigid
-        roi_slice = self.cutter.slice_transformed(normal=normal, origin=location, matrix=rotation_matrix)
+        roi_slice = self.cutter.slice_transformed(normal=normal, origin=origin, matrix=rotation_matrix)
 
         colors = None
         if return_pixel:
             if roi_slice.number_of_points > 0:
                 roi_strip = roi_slice.strip(max_length=10000000)
                 position = [np.asarray(c.points) for c in roi_strip.cell]
-                pixels = self.convert_position_to_pixel(position=position)
+
+                sx, sy = self.image.spacing[xi], self.image.spacing[yi]
                 pixel_corrected = []
-                for pixel in pixels:
-                    if slice_plane == 'Axial':
-                        pixel_reshape = pixel[:, :2] + offset
-                        pixel_corrected += [np.asarray([pixel_reshape[:, 0], pixel_reshape[:, 1]]).T]
-                    elif slice_plane == 'Coronal':
-                        pixel_reshape = np.column_stack((pixel[:, 0] + offset, pixel[:, 2] + offset))
-                        pixel_corrected += [pixel_reshape]
-                    else:
-                        pixel_reshape = pixel[:, 1:] + offset
-                        pixel_corrected += [pixel_reshape]
+                for pts in position:
+                    v = pts - np.asarray(origin)
+                    col = v.dot(x_axis) / sx + offset
+                    row = v.dot(y_axis) / sy + offset
+                    pixel_corrected += [np.stack([col, row], axis=-1)]
 
                 return pixel_corrected, colors
             else:
