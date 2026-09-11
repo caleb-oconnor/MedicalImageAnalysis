@@ -16,6 +16,7 @@ Structure:
 
 import os
 import copy
+import time
 import blosc2
 import pickle
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -25,6 +26,7 @@ import pandas as pd
 import pyvista as pv
 import SimpleITK as sitk
 
+from numba import njit, prange
 from scipy.spatial.transform import Rotation
 
 import vtk
@@ -38,11 +40,79 @@ from .roi import Roi
 from ..data import Data
 
 
+@njit(parallel=True, fastmath=True, nogil=True, cache=True)
+def _fused_oblique_sample_kernel(volume, h, w, sx, sy,
+                                 ox, oy, oz,  # slice top-left origin (world)
+                                 xax0, xax1, xax2,  # slice x_axis (unit vector, world)
+                                 yax0, yax1, yax2,  # slice y_axis (unit vector, world)
+                                 img_ox, img_oy, img_oz,  # image.origin (world)
+                                 Minv,  # 3x3, image.matrix inverse (== transpose)
+                                 isp0, isp1, isp2,  # image voxel spacing (i, j, k)
+                                 background):
+    """
+    Does EVERYTHING in one pass per output pixel: builds the world-space sampling
+    point, projects it into the volume's own (possibly oblique) voxel space, and
+    trilinearly samples -- all as scalar math inside the compiled loop. No
+    intermediate numpy arrays (mesh_u, world_x, rel_x, ijk_i, coords_x, ...) are
+    ever materialized. Each of those used to be a separate numpy call; on some
+    machines each such call carries ~1ms of fixed overhead (temp allocation +
+    dispatch) regardless of array size, and ~20 of them per slice was the actual
+    bottleneck -- not the interpolation itself.
+    """
+    out = np.empty((h, w), dtype=np.float32)
+    nz, ny, nx = volume.shape
+    for i in prange(h):
+        v = i * sy
+        for j in range(w):
+            u = j * sx
+
+            wx = ox + u * xax0 + v * yax0
+            wy = oy + u * xax1 + v * yax1
+            wz = oz + u * xax2 + v * yax2
+
+            rx = wx - img_ox
+            ry = wy - img_oy
+            rz = wz - img_oz
+
+            ii = (Minv[0, 0] * rx + Minv[0, 1] * ry + Minv[0, 2] * rz) / isp0
+            jj = (Minv[1, 0] * rx + Minv[1, 1] * ry + Minv[1, 2] * rz) / isp1
+            kk = (Minv[2, 0] * rx + Minv[2, 1] * ry + Minv[2, 2] * rz) / isp2
+
+            if kk < 0 or kk >= nz - 1 or jj < 0 or jj >= ny - 1 or ii < 0 or ii >= nx - 1:
+                out[i, j] = background
+                continue
+
+            z0 = int(kk);
+            y0 = int(jj);
+            x0 = int(ii)
+            z1, y1, x1 = z0 + 1, y0 + 1, x0 + 1
+            fz, fy, fx = kk - z0, jj - y0, ii - x0
+
+            c000 = volume[z0, y0, x0];
+            c001 = volume[z0, y0, x1]
+            c010 = volume[z0, y1, x0];
+            c011 = volume[z0, y1, x1]
+            c100 = volume[z1, y0, x0];
+            c101 = volume[z1, y0, x1]
+            c110 = volume[z1, y1, x0];
+            c111 = volume[z1, y1, x1]
+            c00 = c000 * (1 - fx) + c001 * fx;
+            c01 = c010 * (1 - fx) + c011 * fx
+            c10 = c100 * (1 - fx) + c101 * fx;
+            c11 = c110 * (1 - fx) + c111 * fx
+            c0 = c00 * (1 - fy) + c01 * fy;
+            c1 = c10 * (1 - fy) + c11 * fy
+            out[i, j] = c0 * (1 - fz) + c1 * fz
+    return out
+
+
 class Display(object):
     def __init__(self, image):
         self.image = image
         self.matrix = np.eye(3)
         self.spacing = copy.deepcopy(image.spacing)
+
+        self.rotation_totals = np.zeros(3)
         self.rotation_center = np.asarray(image.get_center(), dtype=float)
         self.crosshair = self.rotation_center.copy()
 
@@ -53,15 +123,17 @@ class Display(object):
                      'Sagittal': (1, 2, 0),
                      'Coronal':  (0, 2, 1)}
 
-        self.vtk_image = None
-        self._build_vtk_image()
+        # Native direction matrix is orthonormal -> inverse == transpose. Cache it,
+        # plus float32 versions of everything the fused kernel needs as scalars, once.
+        self._image_matrix_inv_f32 = np.linalg.inv(self.image.matrix).astype(np.float32)
+        self._image_origin_f32 = self.image.origin.astype(np.float32)
+        self._image_spacing_f32 = self.image.spacing.astype(np.float32)
 
-        self.reslice = vtk.vtkImageReslice()
-        self.reslice.SetInputData(self.vtk_image)
-        self.reslice.SetOutputDimensionality(2)
-        self.reslice.SetInterpolationModeToLinear()
-        self.reslice.AutoCropOutputOn()  # never crop, any orientation
-        self.reslice.SetBackgroundLevel(-3001)
+        # Fixed per-plane oblique output pixel grid (H, W).
+        nz, ny, nx = self.image.array.shape
+        self.oblique_shape = {'Axial': (ny, nx), 'Sagittal': (nz, ny), 'Coronal': (nz, nx)}
+
+        self._warm_up_kernel()
 
     @staticmethod
     def _axes_from_normal(normal, up=(0.0, 1.0, 0.0)):
@@ -80,18 +152,19 @@ class Display(object):
 
         return np.stack([x_axis, y_axis, normal], axis=1)   # columns = (x, y, normal)
 
-    def _build_vtk_image(self):
-        """Shallow-wraps self.array into a vtkImageData. Zero-copy — self.array
-        must stay alive for the lifetime of this object (it does, via self.array)."""
-        matrix_reshape = self.matrix.reshape(1, 9)[0]
+    @staticmethod
+    def _build_vtk_slice_image(array_2d, origin_3d, direction_matrix_3x3, spacing_2d):
+        vtk_img = vtk.vtkImageData()
 
-        vtk_image = vtk.vtkImageData()
-        vtk_image.SetSpacing(self.spacing)
-        vtk_image.SetDirectionMatrix(matrix_reshape)
-        vtk_image.SetDimensions(np.flip(self.image.array.shape))
-        vtk_image.SetOrigin(self.image.origin)
-        vtk_image.GetPointData().SetScalars(numpy_support.numpy_to_vtk( self.image.array.ravel(order="C"), deep=False))
-        self.vtk_image = vtk_image
+        h, w = array_2d.shape
+        vtk_img.SetDimensions(w, h, 1)
+        vtk_img.SetSpacing(spacing_2d[0], spacing_2d[1], 1.0)
+        vtk_img.SetOrigin(origin_3d[0], origin_3d[1], origin_3d[2])
+        vtk_img.SetDirectionMatrix(direction_matrix_3x3.ravel())
+        vtk_scalars = numpy_support.numpy_to_vtk(array_2d.ravel(order="C"), deep=False, array_type=vtk.VTK_FLOAT)
+        vtk_img.GetPointData().SetScalars(vtk_scalars)
+
+        return vtk_img
 
     def _compute_plane_geometry_for_lines(self, plane):
         """
@@ -112,11 +185,11 @@ class Display(object):
         pixel = self.image.compute_pixel(position)
         x_idx, y_idx, z_idx = (int(round(pixel[0])), int(round(pixel[1])), int(round(pixel[2])))
 
-        if plane == 'Axial' and 0 <= z_idx <= self.image.array.shape[0]:
+        if plane == 'Axial' and 0 <= z_idx < self.image.array.shape[0]:
             return self.image.array[z_idx, :, :]
-        elif plane == 'Coronal' and 0 <= y_idx <= self.image.array.shape[1]:
+        elif plane == 'Coronal' and 0 <= y_idx < self.image.array.shape[1]:
             return self.image.array[:, y_idx, :]
-        elif  0 <= x_idx <= self.image.array.shape[2]:
+        elif  0 <= x_idx < self.image.array.shape[2]:
             return self.image.array[:, :, x_idx]
 
         return None
@@ -143,53 +216,97 @@ class Display(object):
 
         return {'pos': (col0, row0), 'angle': np.degrees(np.arctan2(drow, dcol))}
 
-    def compute_array(self, plane, position, matrix_override=None, as_array=True, as_vtk=False, copy_array=False,
-                  force_reslice=False):
+    def _warm_up_kernel(self):
         """
-        plane, position supplied by the caller each call. Orientation comes from self.matrix (shared) unless
-        matrix_override is given.
+        Numba JIT-compiles a separate specialization per input dtype (int16 vs float32 vs whatever). Trigger that
+        compile now, on a throwaway 2x2 array of the SAME dtype as the real volume, so the ~1-1.5s one-time cost happens
+        at construction instead of on the user's first scroll/rotate.
+        """
+        dummy_vol = np.zeros((2, 2, 2), dtype=self.image.array.dtype)
+        Minv = self._image_matrix_inv_f32
+        _fused_oblique_sample_kernel(
+            dummy_vol, 2, 2, np.float32(1), np.float32(1),
+            np.float32(0), np.float32(0), np.float32(0),
+            np.float32(1), np.float32(0), np.float32(0),
+            np.float32(0), np.float32(1), np.float32(0),
+            np.float32(0), np.float32(0), np.float32(0),
+            Minv, np.float32(1), np.float32(1), np.float32(1), 0.0)
+
+    def compute_array(self, plane, position, matrix_override=None, as_array=True, as_vtk=False,
+                      copy_array=False, force_reslice=False, background=-3001.0):
+        """
+        plane, position supplied by the caller each call. Orientation comes from self.matrix
+        (shared) unless matrix_override is given.
         """
         m = matrix_override if matrix_override is not None else self.matrix
-        is_identity = np.allclose(m, np.eye(3), atol=1e-6)
+        is_identity = (np.allclose(self.image.matrix, np.eye(3), atol=1e-6) and
+                       np.allclose(m, np.eye(3), atol=1e-6))
 
         if is_identity and not force_reslice:
             arr = self._get_axis_aligned_array(plane, position)
-            result = {'dimensions': (arr.shape[1], arr.shape[0]), 'spacing': self.spacing}
+            arr_shape = arr.shape
+            if plane == 'Axial':
+                dim = [arr_shape[1], arr_shape[0], 1]
+            elif plane == 'Sagittal':
+                dim = [1, arr_shape[1], arr_shape[0]]
+            else:
+                dim = [arr_shape[1], 1, arr_shape[0]]
+            result = {'dimensions': dim, 'spacing': self.spacing}
+
             if as_array:
                 result['array'] = arr.copy() if copy_array else arr
+
+            if as_vtk:
+                matrix_reshape = np.linalg.inv(self.image.matrix).reshape(1, 9)[0]
+
+                vtk_out = vtk.vtkImageData()
+                vtk_out.SetSpacing(self.image.spacing)
+                vtk_out.SetDirectionMatrix(matrix_reshape)
+                vtk_out.SetDimensions(dim)
+                vtk_out.SetOrigin(position)
+                vtk_out.GetPointData().SetScalars(numpy_support.numpy_to_vtk(arr.flatten(order="C")))
+
+                result['vtk_image'] = vtk_out
+
             return result
 
+        xi, yi, ni = self.axes[plane]
         geom = self.compute_plane_geometry(plane, position, matrix_override=m)
-        axes = vtk.vtkMatrix4x4()
-        axes.Identity()
-        for col, vec in enumerate((geom['x_axis'], geom['y_axis'], geom['normal'])):
-            axes.SetElement(0, col, vec[0]); axes.SetElement(1, col, vec[1]); axes.SetElement(2, col, vec[2])
-        axes.SetElement(0, 3, geom['origin'][0]); axes.SetElement(1, 3, geom['origin'][1]); axes.SetElement(2, 3, geom['origin'][2])
+        x_axis = geom['x_axis'].astype(np.float32)
+        y_axis = geom['y_axis'].astype(np.float32)
+        origin = geom['origin'].astype(np.float32)
+        sx, sy = np.float32(self.spacing[xi]), np.float32(self.spacing[yi])
+        h, w = self.oblique_shape[plane]
 
-        self.reslice.SetResliceAxes(axes)
-        self.reslice.SetOutputSpacing(*self.spacing)
-        self.reslice.Update()
+        arr = _fused_oblique_sample_kernel(
+            self.image.array, h, w, sx, sy,
+            origin[0], origin[1], origin[2],
+            x_axis[0], x_axis[1], x_axis[2],
+            y_axis[0], y_axis[1], y_axis[2],
+            self._image_origin_f32[0], self._image_origin_f32[1], self._image_origin_f32[2],
+            self._image_matrix_inv_f32,
+            self._image_spacing_f32[0], self._image_spacing_f32[1], self._image_spacing_f32[2],
+            background)
 
-        output = self.reslice.GetOutput()
-        dims = output.GetDimensions()
-        scalars = output.GetPointData().GetScalars()
-        if scalars is None or 0 in dims:
-            return None   # plane doesn't intersect the volume
-
-        result = {'dimensions': (dims[0], dims[1]),
-                  'spacing': self.spacing,
-                  'x_axis': geom['x_axis'],
-                  'y_axis': geom['y_axis'],
-                  'normal': geom['normal'],
-                  'origin': geom['origin']}
-
+        result = {'dimensions': (w, h), 'spacing': self.spacing,
+                  'x_axis': x_axis, 'y_axis': y_axis, 'normal': geom['normal'], 'origin': origin}
         if as_array:
-            arr = numpy_support.vtk_to_numpy(scalars).reshape(dims[1], dims[0])
-            result['array'] = arr.copy() if copy else arr
+            result['array'] = arr.copy() if copy_array else arr
 
         if as_vtk:
             vtk_out = vtk.vtkImageData()
-            vtk_out.DeepCopy(output)
+            vtk_out.SetSpacing(sx, sy, 1.0)
+            vtk_out.SetDimensions(w, h, 1)
+            vtk_out.SetOrigin(*origin)
+
+            direction = np.eye(3)
+            direction[:, 0] = x_axis
+            direction[:, 1] = y_axis
+            direction[:, 2] = geom['normal']
+            vtk_out.SetDirectionMatrix(direction.reshape(1, 9)[0])
+
+            vtk_out.GetPointData().SetScalars(numpy_support.numpy_to_vtk(arr.ravel(order="C")))
+
             result['vtk_image'] = vtk_out
 
         return result
@@ -255,35 +372,55 @@ class Display(object):
         self.rotation_center = np.asarray(center, dtype=float)
         self.crosshair = self.rotation_center.copy()
 
-    def update_rotation(self, r_x=0, r_y=0, r_z=0):
+    def update_rotation(self, r_x=0, r_y=0, r_z=0, absolute=True):
         """
-        Rotates the SHARED matrix (affects every plane) and pivots the shared crosshair around rotation_center using
-        this increment.
+        Rotates the SHARED matrix (affects every plane) and pivots the shared crosshair
+        and every plane's position around rotation_center to match. Returns the
+        incremental R actually applied this call (old orientation -> new orientation).
 
-        Returns incremental R so callers can pivot their own widget positions the same way.
+        absolute=False (default): r_x/r_y/r_z are INCREMENTAL deltas on top of the
+        current rotation_totals.
+        absolute=True: r_x/r_y/r_z are the TOTAL desired angle for each axis (e.g. read
+        straight off a slider that holds its absolute position).
+
+        Either way, self.matrix is recomputed FRESH from self.rotation_totals against
+        self._base_matrix every call -- NOT accumulated by repeatedly multiplying a
+        delta onto the previous matrix. This matters because 3D rotations about
+        different axes don't commute: if you'd instead multiplied deltas on top of each
+        other call after call, the resulting orientation for a given (pitch, yaw, roll)
+        triple would depend on the exact sequence of prior moves that got you there --
+        e.g. rotating roll, yaw, roll again, pitch, then setting all three sliders back
+        to (0, 0, 0) would NOT land back on the original orientation, since the "undo"
+        deltas don't retrace the forward path in reverse. Recomputing from the absolute
+        totals every time makes (0, 0, 0) always mean exactly self._base_matrix,
+        regardless of path.
         """
-        R = Rotation.from_euler('xyz', [r_x, r_y, r_z], degrees=True).as_matrix()
-        self.matrix = R @ self.matrix
+        if absolute:
+            self.rotation_totals = np.array([r_x, r_y, r_z], dtype=float)
+        else:
+            self.rotation_totals = self.rotation_totals + np.array([r_x, r_y, r_z], dtype=float)
+
+        old_matrix = self.matrix
+        new_matrix = Rotation.from_euler('xyz', self.rotation_totals, degrees=True).as_matrix()
+        # old_matrix is a pure rotation matrix (orthonormal) -> inverse == transpose.
+        R = new_matrix @ old_matrix.T
+
+        self.matrix = new_matrix
         self.crosshair = R.dot(self.crosshair - self.rotation_center) + self.rotation_center
+        for plane in self.position:
+            self.position[plane] = self.pivot_position(self.position[plane], R)
 
         return R
 
     def wheel_position(self, plane, position, steps=1, main=True):
-        """
-        Moves `position` (widget's own top-left origin) along `plane`'s CURRENT normal by `steps` voxels, and moves
-        the shared crosshair by the same delta, so scrolling one plane correctly shifts the
-        intersection lines on the other two.
-        """
         _, _, ni = self.axes[plane]
         normal = self.matrix[:, ni]
         normal_hat = normal / np.linalg.norm(normal)
         delta = normal_hat * self.spacing[ni] * steps
-
         self.crosshair = self.crosshair + delta
-
         new_position = np.asarray(position, dtype=float) + delta
         if main:
-            self.position = new_position
+            self.position[plane] = new_position
 
         return new_position
 
@@ -302,7 +439,7 @@ class Image(object):
         self.pois = {}
 
         self.tags = image.image_set
-        self.array = image.array
+        self.array = np.ascontiguousarray(image.array)
         self.array_dtype = str(self.array.dtype)
 
         self.image_name = image.image_name
