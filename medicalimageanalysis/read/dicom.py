@@ -1713,13 +1713,16 @@ class ReadRTStruct(object):
         str
             SeriesInstanceUID of referenced image.
         """
-        ref = self.image_set.ReferencedFrameOfReferenceSequence
+        if 'ReferencedFrameOfReferenceSequence' in self.image_set:
+            ref = self.image_set.ReferencedFrameOfReferenceSequence
 
-        return ref[0][
-            'RTReferencedStudySequence'
-        ][0][
-            'RTReferencedSeriesSequence'
-        ][0]['SeriesInstanceUID'].value
+            return ref[0]['RTReferencedStudySequence'][0]['RTReferencedSeriesSequence'][0]['SeriesInstanceUID'].value
+
+        elif 'SeriesInstanceUID' in self.image_set:
+            return self.image_set.SeriesInstanceUID
+
+        else:
+            return None
 
     def _get_properties(self):
         """
