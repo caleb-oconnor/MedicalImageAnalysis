@@ -114,6 +114,7 @@ class Roi(object):
         self.bounds = None
 
         self.fixed_name = False
+        self.rotation_center = None
         self.visual = {'2d': None, '3d': None, 'opacity': None, 'multicolor': None}
         self.misc = {}
 
@@ -474,8 +475,8 @@ class Roi(object):
 
         axes = {'Axial': (0, 1, 2), 'Sagittal': (1, 2, 0), 'Coronal': (0, 2, 1)}
         xi, yi, ni = axes[slice_plane]
-        m = self.image.display.matrix
-        x_axis, y_axis, normal = m[:, xi], m[:, yi], m[:, ni]
+        m = self.image.matrix @ self.image.display.matrix.T
+        x_axis, y_axis, normal = m[xi], m[yi], m[ni]
 
         # Execute fast inverse-plane slicing using cached cutter
         rotation_matrix = np.identity(4)  # the rotation matrix is really for slicing in rigid

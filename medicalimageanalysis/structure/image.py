@@ -125,7 +125,7 @@ class Display(object):
 
         # Native direction matrix is orthonormal -> inverse == transpose. Cache it,
         # plus float32 versions of everything the fused kernel needs as scalars, once.
-        self._image_matrix_inv_f32 = np.linalg.inv(self.image.matrix).astype(np.float32)
+        self._image_matrix_f32 = self.image.matrix.astype(np.float32)
         self._image_origin_f32 = self.image.origin.astype(np.float32)
         self._image_spacing_f32 = self.image.spacing.astype(np.float32)
 
@@ -174,12 +174,12 @@ class Display(object):
         """
 
         xi, yi, ni = self.axes[plane]
-
+        effective = self.image.matrix @ self.matrix.T
         return {'origin': self.rotation_center,
-                'x_axis': self.matrix[:, xi],
-                'y_axis': self.matrix[:, yi],
-                'normal': self.matrix[:, ni],
-                'spacing': self.spacing }
+                'x_axis': effective[xi],
+                'y_axis': effective[yi],
+                'normal': effective[ni],
+                'spacing': self.spacing}
 
     def _get_axis_aligned_array(self, plane, position):
         pixel = self.image.compute_pixel(position)
@@ -223,14 +223,14 @@ class Display(object):
         at construction instead of on the user's first scroll/rotate.
         """
         dummy_vol = np.zeros((2, 2, 2), dtype=self.image.array.dtype)
-        Minv = self._image_matrix_inv_f32
+        M = self._image_matrix_f32
         _fused_oblique_sample_kernel(
             dummy_vol, 2, 2, np.float32(1), np.float32(1),
             np.float32(0), np.float32(0), np.float32(0),
             np.float32(1), np.float32(0), np.float32(0),
             np.float32(0), np.float32(1), np.float32(0),
             np.float32(0), np.float32(0), np.float32(0),
-            Minv, np.float32(1), np.float32(1), np.float32(1), 0.0)
+            M, np.float32(1), np.float32(1), np.float32(1), 0.0)
 
     def compute_array(self, plane, position, matrix_override=None, as_array=True, as_vtk=False,
                       copy_array=False, force_reslice=False, background=-3001.0):
@@ -284,7 +284,7 @@ class Display(object):
             x_axis[0], x_axis[1], x_axis[2],
             y_axis[0], y_axis[1], y_axis[2],
             self._image_origin_f32[0], self._image_origin_f32[1], self._image_origin_f32[2],
-            self._image_matrix_inv_f32,
+            self._image_matrix_f32,
             self._image_spacing_f32[0], self._image_spacing_f32[1], self._image_spacing_f32[2],
             background)
 
@@ -318,39 +318,30 @@ class Display(object):
         """
 
         m = matrix_override if matrix_override is not None else self.matrix
+        effective = self.image.matrix @ m.T
         xi, yi, ni = self.axes[plane]
 
         return {'origin': np.asarray(position, dtype=float),
-                'x_axis': m[:, xi],
-                'y_axis': m[:, yi],
-                'normal': m[:, ni],
-                'spacing': self.spacing,}
+                'x_axis': effective[xi],
+                'y_axis': effective[yi],
+                'normal': effective[ni],
+                'spacing': self.spacing}
 
     def compute_slice_lines(self, plane, position):
-        """
-        position : THIS plane's own top-left origin (for correct pixel conversion of the line into this widget's
-        coordinates). The crossing planes are defined via the SHARED crosshair + matrix no other widget's position is
-        needed.
-        """
         xi, yi, ni = self.axes[plane]
+        effective = self.image.matrix @ self.matrix.T
         active = {'origin': np.asarray(position, dtype=float),
-                  'x_axis': self.matrix[:, xi],
-                  'y_axis': self.matrix[:, yi],
-                  'normal': self.matrix[:, ni],
+                  'x_axis': effective[xi], 'y_axis': effective[yi], 'normal': effective[ni],
                   'spacing': (self.spacing[xi], self.spacing[yi])}
 
         lines = {}
         for other in ('Axial', 'Coronal', 'Sagittal'):
             if other == plane:
                 continue
-
             oxi, oyi, oni = self.axes[other]
             crossing = {'origin': self.crosshair,
-                        'x_axis': self.matrix[:, oxi],
-                        'y_axis': self.matrix[:, oyi],
-                        'normal': self.matrix[:, oni],
+                        'x_axis': effective[oxi], 'y_axis': effective[oyi], 'normal': effective[oni],
                         'spacing': (self.spacing[oxi], self.spacing[oyi])}
-
             line = self._intersection_line(active, crossing)
             if line is not None:
                 lines[other] = line
@@ -413,14 +404,15 @@ class Display(object):
         return R
 
     def wheel_position(self, plane, position, steps=1, main=True):
-        _, _, ni = self.axes[plane]
-        normal = self.matrix[:, ni]
+        xi, yi, ni = self.axes[plane]
+        effective = self.image.matrix @ self.matrix.T
+        normal = effective[ni]  # row, not effective[:, ni]
         normal_hat = normal / np.linalg.norm(normal)
         delta = normal_hat * self.spacing[ni] * steps
-        self.crosshair = self.crosshair + delta
         new_position = np.asarray(position, dtype=float) + delta
         if main:
             self.position[plane] = new_position
+            self.crosshair = self.crosshair + delta
 
         return new_position
 
@@ -1355,28 +1347,6 @@ class Image(object):
                 return [pixel_index[2], pixel_index[1], pixel_index[0]]
             else:
                 return pixel_index
-
-    def get_corner_positions(self):
-        """
-        Calculates explicit 3D physical location tracking positions for the eight bounding volume corners.
-
-        Returns
-        -------
-        list of tuple
-            A list containing eight distinct length-3 coordinate measurement tuples.
-        """
-        x_min, x_max, y_min, y_max, z_min, z_max = self.display.vtk_image.GetBounds()
-
-        corner_points = [(x_min, y_min, z_min),
-                         (x_max, y_min, z_min),
-                         (x_max, y_max, z_min),
-                         (x_min, y_max, z_min),
-                         (x_min, y_min, z_max),
-                         (x_max, y_min, z_max),
-                         (x_max, y_max, z_max),
-                         (x_min, y_max, z_max)]
-
-        return corner_points
 
     def get_corner_sides(self):
         """
