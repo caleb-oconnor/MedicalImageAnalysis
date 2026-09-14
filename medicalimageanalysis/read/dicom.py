@@ -466,7 +466,7 @@ class DicomReader(object):
         """
         for modality in list(self.ds_modality.keys()):
             images_in_modality = [d for d in self.ds if (0x0008, 0x0016) in d
-                                  if get_modality(d[0x0008, 0x0016].value)[0] in modality]
+                                  if get_modality(d[0x0008, 0x0016].value)[0] == modality]
 
             if len(images_in_modality) > 0 and modality in self.only_modality:
                 if modality in ['US', 'DX', 'RF', 'CR', 'RTSTRUCT', 'REG', 'RTDOSE']:
