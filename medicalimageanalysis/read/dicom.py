@@ -848,7 +848,7 @@ class Read3D(object):
             first_last_spacing = np.asarray((last - first) / (len(self.image_set) - 1))
             if np.abs((second - first) - first_last_spacing) > 0.01:
                 if not self.only_tags:
-                    self._find_skipped_slices(slice_direction)
+                    self._find_skipped_slices()
                 slice_thickness = second - first
             else:
                 slice_thickness = np.asarray((last - first) / (len(self.image_set) - 1))
