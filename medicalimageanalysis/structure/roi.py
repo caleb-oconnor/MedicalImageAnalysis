@@ -447,7 +447,7 @@ class Roi(object):
 
         return mask.mask
 
-    def compute_mesh_slice(self, origin=None, slice_plane=None, offset=0, return_pixel=False):
+    def compute_mesh_slice(self, origin=None, slice_plane=None, offset=0, rigid_matrix=None, return_pixel=False):
         """
         Slice the internal 3D mesh volume along an orthogonal viewing section.
 
@@ -459,6 +459,8 @@ class Roi(object):
             Target orientation plane ('Axial', 'Coronal', or 'Sagittal').
         offset : int/float, default 0
             Padding vector adjustments applied to output indexing paths.
+        rigid_matrix: 4x4 numpy array
+            Lets you slice based on a rigid registration
         return_pixel : bool, default False
             If True, calculates and formats structural data outputs as pixel indexes.
 
@@ -475,12 +477,14 @@ class Roi(object):
 
         axes = {'Axial': (0, 1, 2), 'Sagittal': (1, 2, 0), 'Coronal': (0, 2, 1)}
         xi, yi, ni = axes[slice_plane]
-        m = self.image.matrix @ self.image.display.matrix.T
+
+        rigid_matrix = rigid_matrix if rigid_matrix is not None else np.eye(4)
+        m = self.image.matrix @ rigid_matrix[:3, :3].T @ self.image.display.matrix.T
         x_axis, y_axis, normal = m[xi], m[yi], m[ni]
 
         # Execute fast inverse-plane slicing using cached cutter
         rotation_matrix = np.identity(4)  # the rotation matrix is really for slicing in rigid
-        roi_slice = self.cutter.slice_transformed(normal=normal, origin=origin, matrix=rotation_matrix)
+        roi_slice = self.cutter.slice_transformed(normal=normal, origin=origin, matrix=rigid_matrix)
 
         colors = None
         if return_pixel:

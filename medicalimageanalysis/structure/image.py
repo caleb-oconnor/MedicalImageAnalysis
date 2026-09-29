@@ -232,13 +232,14 @@ class Display(object):
             np.float32(0), np.float32(0), np.float32(0),
             M, np.float32(1), np.float32(1), np.float32(1), 0.0)
 
-    def compute_array(self, plane, position, matrix_override=None, as_array=True, as_vtk=False,
+    def compute_array(self, plane, position, matrix_override=None, rigid_matrix=None, as_array=True, as_vtk=False,
                       copy_array=False, force_reslice=False, background=-3001.0):
         """
         plane, position supplied by the caller each call. Orientation comes from self.matrix
         (shared) unless matrix_override is given.
         """
         m = matrix_override if matrix_override is not None else self.matrix
+        rigid_matrix = rigid_matrix if rigid_matrix is not None else np.eye(4)
         is_identity = (np.allclose(self.image.matrix, np.eye(3), atol=1e-6) and
                        np.allclose(m, np.eye(3), atol=1e-6))
 
@@ -271,20 +272,27 @@ class Display(object):
             return result
 
         xi, yi, ni = self.axes[plane]
-        geom = self.compute_plane_geometry(plane, position, matrix_override=m)
+        geom = self.compute_plane_geometry(plane, position, matrix_override=m, rigid_matrix=rigid_matrix)
         x_axis = geom['x_axis'].astype(np.float32)
         y_axis = geom['y_axis'].astype(np.float32)
         origin = geom['origin'].astype(np.float32)
         sx, sy = np.float32(self.spacing[xi]), np.float32(self.spacing[yi])
         h, w = self.oblique_shape[plane]
 
+        # Fold R^-1 into Minv/img_origin ONCE per call instead of per-pixel:
+        # native = R_rot.T @ (world - R_trans); r = native - img_origin
+        #        = (Minv @ R_rot.T) . world - (Minv @ R_rot.T) . (R_trans + img_origin_asvec)...
+        Rrot, Rtrans = rigid_matrix[:3, :3], rigid_matrix[:3, 3]
+        Mcomb = (self._image_matrix_f32.astype(np.float64) @ Rrot.T).astype(np.float32)
+        origin_comb = (Rrot @ self._image_origin_f32.astype(np.float64) + Rtrans).astype(np.float32)
+
         arr = _fused_oblique_sample_kernel(
             self.image.array, h, w, sx, sy,
             origin[0], origin[1], origin[2],
             x_axis[0], x_axis[1], x_axis[2],
             y_axis[0], y_axis[1], y_axis[2],
-            self._image_origin_f32[0], self._image_origin_f32[1], self._image_origin_f32[2],
-            self._image_matrix_f32,
+            origin_comb[0], origin_comb[1], origin_comb[2],
+            Mcomb,
             self._image_spacing_f32[0], self._image_spacing_f32[1], self._image_spacing_f32[2],
             background)
 
@@ -311,14 +319,15 @@ class Display(object):
 
         return result
 
-    def compute_plane_geometry(self, plane, position, matrix_override=None):
+    def compute_plane_geometry(self, plane, position, matrix_override=None, rigid_matrix=None):
         """
         Used by get_slice: position = this plane's actual reslice origin (top-left corner), needed to place the VTK
         output correctly.
         """
 
         m = matrix_override if matrix_override is not None else self.matrix
-        effective = self.image.matrix @ m.T
+        rigid_matrix = rigid_matrix if rigid_matrix is not None else np.eye(4)
+        effective = self.image.matrix @ rigid_matrix[:3, :3].T @ m.T
         xi, yi, ni = self.axes[plane]
 
         return {'origin': np.asarray(position, dtype=float),
