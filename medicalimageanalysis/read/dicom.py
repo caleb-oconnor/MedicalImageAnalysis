@@ -1749,42 +1749,26 @@ class ReadRTStruct(object):
         if 'ROIContourSequence' in self.image_set:
 
             for ii, s in enumerate(self.image_set.ROIContourSequence):
-
-                if hasattr(
-                    self.image_set.StructureSetROISequence[ii],
-                    'ROIName'
-                ):
-
+                if hasattr(self.image_set.StructureSetROISequence[ii], 'ROIName'):
                     if hasattr(s, 'ContourSequence') and len(s.ContourSequence) > 0:
-
-                        tracker.append(ii)
-                        names.append(
-                            self.image_set.StructureSetROISequence[ii].ROIName
-                        )
-
-                        geometric.append(
-                            s.ContourSequence[0].ContourGeometricType
-                        )
+                        geom = s.ContourSequence[0].ContourGeometricType
 
                         slice_sop = []
-
-                        if geometric[-1].lower() == 'closed_planar':
-
+                        if geom.lower() == 'closed_planar':
                             for seq in s.ContourSequence:
-                                slice_sop.append(
-                                    seq.ContourImageSequence[0]
-                                    .ReferencedSOPInstanceUID
-                                )
+                                slice_sop.append(seq.ContourImageSequence[0].ReferencedSOPInstanceUID)
 
                         else:
                             if hasattr(s.ContourSequence[0], 'ContourImageSequence'):
-                                slice_sop = [
-                                    s.ContourSequence[0]
-                                    .ContourImageSequence[0]
-                                    .ReferencedSOPInstanceUID
-                                ]
+                                slice_sop = [s.ContourSequence[0].ContourImageSequence[0].ReferencedSOPInstanceUID]
 
-                        sop.append(slice_sop)
+                        if len(slice_sop) == 0:
+                            continue
+
+                        tracker += [ii]
+                        names += [self.image_set.StructureSetROISequence[ii].ROIName]
+                        geometric += [geom]
+                        sop += [slice_sop]
 
                         if hasattr(s, 'ROIDisplayColor'):
                             colors.append(s.ROIDisplayColor)
@@ -1795,10 +1779,7 @@ class ReadRTStruct(object):
                                 np.random.randint(0, 256)
                             ])
 
-        return [
-            [tracker[i], names[i], colors[i], geometric[i], sop[i]]
-            for i in range(len(names))
-        ]
+        return [[tracker[i], names[i], colors[i], geometric[i], sop[i]] for i in range(len(names))]
 
     def _match_with_image(self):
         """
