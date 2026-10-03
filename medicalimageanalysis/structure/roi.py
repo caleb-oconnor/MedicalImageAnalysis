@@ -21,7 +21,8 @@ import SimpleITK as sitk
 
 
 from ..utils.mesh.surface import Refinement, compute_components
-from ..utils.convert.contour import ContourToDiscreteMesh, ContourToMask, MaskToContour, MeshToContour
+from ..utils.roi.to_mesh import contours_to_mesh
+from ..utils.roi.converters import ContourToDiscreteMesh, ContourToMask, MaskToContour, MeshToContour
 
 
 def random_color(rgb_255=True):
@@ -213,35 +214,18 @@ class Roi(object):
 
         return position
 
-    def create_mesh(self, smoothing_iterations=20, smoothing_relaxation=.5, smoothing_distance=1):
+    def create_mesh(self):
         """
         Generate a smoothed 3D surface mesh from the current pixel contours.
-
-        Parameters
-        ----------
-        smoothing_iterations : int, default 20
-            The total number of iterative smoothing steps to apply to the geometry.
-        smoothing_relaxation : float, default 0.5
-            Relaxation factor controlling structural changes during smoothing.
-        smoothing_distance : float/int, default 1
-            Maximum movement/distance constraints for the mesh smoothing step.
 
         Returns
         -------
         None
         """
-        meshing = ContourToDiscreteMesh(contour_pixel=self.contour_pixel,
-                                        spacing=self.image.spacing,
-                                        origin=self.image.origin,
-                                        dimensions=self.image.dimensions,
-                                        matrix=self.image.matrix,
-                                        plane=self.plane)
-        self.mesh = meshing.compute_mesh(smoothing_iterations=smoothing_iterations,
-                                         smoothing_relaxation=smoothing_relaxation,
-                                         smoothing_distance=smoothing_distance)
-        self.volume = self.mesh.volume
-        self.com = self.mesh.center
-        self.bounds = self.mesh.bounds
+        self.mesh = contours_to_mesh(self.contour_position,
+                                     self.image.origin,
+                                     self.image.spacing,
+                                     self.image.matrix)
 
     def create_discrete_mesh(self):
         """
