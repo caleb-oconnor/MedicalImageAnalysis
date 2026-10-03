@@ -47,7 +47,6 @@ Usage:
 
 """
 
-import copy
 import time
 import hashlib
 import threading
@@ -55,7 +54,6 @@ import itertools
 
 import numpy as np
 import pydicom as dicom
-from pydicom.uid import generate_uid
 from pydicom.pixels import apply_color_lut
 
 from ..structure.deformable import Deformable
@@ -400,7 +398,7 @@ class DicomReader(object):
         self.only_modality = (
             only_modality
             if only_modality is not None
-            else ['CT', 'MR', 'PT', 'US', 'DX', 'RF', 'CR', 'RTSTRUCT', 'REG', 'RTDOSE']
+            else ['CT', 'MR', 'PT', 'US', 'DX', 'RF', 'TOMOSYNTHESIS', 'CR', 'RTSTRUCT', 'REG', 'RTDOSE']
         )
 
         if clear:
@@ -469,7 +467,7 @@ class DicomReader(object):
                                   if get_modality(d[0x0008, 0x0016].value)[0] == modality]
 
             if len(images_in_modality) > 0 and modality in self.only_modality:
-                if modality in ['US', 'DX', 'RF', 'CR', 'RTSTRUCT', 'REG', 'RTDOSE']:
+                if modality in ['US', 'DX', 'RF', 'CR', 'TOMOSYNTHESIS', 'RTSTRUCT', 'REG', 'RTDOSE']:
                     for image in images_in_modality:
                         self.ds_modality[modality] += [image]
 
@@ -634,12 +632,12 @@ class DicomReader(object):
         - REG / RTDOSE → specialized readers
         """
 
-        for modality in ['CT', 'MR', 'PT', 'DX', 'RF', 'CR', 'US']:
+        for modality in self.only_modality:
             for image_set in self.ds_modality[modality]:
                 if modality in ['CT', 'MR', 'PT']:
                     Read3D(image_set, self.only_tags)
 
-                elif modality in ['DX', 'CR']:
+                elif modality in ['DX', 'CR', 'TOMOSYNTHESIS']:
                     ReadXRay(image_set, self.only_tags)
 
                 elif modality == 'RF':
@@ -741,6 +739,14 @@ class Read3D(object):
         self.missing_slices = []
         self.duplicate_frames = []
         self.rgb = False
+
+        self._stack_perm = None
+        self._stack_flips = None
+        self.origin = None
+        self.spacing = None
+        self.dimensions = None
+        self.orientation = None
+        self.image_matrix = None
 
         # --- metadata ---
         self.modality = self.image_set[0].Modality
@@ -1005,7 +1011,7 @@ class Read3D(object):
         row = self.acquisition_orientation[:3]
         col = self.acquisition_orientation[3:]
         normal = np.cross(row, col)
-        pixel_spacing = self._compute_pixel_spacing()
+        pixel_spacing = self.compute_pixel_spacing()
 
         # stacked axes: 0 = slices (normal), 1 = rows (column dir), 2 = columns (row dir)
         axis_dirs = np.stack([normal, col, row])
