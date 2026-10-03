@@ -31,19 +31,31 @@ class ICP(object):
     Performs Iterative Closest Point (ICP) registration between a source and a target mesh or point cloud. Supports
     both VTK-based and Open3D-based ICP implementations.
     """
-    def __init__(self, source, target, matrix=None):
+    def __init__(self, source: pv.PolyData, target: pv.PolyData, matrix: np.ndarray | None = None):
         """
         Initializes the ICP object.
 
         Parameters
         ----------
-        source : pyvista.PolyData or point cloud
-            The moving/source mesh or point cloud to align.
-        target : pyvista.PolyData or point cloud
-            The reference/target mesh or point cloud.
-        matrix : np.ndarray, optional
-            Initial 4x4 transformation matrix. Defaults to None (identity).
+        source : pyvista.PolyData
+            The moving/source mesh to align.
+        target : pyvista.PolyData
+            The reference/target mesh.
+        matrix : (4, 4) ndarray, optional
+            Initial transformation matrix. Defaults to identity.
+
+        Raises
+        ------
+        TypeError
+            If source or target is not a pyvista.PolyData.
+        ValueError
+            If matrix is not 4x4.
         """
+
+        for name, mesh in (('source', source), ('target', target)):
+            if not isinstance(mesh, pv.PolyData):
+                raise TypeError(f"{name} must be a pyvista.PolyData, got {type(mesh).__name__}")
+
         self.source = source
         self.target = target
 
@@ -191,11 +203,11 @@ class ICP(object):
         criteria = ICPConvergenceCriteria(max_iteration=iterations,
                                           relative_rmse=rmse,
                                           relative_fitness=fitness)
+
         estimator = (TransformationEstimationPointToPoint() if method == 'point'
                      else TransformationEstimationPointToPlane())
 
-        self.icp = registration_icp(ref_pcd, mov_pcd, distance, initial_transform,
-                                    estimator, criteria)
+        self.icp = registration_icp(ref_pcd, mov_pcd, distance, initial_transform, estimator, criteria)
 
         self.matrix = np.linalg.inv(self.icp.transformation) if inverse else self.icp.transformation
 
