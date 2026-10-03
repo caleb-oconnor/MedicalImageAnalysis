@@ -291,21 +291,6 @@ def read_dicoms(
 
     """
 
-    # Default supported modalities
-    if only_modality is None:
-        only_modality = [
-            'CT',
-            'MR',
-            'PT',
-            'US',
-            'DX',
-            'RF',
-            'CR',
-            'RTSTRUCT',
-            'REG',
-            'RTDOSE',
-        ]
-
     files = None
 
     # Parse files from folder or provided file list
