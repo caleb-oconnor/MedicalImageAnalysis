@@ -81,6 +81,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+import pyvista as pv
+
 import vtk
 import fast_simplification
 from scipy import ndimage
@@ -734,7 +736,7 @@ def postprocess(P, T, reduction=0.5, smooth_iters=0, passband=0.1, method="auto"
 
 
 def _to_polydata(P, T):
-    """Convert NumPy point/triangle arrays into ``vtkPolyData``."""
+    """Convert NumPy point/triangle arrays into ``vtkPolyData`` then convert to pyvista polydata."""
     pd = vtk.vtkPolyData()
     pts = vtk.vtkPoints()
     pts.SetData(nps.numpy_to_vtk(np.ascontiguousarray(P, dtype=np.float64), deep=True))
@@ -744,7 +746,7 @@ def _to_polydata(P, T):
                   nps.numpy_to_vtkIdTypeArray(np.ascontiguousarray(T, dtype=np.int64).ravel(), deep=True))
     pd.SetPoints(pts)
     pd.SetPolys(cells)
-    return pd
+    return pv.wrap(pd)
 
 
 def _from_polydata(pd):
@@ -765,7 +767,7 @@ class AdaptiveContourToMesh:
 
     def __init__(self, frame, slice_spacing, m=1, h=None, c=None, gap_factor=1.5,
                  post=True, reduction=0.5, smooth_iters=0, method="auto",
-                 workers=-1, as_polydata=True, mid='auto', flat_caps=False,
+                 workers=1, as_polydata=True, mid='auto', flat_caps=False,
                  cap_radius=None):
         self.frame = frame
         self.slice_spacing = float(slice_spacing)
@@ -1127,7 +1129,7 @@ def auto_h(slices, frame, k=0.013, h_min=0.5, h_max=2.5, max_voxels=4e6):
 
 def contours_to_mesh(slices, frame, slice_spacing, m=1, h=None, c=None, gap_factor=1.5,
                      post=True, reduction=0.5, smooth_iters=0, method="auto",
-                     workers=-1, as_polydata=True, mid='auto', flat_caps=False, cap_radius=None):
+                     workers=1, as_polydata=True, mid='auto', flat_caps=False, cap_radius=None):
     """One-shot user API for contour -> mesh.
 
     Parameters are intentionally close to the underlying algorithm:
