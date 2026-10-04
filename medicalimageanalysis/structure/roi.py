@@ -214,7 +214,7 @@ class Roi(object):
 
         return position
 
-    def create_mesh(self):
+    def create_mesh(self, reduction=0):
         """
         Generate a smoothed 3D surface mesh from the current pixel contours.
 
@@ -225,7 +225,13 @@ class Roi(object):
         self.mesh = contours_to_mesh(self.contour_position,
                                      self.image.origin,
                                      self.image.spacing,
-                                     self.image.matrix)
+                                     self.image.matrix,
+                                     reduction=reduction)
+
+        if self.mesh is None:
+            self.volume = self.mesh.volume
+            self.com = self.mesh.center
+            self.bounds = self.mesh.bounds
 
     def create_discrete_mesh(self):
         """
@@ -431,7 +437,7 @@ class Roi(object):
 
         return mask.mask
 
-    def compute_mesh_slice(self, origin=None, slice_plane=None, offset=0, rigid_matrix=None, return_pixel=False):
+    def compute_mesh_slice(self, origin=None, plane=None, offset=0, rigid_matrix=None, return_pixel=False):
         """
         Slice the internal 3D mesh volume along an orthogonal viewing section.
 
@@ -439,7 +445,7 @@ class Roi(object):
         ----------
         origin : float/list, optional
             The exact 3D origin positioning context mapping the cross-section plane.
-        slice_plane : str, optional
+        plane : str, optional
             Target orientation plane ('Axial', 'Coronal', or 'Sagittal').
         offset : int/float, default 0
             Padding vector adjustments applied to output indexing paths.
@@ -460,14 +466,13 @@ class Roi(object):
             self.cutter = MeshToContour(self.mesh)
 
         axes = {'Axial': (0, 1, 2), 'Sagittal': (1, 2, 0), 'Coronal': (0, 2, 1)}
-        xi, yi, ni = axes[slice_plane]
+        xi, yi, ni = axes[plane]
 
         rigid_matrix = rigid_matrix if rigid_matrix is not None else np.eye(4)
         m = self.image.matrix @ rigid_matrix[:3, :3].T @ self.image.display.matrix.T
         x_axis, y_axis, normal = m[xi], m[yi], m[ni]
 
         # Execute fast inverse-plane slicing using cached cutter
-        rotation_matrix = np.identity(4)  # the rotation matrix is really for slicing in rigid
         roi_slice = self.cutter.slice_transformed(normal=normal, origin=origin, matrix=rigid_matrix)
 
         colors = None
@@ -476,7 +481,7 @@ class Roi(object):
                 roi_strip = roi_slice.strip(max_length=10000000)
                 position = [np.asarray(c.points) for c in roi_strip.cell]
 
-                sx, sy = self.image.spacing[xi], self.image.spacing[yi]
+                sx, sy = self.image.display.spacing[xi], self.image.display.spacing[yi]
                 pixel_corrected = []
                 for pts in position:
                     v = pts - np.asarray(origin)
@@ -539,7 +544,7 @@ class Roi(object):
             self.com = None
             self.bounds = None
 
-    def update_pixel(self, pixel, plane='Axial'):
+    def update_pixel(self, pixel, plane='Axial', ):
         """
         Manually assign a new configuration of pixel layers and regenerate corresponding meshes.
 
@@ -559,9 +564,7 @@ class Roi(object):
 
         if pixel is not None and len(pixel) > 0:
             self.contour_position = self.convert_pixel_to_position(pixel=pixel)
-
-            self.create_discrete_mesh()
-            self.create_display_mesh()
+            self.create_mesh()
         else:
             self.contour_pixel = None
             self.contour_position = None
