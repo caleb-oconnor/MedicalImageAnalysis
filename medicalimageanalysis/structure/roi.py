@@ -228,7 +228,7 @@ class Roi(object):
                                      self.image.matrix,
                                      reduction=reduction)
 
-        if self.mesh is None:
+        if self.mesh is not None:
             self.volume = self.mesh.volume
             self.com = self.mesh.center
             self.bounds = self.mesh.bounds

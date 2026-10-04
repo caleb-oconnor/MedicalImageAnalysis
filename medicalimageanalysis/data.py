@@ -123,14 +123,14 @@ class Data(object):
             3. Injects missing ROI definitions into images that lack them,
                preserving visual consistency across the session.
         """
-        roi_names = list(Data.roi_list)
+        roi_names = list(cls.roi_list)
 
         for image_name in cls.image:
             for roi_name in cls.image[image_name].rois:
                 if roi_name not in roi_names:
                     roi_names.append(roi_name)
 
-        Data.roi_list = roi_names
+        cls.roi_list = roi_names
 
         # Determine authoritative color/visibility for each ROI
         color = [[128, 128, 128] for _ in roi_names]
@@ -168,7 +168,7 @@ class Data(object):
         """
         image_pois = [list(cls.image[image_name].pois.keys()) for image_name in list(cls.image.keys())]
         poi_names = list({x for r in image_pois for x in r})
-        Data.poi_list = poi_names
+        cls.poi_list = poi_names
 
         color = [[128, 128, 128]] * len(poi_names)
         visible = [False] * len(poi_names)
