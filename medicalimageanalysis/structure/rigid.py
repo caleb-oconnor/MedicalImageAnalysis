@@ -98,8 +98,8 @@ class Rigid(object):
     def _rigid_inv(mat):
         """Exact inverse of a rigid 4x4 (avoids drift from repeated np.linalg.inv)."""
         inv = np.identity(4)
-        inv[:3, :3] = mat[:3, :3].mat
-        inv[:3, 3] = -mat[:3, :3].mat @ mat[:3, 3]
+        inv[:3, :3] = mat[:3, :3].T
+        inv[:3, 3] = -mat[:3, :3].T @ mat[:3, 3]
         return inv
 
     def add_rigid(self, rigid_name):
@@ -136,14 +136,27 @@ class Rigid(object):
 
         return rigid_name
 
-    def compute_array(self, plane, position, **kwargs):
+    def compute_array(self, plane, position, use_moving_spacing=False):
         """
-        Reslice current_mov through its own Display with the registration applied. position is in the displayed
-        (current_ref) world. kwargs pass through to Display.compute_array(as_array, as_vtk, copy_array, background, matrix_override).
+        Same call as Display.compute_array: plane + the widget's position (top-left corner of the
+        reference view). Returns the moved image sampled onto the reference view, plus 'scale'.
         """
-        display = Data.image[self.current_mov].display
+        base = Data.image[self.current_ref].display    # image the view is built on
+        mover = Data.image[self.current_mov].display   # image being moved
 
-        return display.compute_array(plane, position, rigid_matrix=self.get_display_matrix(), **kwargs)
+        ref_grid = base.get_grid(plane, position)
+        grid = ref_grid
+        if use_moving_spacing:
+            xi, yi, _ = mover.axes[plane]
+            grid = mover.grid_with_spacing(ref_grid, mover.spacing[xi], mover.spacing[yi])
+
+        res = mover.compute_array(plane, position, rigid_matrix=self.get_display_matrix(), grid=grid)
+        if res is None:
+            return None
+        res['scale'] = (grid['sx'] / ref_grid['sx'], grid['sy'] / ref_grid['sy'])
+        res['pixel_offset'] = (0.0, 0.0)
+
+        return res
 
     def compute_aspect(self, plane):
         """
@@ -197,7 +210,7 @@ class Rigid(object):
         if center == 'image':
             R_icp = np.asarray(icp.get_matrix(), dtype=float)
             old_center = np.array([0, 0, 0], dtype=float)
-            new_center = np.array(Data.image[self.moving_name].compute_center(), dtype=float)
+            new_center = np.array(Data.image[self.moving_name].get_center(), dtype=float)
 
             T_neg = np.eye(4)
             T_neg[:3, 3] = -new_center
@@ -263,7 +276,7 @@ class Rigid(object):
         if center == 'image':
             R_icp = np.asarray(icp.get_matrix(), dtype=float)
             old_center = np.array([0, 0, 0], dtype=float)
-            new_center = np.array(Data.image[self.moving_name].compute_center(), dtype=float)
+            new_center = np.array(Data.image[self.moving_name].get_center(), dtype=float)
 
             T_neg = np.eye(4)
             T_neg[:3, 3] = -new_center
@@ -373,19 +386,17 @@ class Rigid(object):
 
     def get_center(self, plane=None, position=None):
         """
-        Pivot: current_mov's center as displayed, projected onto the active slice plane.
+        Pivot: current_mov's center as displayed, projected onto the active slice plane (when given).
         """
         A = self.get_display_matrix()
-        native_center = np.asarray(Data.image[self.current_mov].compute_center(), dtype=float)
+        native_center = np.asarray(Data.image[self.current_mov].get_center(), dtype=float)
         center = A[:3, :3] @ native_center + A[:3, 3]
 
         if plane is None or position is None:
             return center
 
-        display = Data.image[self.current_mov].display
-        normal = display.compute_plane_geometry(plane, position, rigid_matrix=A)['normal']
+        normal = Data.image[self.current_ref].display.compute_plane_geometry(plane, position)['normal']
         n_hat = normal / np.linalg.norm(normal)
-
         return center - np.dot(center - np.asarray(position, dtype=float), n_hat) * n_hat
 
     def get_combined_matrix(self):
@@ -402,6 +413,13 @@ class Rigid(object):
         combined = self.get_combined_matrix()
 
         return combined if self.inverse else self._rigid_inv(combined)
+
+    def get_view_center(self, plane, position):
+        """Pivot in the widget's view coords (pixel centers at integers, matching the -0.5 placement)."""
+        grid = Data.image[self.current_ref].display.get_grid(plane, position)
+        d = self.get_center(plane, position) - grid['origin']
+
+        return float(d @ grid['x_axis']) / grid['sx'], float(d @ grid['y_axis']) / grid['sy']
 
     def get_vtk_matrix(self):
         """
@@ -505,17 +523,25 @@ class Rigid(object):
         else:
             self.current_ref, self.current_mov = self.reference_name, self.moving_name
 
-    def update_rotation(self, center=None, r_x=0, r_y=0, r_z=0, plane=None, position=None):
+    def update_rotation(self, center=None, r_x=0, r_y=0, r_z=0, plane=None, position=None,
+                        axis=None, angle=None):
+        """
+        Rotate about center (default: pivot on the current slice). Either Euler r_x/r_y/r_z (world axes, degrees),
+        or axis + angle (degrees) to rotate about an arbitrary world axis, e.g. an oblique view's normal.
+        """
         if center is None:
             center = self.get_center(plane=plane, position=position)
         center = np.asarray(center, dtype=float)
 
         R = np.identity(4)
-        R[:3, :3] = Rotation.from_euler('xyz', [r_x, r_y, r_z], degrees=True).as_matrix()
+        if axis is not None:
+            axis = np.asarray(axis, dtype=float)
+            R[:3, :3] = Rotation.from_rotvec(np.radians(angle) * axis / np.linalg.norm(axis)).as_matrix()
+        else:
+            R[:3, :3] = Rotation.from_euler('xyz', [r_x, r_y, r_z], degrees=True).as_matrix()
 
         T_neg = np.identity(4)
         T_neg[:3, 3] = -center
-
         T_pos = np.identity(4)
         T_pos[:3, 3] = center
 

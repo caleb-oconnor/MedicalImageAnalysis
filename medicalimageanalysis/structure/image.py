@@ -45,19 +45,13 @@ def _fused_oblique_sample_kernel(volume, h, w, sx, sy,
                                  ox, oy, oz,  # slice top-left origin (world)
                                  xax0, xax1, xax2,  # slice x_axis (unit vector, world)
                                  yax0, yax1, yax2,  # slice y_axis (unit vector, world)
-                                 img_ox, img_oy, img_oz,  # image.origin (world)
-                                 Minv,  # 3x3, image.matrix inverse (== transpose)
+                                 img_ox, img_oy, img_oz,  # image.origin (world), rigid already folded in
+                                 Minv,  # 3x3 world->index rotation (rows = index axes in world), rigid folded in
                                  isp0, isp1, isp2,  # image voxel spacing (i, j, k)
                                  background):
     """
-    Does EVERYTHING in one pass per output pixel: builds the world-space sampling
-    point, projects it into the volume's own (possibly oblique) voxel space, and
-    trilinearly samples -- all as scalar math inside the compiled loop. No
-    intermediate numpy arrays (mesh_u, world_x, rel_x, ijk_i, coords_x, ...) are
-    ever materialized. Each of those used to be a separate numpy call; on some
-    machines each such call carries ~1ms of fixed overhead (temp allocation +
-    dispatch) regardless of array size, and ~20 of them per slice was the actual
-    bottleneck -- not the interpolation itself.
+    One pass per output pixel: builds the world-space sampling point, maps it into the volume's own voxel space, and
+    trilinearly samples, all as scalar math inside the compiled loop (no intermediate numpy arrays).
     """
     out = np.empty((h, w), dtype=np.float32)
     nz, ny, nx = volume.shape
@@ -78,29 +72,30 @@ def _fused_oblique_sample_kernel(volume, h, w, sx, sy,
             jj = (Minv[1, 0] * rx + Minv[1, 1] * ry + Minv[1, 2] * rz) / isp1
             kk = (Minv[2, 0] * rx + Minv[2, 1] * ry + Minv[2, 2] * rz) / isp2
 
-            if kk < 0 or kk >= nz - 1 or jj < 0 or jj >= ny - 1 or ii < 0 or ii >= nx - 1:
+            if kk < 0 or kk > nz - 1 or jj < 0 or jj > ny - 1 or ii < 0 or ii > nx - 1:
                 out[i, j] = background
                 continue
 
-            z0 = int(kk);
-            y0 = int(jj);
-            x0 = int(ii)
+            # clamp so the last voxel is sampled (f == n-1 -> t == 1.0) and i0+1 stays in bounds
+            z0 = min(int(kk), nz - 2)
+            y0 = min(int(jj), ny - 2)
+            x0 = min(int(ii), nx - 2)
             z1, y1, x1 = z0 + 1, y0 + 1, x0 + 1
             fz, fy, fx = kk - z0, jj - y0, ii - x0
 
-            c000 = volume[z0, y0, x0];
+            c000 = volume[z0, y0, x0]
             c001 = volume[z0, y0, x1]
-            c010 = volume[z0, y1, x0];
+            c010 = volume[z0, y1, x0]
             c011 = volume[z0, y1, x1]
-            c100 = volume[z1, y0, x0];
+            c100 = volume[z1, y0, x0]
             c101 = volume[z1, y0, x1]
-            c110 = volume[z1, y1, x0];
+            c110 = volume[z1, y1, x0]
             c111 = volume[z1, y1, x1]
-            c00 = c000 * (1 - fx) + c001 * fx;
+            c00 = c000 * (1 - fx) + c001 * fx
             c01 = c010 * (1 - fx) + c011 * fx
-            c10 = c100 * (1 - fx) + c101 * fx;
+            c10 = c100 * (1 - fx) + c101 * fx
             c11 = c110 * (1 - fx) + c111 * fx
-            c0 = c00 * (1 - fy) + c01 * fy;
+            c0 = c00 * (1 - fy) + c01 * fy
             c1 = c10 * (1 - fy) + c11 * fy
             out[i, j] = c0 * (1 - fz) + c1 * fz
     return out
@@ -168,18 +163,16 @@ class Display(object):
 
     def _compute_plane_geometry_for_lines(self, plane):
         """
-        Used by compute_slice_lines: origin = rotation_center (the shared pivot every plane passes through), NOT the
-        widget's top-left reslice origin. x_axis/y_axis/normal still come live from self.matrix, so lines rotate
-        correctly with any applied rotation.
+        origin = rotation_center (the shared pivot every plane passes through), NOT the widget's top-left reslice
+        origin. x_axis/y_axis/normal come live from self.matrix, so lines rotate correctly with any applied rotation.
         """
-
         xi, yi, ni = self.axes[plane]
         effective = self.image.matrix @ self.matrix.T
         return {'origin': self.rotation_center,
                 'x_axis': effective[xi],
                 'y_axis': effective[yi],
                 'normal': effective[ni],
-                'spacing': self.spacing}
+                'spacing': (self.spacing[xi], self.spacing[yi])}
 
     def _get_axis_aligned_array(self, plane, position):
         pixel = self.image.compute_pixel(position)
@@ -232,19 +225,29 @@ class Display(object):
             np.float32(0), np.float32(0), np.float32(0),
             M, np.float32(1), np.float32(1), np.float32(1), 0.0)
 
-    def compute_array(self, plane, position, matrix_override=None, rigid_matrix=None, as_array=True, as_vtk=False,
-                      copy_array=False, force_reslice=False, background=-3001.0):
+    def compute_array(self, plane, position, matrix_override=None, rigid_matrix=None, grid=None, as_array=True,
+                      as_vtk=False, copy_array=False, force_reslice=False, background=-3001.0):
         """
-        plane, position supplied by the caller each call. Orientation comes from self.matrix
-        (shared) unless matrix_override is given.
+        plane, position supplied by the caller each call. Orientation comes from self.matrix (shared) unless
+        matrix_override is given. If grid is given (from a reference Display's get_grid / grid_with_spacing), it fully
+        defines the output pixels and this Display only supplies its volume (+ rigid_matrix).
         """
         m = matrix_override if matrix_override is not None else self.matrix
+        has_rigid = rigid_matrix is not None and not np.allclose(rigid_matrix, np.eye(4), atol=1e-9)
         rigid_matrix = rigid_matrix if rigid_matrix is not None else np.eye(4)
-        is_identity = (np.allclose(self.image.matrix, np.eye(3), atol=1e-6) and
+
+        xi, yi, ni = self.axes[plane]
+        d = np.asarray(position, dtype=float) - self.image.origin
+        on_native_grid = abs(d[xi]) < 1e-3 and abs(d[yi]) < 1e-3
+        is_identity = (grid is None and not has_rigid and on_native_grid and
+                       np.allclose(self.image.matrix, np.eye(3), atol=1e-6) and
                        np.allclose(m, np.eye(3), atol=1e-6))
 
         if is_identity and not force_reslice:
             arr = self._get_axis_aligned_array(plane, position)
+            if arr is None:
+                return None
+
             arr_shape = arr.shape
             if plane == 'Axial':
                 dim = [arr_shape[1], arr_shape[0], 1]
@@ -252,7 +255,8 @@ class Display(object):
                 dim = [1, arr_shape[1], arr_shape[0]]
             else:
                 dim = [arr_shape[1], 1, arr_shape[0]]
-            result = {'dimensions': dim, 'spacing': self.spacing}
+            result = {'dimensions': dim, 'spacing': self.spacing,
+                      'pixel_spacing': (float(self.spacing[xi]), float(self.spacing[yi]))}
 
             if as_array:
                 result['array'] = arr.copy() if copy_array else arr
@@ -271,17 +275,18 @@ class Display(object):
 
             return result
 
-        xi, yi, ni = self.axes[plane]
-        geom = self.compute_plane_geometry(plane, position, matrix_override=m, rigid_matrix=rigid_matrix)
-        x_axis = geom['x_axis'].astype(np.float32)
-        y_axis = geom['y_axis'].astype(np.float32)
-        origin = geom['origin'].astype(np.float32)
-        sx, sy = np.float32(self.spacing[xi]), np.float32(self.spacing[yi])
-        h, w = self.oblique_shape[plane]
+        if grid is None:
+            grid = self.get_grid(plane, position, matrix_override=m)
 
-        # Fold R^-1 into Minv/img_origin ONCE per call instead of per-pixel:
-        # native = R_rot.T @ (world - R_trans); r = native - img_origin
-        #        = (Minv @ R_rot.T) . world - (Minv @ R_rot.T) . (R_trans + img_origin_asvec)...
+        x_axis = grid['x_axis'].astype(np.float32)
+        y_axis = grid['y_axis'].astype(np.float32)
+        normal = grid['normal']
+        origin = grid['origin'].astype(np.float32)
+        sx, sy = np.float32(grid['sx']), np.float32(grid['sy'])   # keep float32: avoids a numba recompile
+        h, w = grid['shape']
+
+        # Fold R^-1 into the native mapping ONCE per call instead of per-pixel:
+        # sample this volume at R^-1 (world - t)  ->  index = (M @ R.T) . (world - (R @ img_origin + t))
         Rrot, Rtrans = rigid_matrix[:3, :3], rigid_matrix[:3, 3]
         Mcomb = (self._image_matrix_f32.astype(np.float64) @ Rrot.T).astype(np.float32)
         origin_comb = (Rrot @ self._image_origin_f32.astype(np.float64) + Rtrans).astype(np.float32)
@@ -296,8 +301,8 @@ class Display(object):
             self._image_spacing_f32[0], self._image_spacing_f32[1], self._image_spacing_f32[2],
             background)
 
-        result = {'dimensions': (w, h), 'spacing': self.spacing,
-                  'x_axis': x_axis, 'y_axis': y_axis, 'normal': geom['normal'], 'origin': origin}
+        result = {'dimensions': (w, h), 'spacing': self.spacing, 'pixel_spacing': (float(sx), float(sy)),
+                  'x_axis': x_axis, 'y_axis': y_axis, 'normal': normal, 'origin': origin, 'grid': grid}
         if as_array:
             result['array'] = arr.copy() if copy_array else arr
 
@@ -310,7 +315,7 @@ class Display(object):
             direction = np.eye(3)
             direction[:, 0] = x_axis
             direction[:, 1] = y_axis
-            direction[:, 2] = geom['normal']
+            direction[:, 2] = normal
             vtk_out.SetDirectionMatrix(direction.reshape(1, 9)[0])
 
             vtk_out.GetPointData().SetScalars(numpy_support.numpy_to_vtk(arr.ravel(order="C")))
@@ -319,15 +324,14 @@ class Display(object):
 
         return result
 
-    def compute_plane_geometry(self, plane, position, matrix_override=None, rigid_matrix=None):
+    def compute_plane_geometry(self, plane, position, matrix_override=None):
         """
         Used by get_slice: position = this plane's actual reslice origin (top-left corner), needed to place the VTK
         output correctly.
         """
 
         m = matrix_override if matrix_override is not None else self.matrix
-        rigid_matrix = rigid_matrix if rigid_matrix is not None else np.eye(4)
-        effective = self.image.matrix @ rigid_matrix[:3, :3].T @ m.T
+        effective = self.image.matrix @ m.T
         xi, yi, ni = self.axes[plane]
 
         return {'origin': np.asarray(position, dtype=float),
@@ -357,6 +361,27 @@ class Display(object):
 
         return lines
 
+    def get_grid(self, plane, position, matrix_override=None):
+        """Output pixel grid for this plane: corner, axes, in-plane spacing, shape. Plain dict."""
+        geom = self.compute_plane_geometry(plane, position, matrix_override=matrix_override)
+        xi, yi, _ = self.axes[plane]
+
+        return {'origin': geom['origin'], 'x_axis': geom['x_axis'], 'y_axis': geom['y_axis'],
+                'normal': geom['normal'],
+                'sx': float(self.spacing[xi]), 'sy': float(self.spacing[yi]),
+                'shape': tuple(self.oblique_shape[plane])}
+
+    @staticmethod
+    def grid_with_spacing(grid, sx, sy):
+        """Same corner, axes and physical extent as grid, different pixel size."""
+        h, w = grid['shape']
+        new = dict(grid)
+        new['sx'], new['sy'] = float(sx), float(sy)
+        new['shape'] = (int(np.floor((h - 1) * grid['sy'] / sy + 1e-6)) + 1,
+                        int(np.floor((w - 1) * grid['sx'] / sx + 1e-6)) + 1)
+
+        return new
+
     def pivot_position(self, position, R):
         """
         Repositions one widget's origin around self.rotation_center using incremental rotation R (from
@@ -374,26 +399,15 @@ class Display(object):
 
     def update_rotation(self, r_x=0, r_y=0, r_z=0, absolute=True):
         """
-        Rotates the SHARED matrix (affects every plane) and pivots the shared crosshair
-        and every plane's position around rotation_center to match. Returns the
-        incremental R actually applied this call (old orientation -> new orientation).
+        Rotates the SHARED matrix (affects every plane) and pivots the shared crosshair and every plane's position
+        around rotation_center to match. Returns the incremental R actually applied this call (old -> new orientation).
 
-        absolute=False (default): r_x/r_y/r_z are INCREMENTAL deltas on top of the
-        current rotation_totals.
-        absolute=True: r_x/r_y/r_z are the TOTAL desired angle for each axis (e.g. read
-        straight off a slider that holds its absolute position).
+        absolute=True (default): r_x/r_y/r_z are the TOTAL desired angle per axis (e.g. read straight off a slider).
+        absolute=False: r_x/r_y/r_z are INCREMENTAL deltas added to the current rotation_totals.
 
-        Either way, self.matrix is recomputed FRESH from self.rotation_totals against
-        self._base_matrix every call -- NOT accumulated by repeatedly multiplying a
-        delta onto the previous matrix. This matters because 3D rotations about
-        different axes don't commute: if you'd instead multiplied deltas on top of each
-        other call after call, the resulting orientation for a given (pitch, yaw, roll)
-        triple would depend on the exact sequence of prior moves that got you there --
-        e.g. rotating roll, yaw, roll again, pitch, then setting all three sliders back
-        to (0, 0, 0) would NOT land back on the original orientation, since the "undo"
-        deltas don't retrace the forward path in reverse. Recomputing from the absolute
-        totals every time makes (0, 0, 0) always mean exactly self._base_matrix,
-        regardless of path.
+        Either way, self.matrix is recomputed fresh from self.rotation_totals (Euler 'xyz', degrees), not accumulated
+        by multiplying deltas onto the previous matrix. Rotations about different axes don't commute, so accumulating
+        would make the orientation path-dependent; recomputing from totals makes (0, 0, 0) always the identity.
         """
         if absolute:
             self.rotation_totals = np.array([r_x, r_y, r_z], dtype=float)
@@ -402,8 +416,7 @@ class Display(object):
 
         old_matrix = self.matrix
         new_matrix = Rotation.from_euler('xyz', self.rotation_totals, degrees=True).as_matrix()
-        # old_matrix is a pure rotation matrix (orthonormal) -> inverse == transpose.
-        R = new_matrix @ old_matrix.T
+        R = new_matrix @ old_matrix.T  # old is orthonormal -> inverse == transpose
 
         self.matrix = new_matrix
         self.crosshair = R.dot(self.crosshair - self.rotation_center) + self.rotation_center
@@ -1183,7 +1196,7 @@ class Image(object):
         dims = self.dimensions  # (z, y, x)
 
         idx_xyz = np.zeros(3)
-        idx_xyz[ni] = dims[2 - ni] / 2  # center index along the through-plane axis
+        idx_xyz[ni] = int(np.round(dims[2 - ni] / 2))  # center index along the through-plane axis
         # xi/yi stay 0 -- top-left corner in-plane
 
         return self.compute_position(idx_xyz)
