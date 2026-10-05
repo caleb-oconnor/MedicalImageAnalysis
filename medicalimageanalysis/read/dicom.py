@@ -2023,6 +2023,16 @@ class ReadRTStruct:
                 self.structure_positions()
 
     @staticmethod
+    def _contour_values(raw):
+        """Return ContourData as a flat float array, whether pydicom decoded it or not."""
+        if isinstance(raw, (bytes, bytearray)):
+            raw = raw.decode("ascii", errors="ignore")
+        if isinstance(raw, str):
+            raw = [v for v in raw.strip("\x00 ").split("\\") if v.strip()]
+
+        return np.asarray(raw, dtype=float).ravel()
+
+    @staticmethod
     def _stable_color(name):
         """
         Deterministic fallback color derived from the ROI name.
@@ -2062,7 +2072,7 @@ class ReadRTStruct:
                 continue
 
             contours = [c for c in getattr(rc, "ContourSequence", [])
-                        if hasattr(c, "ContourData") and len(c.ContourData) >= 3]
+                        if hasattr(c, "ContourData") and self._contour_values(c.ContourData).size >= 3]
             if not contours:
                 continue
 
@@ -2150,7 +2160,10 @@ class ReadRTStruct:
                     continue
                 if str(c.ContourGeometricType).upper() != p["type"]:
                     continue
-                arrays.append(np.asarray(c.ContourData, dtype=float).reshape(-1, 3))
+                vals = self._contour_values(c.ContourData)
+                if vals.size % 3:
+                    continue  # malformed item; skip rather than crash
+                arrays.append(vals.reshape(-1, 3))
 
             if p["type"] == "POINT":
                 self.points.append(arrays[0])
