@@ -841,6 +841,14 @@ class Deformable(object):
         else:
             return mask
 
+    @property
+    def current_ref(self):
+        return self.reference_name
+
+    @property
+    def current_mov(self):
+        return self.moving_name
+
     def export_image(self, path=None):
         """
         Saves the transformed moving image to a specified file path.
