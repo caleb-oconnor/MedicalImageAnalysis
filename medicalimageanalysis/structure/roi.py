@@ -536,8 +536,7 @@ class Roi(object):
         self.contour_pixel, self.contour_position = mask_to_contour.create_contours()
 
         if len(self.contour_pixel) > 0:
-            self.create_discrete_mesh()
-            self.create_display_mesh()
+            self.create_mesh()
         else:
             self.mesh = None
             self.volume = None
