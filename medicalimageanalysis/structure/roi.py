@@ -225,7 +225,7 @@ class Roi(object):
         self.mesh = contours_to_mesh(self.contour_position,
                                      self.image.origin,
                                      self.image.spacing,
-                                     self.image.matrix,
+                                     np.asarray(self.image.matrix, float).T,
                                      reduction=reduction)
 
         if self.mesh is not None:
