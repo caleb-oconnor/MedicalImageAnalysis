@@ -523,6 +523,9 @@ class Rigid(object):
         else:
             self.current_ref, self.current_mov = self.reference_name, self.moving_name
 
+    def update_rois(self):
+        pass
+
     def update_rotation(self, center=None, r_x=0, r_y=0, r_z=0, plane=None, position=None,
                         axis=None, angle=None):
         """
