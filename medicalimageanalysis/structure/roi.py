@@ -21,6 +21,7 @@ import SimpleITK as sitk
 
 
 from ..utils.mesh.surface import Refinement, compute_components
+from ..utils.roi.to_mask import contours_to_mask
 from ..utils.roi.to_mesh import contours_to_mesh
 from ..utils.roi.converters import ContourToDiscreteMesh, ContourToMask, MaskToContour, MeshToContour
 
@@ -410,13 +411,9 @@ class Roi(object):
 
         return contour_list
 
-    def compute_mask(self, dimensions=None):
+    def compute_mask(self):
         """
         Generate a binary voxel index mask reflecting the active contour perimeter profile.
-
-        Parameters
-        ----------
-        dimensions - list of size in z, y, x order. Allows user to upsample or downsample mask
 
         Returns
         -------
@@ -424,18 +421,11 @@ class Roi(object):
             A binary segmentation volume masking the underlying dataset space.
         """
 
-        if dimensions is None:
-            dimensions = self.image.dimensions
-
-        mask = ContourToMask(contour_pixel=self.contour_pixel,
-                             spacing=self.image.spacing,
-                             origin=self.image.origin,
-                             dimensions=dimensions,
-                             matrix=self.image.matrix,
-                             plane=self.plane)
-        mask.compute_mask()
-
-        return mask.mask
+        return contours_to_mask(self.contour_position,
+                                self.image.dimensions,
+                                self.image.origin,
+                                self.image.spacing,
+                                np.asarray(self.image.matrix, float).T)
 
     def compute_mesh_slice(self, origin=None, plane=None, offset=0, rigid_matrix=None, return_pixel=False):
         """
