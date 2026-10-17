@@ -29,6 +29,7 @@ docutils==0.22.4
 et_xmlfile==2.0.0
 executing==2.2.0
 fastjsonschema==2.21.1
+fast_simplification==0.2.0
 Flask==3.1.2
 fonttools==4.56.0
 git-filter-repo==2.47.0
@@ -77,6 +78,7 @@ nest-asyncio==1.6.0
 networkx==3.6.1
 nh3==0.3.3
 nibabel==5.3.2
+numba==0.67.0
 numexpr==2.14.2
 numpy==2.4.2
 open3d==0.19.0
