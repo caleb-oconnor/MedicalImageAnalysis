@@ -29,6 +29,28 @@ def _to_u8(f, w):
     return np.rint(np.clip(0.5 - f / w, 0.0, 1.0) * 255).astype(np.uint8)
 
 
+def normalize_direction(direction, direction_rows=True):
+    """Return a column-oriented direction matrix for the core geometry routines.
+
+    The low-level contour/mesh algorithms expect a 3x3 matrix whose columns are the
+    image i, j, k axes in world coordinates. The ROI/image objects in this codebase store
+    their image matrix with those axes in the rows instead, so the public wrappers accept
+    the row-oriented matrix by default and normalize it here.
+
+    Parameters
+    ----------
+    direction : array-like, shape (3, 3)
+        Input image orientation matrix.
+    direction_rows : bool, default True
+        True when ``direction`` stores the image axes in its rows; False when it already
+        stores them in its columns.
+    """
+    D = np.asarray(direction, float)
+    if D.shape != (3, 3):
+        raise ValueError(f"direction must be a 3x3 matrix, got shape {D.shape}")
+    return D.T if direction_rows else D
+
+
 # =============================================================================== contours -> field volumes
 def _group(contours, origin, spacing, direction):
     """list of (n,3) world rings -> (slices dict, contour frame, contour slice spacing)."""

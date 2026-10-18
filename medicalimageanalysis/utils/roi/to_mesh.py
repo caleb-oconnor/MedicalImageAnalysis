@@ -14,7 +14,7 @@ import numpy as np
 
 from ._contourmesh import _finish, _to_polydata, postprocess
 from ._contourmesh import contours_to_mesh_regions as _mesh_regions
-from ._raster import _group, _region_volumes, volume_to_grid
+from ._raster import _group, _region_volumes, normalize_direction, volume_to_grid
 
 
 def _empty_mesh():
@@ -22,17 +22,21 @@ def _empty_mesh():
     return np.zeros((0, 3), np.float64), np.zeros((0, 3), np.int64)
 
 
-def contours_to_mesh(contours, origin, spacing, direction, reduction=0.5, as_polydata=True, **kw):
+def contours_to_mesh(contours, origin, spacing, direction, reduction=0.5,
+                     as_polydata=True, direction_rows=True, **kw):
     """Contours (list of (n,3) world arrays) -> closed surface mesh (vtkPolyData).
     Each separate region gets its own h; decimated once at the end.
     kw: _contourmesh options (m, c, gap_factor, pad, workers, mid, flat_caps, cap_radius)."""
+    direction = normalize_direction(direction, direction_rows=direction_rows)
     slices, frame, dz = _group(contours, origin, spacing, direction)
     return _mesh_regions(slices, frame, dz, reduction=reduction, as_polydata=as_polydata, **kw)
 
 
 def contours_to_mask_and_mesh(contours, shape_zyx, origin, spacing, direction,
-                              reduction=0.5, ramp=None, as_polydata=True, **kw):
+                              reduction=0.5, ramp=None, as_polydata=True,
+                              direction_rows=True, **kw):
     """Contours -> (mesh, uint8 mask) from one field build per region."""
+    direction = normalize_direction(direction, direction_rows=direction_rows)
     slices, frame, dz = _group(contours, origin, spacing, direction)
     mask = np.zeros(shape_zyx, np.uint8)
     Ps, Ts, n = [], [], 0

@@ -17,13 +17,16 @@ mesh_to_mask cuts the mesh at the CT slice centres and uses the signed distance 
 """
 import numpy as np
 
-from ._raster import _cut, _group, _region_volumes, rings_to_mask, volume_to_grid
+from ._raster import (_cut, _group, _region_volumes, normalize_direction,
+                      rings_to_mask, volume_to_grid)
 
 
-def contours_to_mask(contours, shape_zyx, origin, spacing, direction, ramp=None, **kw):
+def contours_to_mask(contours, shape_zyx, origin, spacing, direction, ramp=None,
+                     direction_rows=True, **kw):
     """Contours (list of (n,3) world arrays) -> uint8 mask (0..255) sampled from the
     shape-based-interpolation field. No mesh is built. Works when contours skip CT slices
     and for sagittal / coronal contours on an axial grid."""
+    direction = normalize_direction(direction, direction_rows=direction_rows)
     slices, frame, dz = _group(contours, origin, spacing, direction)
     mask = np.zeros(shape_zyx, np.uint8)
     for vol in _region_volumes(slices, frame, dz, **kw):
@@ -31,9 +34,11 @@ def contours_to_mask(contours, shape_zyx, origin, spacing, direction, ramp=None,
     return mask
 
 
-def contours_to_mask_direct(contours, shape_zyx, origin, spacing, direction, ramp=None):
+def contours_to_mask_direct(contours, shape_zyx, origin, spacing, direction, ramp=None,
+                            direction_rows=True):
     """Contours drawn on the CT slices themselves -> uint8 mask (0..255), no field or mesh.
     Only valid when every CT slice inside the structure has its own contour."""
+    direction = normalize_direction(direction, direction_rows=direction_rows)
     D, O = np.asarray(direction, float), np.asarray(origin, float)
     by_k = {}
     for r in contours:
@@ -43,7 +48,9 @@ def contours_to_mask_direct(contours, shape_zyx, origin, spacing, direction, ram
     return rings_to_mask(by_k, shape_zyx, origin, spacing, direction, ramp)
 
 
-def mesh_to_mask(poly, shape_zyx, origin, spacing, direction, ramp=None):
+def mesh_to_mask(poly, shape_zyx, origin, spacing, direction, ramp=None,
+                 direction_rows=True):
     """Closed mesh -> uint8 mask (0..255): cut at CT slice centres, signed distance to the cuts."""
+    direction = normalize_direction(direction, direction_rows=direction_rows)
     rc = _cut(poly, origin, direction, np.arange(shape_zyx[0]) * spacing[2])  # key = slice index
     return rings_to_mask(rc, shape_zyx, origin, spacing, direction, ramp)

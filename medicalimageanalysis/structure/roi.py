@@ -226,7 +226,7 @@ class Roi(object):
         self.mesh = contours_to_mesh(self.contour_position,
                                      self.image.origin,
                                      self.image.spacing,
-                                     np.asarray(self.image.matrix, float).T,
+                                     np.asarray(self.image.matrix, float),
                                      reduction=reduction)
 
         if self.mesh is not None:
@@ -420,12 +420,19 @@ class Roi(object):
         numpy.ndarray
             A binary segmentation volume masking the underlying dataset space.
         """
-
-        return contours_to_mask(self.contour_position,
+        mask = contours_to_mask(self.contour_position,
                                 self.image.dimensions,
                                 self.image.origin,
                                 self.image.spacing,
-                                np.asarray(self.image.matrix, float).T)
+                                np.asarray(self.image.matrix, float))
+
+        expected_shape = tuple(int(v) for v in np.asarray(self.image.dimensions).tolist())
+        if mask.shape != expected_shape:
+            raise ValueError(
+                f"Contour-to-mask returned shape {mask.shape}, expected {expected_shape} in zyx order"
+            )
+
+        return mask
 
     def compute_mesh_slice(self, origin=None, plane=None, offset=0, rigid_matrix=None, return_pixel=False):
         """

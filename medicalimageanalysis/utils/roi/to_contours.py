@@ -15,23 +15,26 @@ import numpy as np
 import vtk
 from vtk.util import numpy_support as nps
 
-from ._raster import _cut, _flat, _loops
+from ._raster import _cut, _flat, _loops, normalize_direction
 
 
-def contour_positions(contours, origin, direction):
+def contour_positions(contours, origin, direction, direction_rows=True):
     """Positions (mm along the image k axis from origin) of the planes a contour list lies on,
     e.g. to cut a mesh back at the originally contoured slices."""
+    direction = normalize_direction(direction, direction_rows=direction_rows)
     n, O = np.asarray(direction, float)[:, 2], np.asarray(origin, float)
     return np.array(sorted({round(float(((np.asarray(c, float) - O) @ n).mean()), 3)
                             for c in contours if len(c) >= 3}))
 
 
-def mesh_to_contours(poly, origin, spacing, direction, positions=None, as_list=False):
+def mesh_to_contours(poly, origin, spacing, direction, positions=None, as_list=False,
+                     direction_rows=True):
     """Closed mesh -> contours, exact plane cuts normal to the image k axis.
     positions=None: every CT slice centre the mesh spans; otherwise mm along k from origin
     (e.g. contour_positions(original_contours, origin, direction)).
     Returns {slice_index: [(n,3) world rings]} (nearest CT slice), or a flat list of rings
     like contour_position with as_list=True."""
+    direction = normalize_direction(direction, direction_rows=direction_rows)
     n, O, sz = np.asarray(direction, float)[:, 2], np.asarray(origin, float), float(spacing[2])
     if positions is None:
         d = (nps.vtk_to_numpy(poly.GetPoints().GetData()) - O) @ n
@@ -44,11 +47,13 @@ def mesh_to_contours(poly, origin, spacing, direction, positions=None, as_list=F
     return _flat(out) if as_list else out
 
 
-def mask_to_contours(mask, origin, spacing, direction, level=None, as_list=False):
+def mask_to_contours(mask, origin, spacing, direction, level=None, as_list=False,
+                     direction_rows=True):
     """Mask (nz, ny, nx) -> {slice_index: [(n,3) world rings]} by marching squares per slice.
     level=None: 127.5 for a uint8 0..255 mask (sub-pixel boundary), 0.5 for a binary mask.
     The mask is padded by one voxel so contours touching the image edge still close.
     as_list=True returns a flat list of rings like contour_position."""
+    direction = normalize_direction(direction, direction_rows=direction_rows)
     if level is None:
         level = 127.5 if mask.dtype == np.uint8 and mask.max() > 1 else 0.5
     D = np.asarray(direction, float)
