@@ -247,7 +247,9 @@ class _Volume:
         self.next_label = 1
         self.mid = mid
         self.flat_caps = flat_caps
+        self.cap_auto = cap_radius is None
         self.cap_R = None if cap_radius is None else float(cap_radius)
+        self.use_cap = self.cap_auto or self.cap_R > 0
 
         # Resampled contour points used for exact point-to-polyline distance queries.
         self.pts = np.zeros((0, 2))
@@ -623,7 +625,8 @@ class _Volume:
                         if len(rows):
                             hr = hk[rows]
                             G = self._get(name, hr)
-                            hat = self._cap(G) if (self.cap_R and t == 0.5) else a * G + (1 - a) * c
+                            hat = (self._cap(G, self._radius(hr, G)) if (self.use_cap and t == 0.5)
+                                   else a * G + (1 - a) * c)
                             f[rows] = np.minimum(f[rows], np.where(near[hr], hat, BIG))
 
                 elif kind in (2, 3):
@@ -631,7 +634,8 @@ class _Volume:
                     # is no linked partner slice to interpolate with.
                     near, name = (self.nearI, "I") if kind == 2 else (self.nearJ, "J")
                     G = self._get(name, ks)
-                    hat = self._cap(G) if (self.cap_R and t == 0.5) else (1 - 2 * t) * G + 2 * t * c
+                    hat = (self._cap(G, self._radius(ks, G)) if (self.use_cap and t == 0.5)
+                           else (1 - 2 * t) * G + 2 * t * c)
                     f = np.where(near[ks], hat, BIG)
                 else:  # kind 4: lid-closing plane
                     f = np.full((len(ks), self.ny, self.nx), BIG, np.float32)
@@ -673,19 +677,30 @@ class _Volume:
         Q[:, 2] = np.interp(P[:, 2], np.arange(len(self.pz)), self.pz)
         return Q
 
-    def _cap(self, F):
-        """Rounded half-way cap field.
-
-        ``F`` is a signed distance field on a slice. For points inside the contour, this
-        converts depth-inside-contour into a cap value whose zero isosurface follows a
-        quarter-circle profile of radius ``R`` near the boundary, then flattens deeper in.
-        This produces less pinched caps than a purely linear hat.
-        """
-        R = self.cap_R
+    def _cap(self, F, R):
+        """Rounded half-way cap: height = (delta/2) * sqrt(1 - (1 - u/R)^2) for depth u < R,
+        exactly delta/2 (flat) for u >= R. R may be a scalar or a per-pixel array."""
         u = np.maximum(-F, 0.0)
         p = np.sqrt(np.clip(1.0 - (1.0 - np.minimum(u, R) / R) ** 2, 1e-6, 1.0))
         g = u * (1.0 / p - 1.0) + 1e-4
         return np.where(F > 0, F + 1e-4, g).astype(np.float32)
+
+    def _radius(self, ks, G):
+        """Cap radius per pixel. Fixed if cap_radius was given, otherwise automatic:
+        base = max(1.5 h, delta/2), shrunk to half of each component's max interior depth
+        so small end contours still reach a flat top at half a slice."""
+        if not self.cap_auto:
+            return np.float32(self.cap_R)
+        base = max(1.5 * self.h, 0.5 * self.delta)
+        L = self.L[ks]
+        depth = np.minimum(np.maximum(-G, 0.0), 1e3)      # ignore clamped BIG interiors
+        sel = (L > 0) & (depth > 0)
+        mx = np.zeros(self.next_label, np.float32)
+        np.maximum.at(mx, L[sel], depth[sel])             # deepest point per component
+        R = np.minimum(base, 0.5 * mx[L])
+        return np.maximum(R, 0.5 * self.h).astype(np.float32)
+
+
 
 
 # =============================================================================== post-processing
