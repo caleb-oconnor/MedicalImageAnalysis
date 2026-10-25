@@ -1175,7 +1175,7 @@ class Image(object):
 
         self.rois[name].contour_pixel = contours
         self.rois[name].contour_position = positions
-        self.rois[name].create_discrete_mesh()
+        self.rois[name].create_mesh(reduction=0.50)
 
     def compute_initial_origin(self, plane):
         """
