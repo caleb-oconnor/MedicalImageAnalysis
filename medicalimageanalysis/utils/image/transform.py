@@ -1,11 +1,16 @@
-"""
-Morfeus lab
+"""Morfeus lab
 The University of Texas
 MD Anderson Cancer Center
 Author - Caleb O'Connor
 Email - csoconnor@mdanderson.org
 
 Description:
+
+Examples
+--------
+>>> import numpy as np
+>>> import medicalimageanalysis as mia
+>>> mask = np.zeros((8, 32, 32), dtype=np.uint8)
 """
 
 import numpy as np
@@ -13,9 +18,13 @@ import SimpleITK as sitk
 
 
 def euler_transform(matrix=None, angles=None, translation=None, rotation_center=None, zyx=False):
-    """
-    Creates a 3D Euler transformation that can combine rotation, translation, and a rotation center. Useful for rigid or
+    """Creates a 3D Euler transformation that can combine rotation, translation, and a rotation center. Useful for rigid or
     semi-rigid registration in 3D.
+    
+    Examples
+    --------
+    >>> from medicalimageanalysis.utils.image.transform import euler_transform
+    >>> matrix = euler_transform(10, 0, 0)
     """
     transform = sitk.Euler3DTransform()
 

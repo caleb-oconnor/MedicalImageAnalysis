@@ -1,11 +1,16 @@
-"""
-Morfeus lab
+"""Morfeus lab
 The University of Texas
 MD Anderson Cancer Center
 Author - Caleb O'Connor
 Email - csoconnor@mdanderson.org
 
 Description:
+
+Examples
+--------
+>>> import numpy as np
+>>> import medicalimageanalysis as mia
+>>> mask = np.zeros((8, 32, 32), dtype=np.uint8)
 """
 
 import numpy as np
@@ -13,21 +18,42 @@ import SimpleITK as sitk
 
 
 class DeformableITK(object):
-    """
-    Supports multiple registration methods including BSpline, Elastix, Demons, Fast Demons, and Diffeomorphic Demons,
+    """Supports multiple registration methods including BSpline, Elastix, Demons, Fast Demons, and Diffeomorphic Demons,
     with optional mask handling and preprocessing.
-
+    
     All Demons-based methods support optional smoothing, step size, intensity thresholds, iterations, and mask cropping.
+    
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from medicalimageanalysis.utils.deformable.simpleitk import DeformableITK
+    >>> helper = DeformableITK()
+    >>> helper.create_sitk_image(np.zeros((8, 32, 32), dtype=np.float32), (0, 0, 0), (1, 1, 2), np.eye(3))
     """
     def __init__(self, reference_image=None, moving_image=None, reference_mask=None, moving_mask=None):
+        """Store SimpleITK images and optional masks for later registration calls.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> helper = DeformableITK()
+        >>> helper.create_sitk_image(np.zeros((8, 32, 32), dtype=np.float32), (0, 0, 0), (1, 1, 2), np.eye(3))
+        >>> helper.__init__(...)
+        """
         self.reference_image = reference_image
         self.reference_mask = reference_mask
         self.moving_image = moving_image
         self.moving_mask = moving_mask
 
     def create_sitk_image(self, array, origin, spacing, direction, reference=True, mask=False):
-        """
-        Converts a NumPy array to a SimpleITK image with proper origin, spacing, and direction.
+        """Converts a NumPy array to a SimpleITK image with proper origin, spacing, and direction.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> helper = DeformableITK()
+        >>> helper.create_sitk_image(np.zeros((8, 32, 32), dtype=np.float32), (0, 0, 0), (1, 1, 2), np.eye(3))
+        >>> helper.create_sitk_image(...)
         """
         image = sitk.GetImageFromArray(array)
         image.SetOrigin(origin)
@@ -46,8 +72,14 @@ class DeformableITK(object):
                 self.moving_image = image
 
     def cross_modality_correction(self):
-        """
-        Applies gradient magnitude filtering to reduce intensity differences across modalities.
+        """Applies gradient magnitude filtering to reduce intensity differences across modalities.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> helper = DeformableITK()
+        >>> helper.create_sitk_image(np.zeros((8, 32, 32), dtype=np.float32), (0, 0, 0), (1, 1, 2), np.eye(3))
+        >>> helper.cross_modality_correction()
         """
         if self.reference_image is not None:
             self.reference_image = sitk.GradientMagnitude(self.reference_image)
@@ -56,8 +88,14 @@ class DeformableITK(object):
             self.moving_image = sitk.GradientMagnitude(self.moving_image)
 
     def blur_mask(self, sigma=2):
-        """
-        Smooths masks with a Gaussian filter and normalizes values.
+        """Smooths masks with a Gaussian filter and normalizes values.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> helper = DeformableITK()
+        >>> helper.create_sitk_image(np.zeros((8, 32, 32), dtype=np.float32), (0, 0, 0), (1, 1, 2), np.eye(3))
+        >>> helper.blur_mask(...)
         """
         if self.reference_mask is not None:
             mask = sitk.Cast(self.reference_mask, sitk.sitkFloat32)
@@ -74,8 +112,14 @@ class DeformableITK(object):
             self.moving_mask = (blurred_mask - min_val) / (max_val - min_val)
 
     def resample(self):
-        """
-        Resamples moving image/mask to match the reference image geometry.
+        """Resamples moving image/mask to match the reference image geometry.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> helper = DeformableITK()
+        >>> helper.create_sitk_image(np.zeros((8, 32, 32), dtype=np.float32), (0, 0, 0), (1, 1, 2), np.eye(3))
+        >>> helper.resample()
         """
         if self.reference_image is not None and self.moving_image is not None:
             self.moving_image = sitk.Resample(self.moving_image,
@@ -94,8 +138,14 @@ class DeformableITK(object):
                                              self.moving_mask.GetPixelIDValue())
 
     def bspline(self, control_spacing=None, mesh_size=None, gradient=1e-5, iterations=100, crop=5):
-        """
-        Performs B-spline registration with optional mask constraints, returns displacement vector field.
+        """Performs B-spline registration with optional mask constraints, returns displacement vector field.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> helper = DeformableITK()
+        >>> helper.create_sitk_image(np.zeros((8, 32, 32), dtype=np.float32), (0, 0, 0), (1, 1, 2), np.eye(3))
+        >>> helper.bspline(...)
         """
         if crop > 0:
             self.mask_crop(margin=crop)
@@ -130,8 +180,14 @@ class DeformableITK(object):
 
     def elastix(self, parameter=None, metric='Intensity', bins=6, resolution=4, spacing=10, iterations=2000, order=3,
                 crop=5):
-        """
-        Uses Elastix for nonrigid registration with customizable parameters, returns deformation field.
+        """Uses Elastix for nonrigid registration with customizable parameters, returns deformation field.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> helper = DeformableITK()
+        >>> helper.create_sitk_image(np.zeros((8, 32, 32), dtype=np.float32), (0, 0, 0), (1, 1, 2), np.eye(3))
+        >>> helper.elastix(...)
         """
         if crop > 0:
             self.mask_crop(margin=crop)
@@ -176,8 +232,14 @@ class DeformableITK(object):
         return transformix.GetDeformationField()
 
     def demons(self, smooth=True, std=1, iterations=50, intensity_threshold=0.001, crop=5):
-        """
-        Applies the standard Demons algorithm.
+        """Applies the standard Demons algorithm.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> helper = DeformableITK()
+        >>> helper.create_sitk_image(np.zeros((8, 32, 32), dtype=np.float32), (0, 0, 0), (1, 1, 2), np.eye(3))
+        >>> helper.demons(...)
         """
         if crop > 0:
             self.mask_crop(margin=crop)
@@ -202,8 +264,14 @@ class DeformableITK(object):
         return demons.Execute(fixed, moving)
 
     def fast_demons(self, smooth=True, std=1, iterations=50, intensity_threshold=0.001, step=2.0, crop=5):
-        """
-        Applies Fast Symmetric Forces Demons algorithm.
+        """Applies Fast Symmetric Forces Demons algorithm.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> helper = DeformableITK()
+        >>> helper.create_sitk_image(np.zeros((8, 32, 32), dtype=np.float32), (0, 0, 0), (1, 1, 2), np.eye(3))
+        >>> helper.fast_demons(...)
         """
         if crop > 0:
             self.mask_crop(margin=crop)
@@ -229,8 +297,14 @@ class DeformableITK(object):
         return demons.Execute(fixed, moving)
 
     def diffeomorphic(self, smooth=True, std=1, iterations=50, intensity_threshold=0.001, step=2.0, crop=5):
-        """
-        Applies Diffeomorphic Demons algorithm.
+        """Applies Diffeomorphic Demons algorithm.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> helper = DeformableITK()
+        >>> helper.create_sitk_image(np.zeros((8, 32, 32), dtype=np.float32), (0, 0, 0), (1, 1, 2), np.eye(3))
+        >>> helper.diffeomorphic(...)
         """
         if crop > 0:
             self.mask_crop(margin=crop)
@@ -256,8 +330,14 @@ class DeformableITK(object):
         return demons.Execute(fixed, moving)
 
     def mask_crop(self, margin=5):
-        """
-        Crops images and masks to the region covering both masks, with optional padding.
+        """Crops images and masks to the region covering both masks, with optional padding.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> helper = DeformableITK()
+        >>> helper.create_sitk_image(np.zeros((8, 32, 32), dtype=np.float32), (0, 0, 0), (1, 1, 2), np.eye(3))
+        >>> helper.mask_crop(...)
         """
         if self.reference_mask is not None and self.moving_mask is not None:
             combined_mask = sitk.Cast((self.reference_mask > 0) | (self.moving_mask > 0), sitk.sitkUInt8)

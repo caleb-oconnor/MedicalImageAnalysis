@@ -1,11 +1,16 @@
-"""
-Morfeus lab
+"""Morfeus lab
 The University of Texas
 MD Anderson Cancer Center
 Author - Caleb O'Connor
 Email - csoconnor@mdanderson.org
 
 Description:
+
+Examples
+--------
+>>> import numpy as np
+>>> import medicalimageanalysis as mia
+>>> mask = np.zeros((8, 32, 32), dtype=np.uint8)
 """
 
 import cv2
@@ -13,6 +18,29 @@ import numpy as np
 
 
 def contours_from_mask(mask, plane='Axial'):
+    """Extract contour polylines from a binary mask.
+    
+    Parameters
+    ----------
+    mask : numpy.ndarray
+        Binary mask in ``(z, y, x)`` order.
+    plane : str, optional
+        Plane along which contours are extracted: ``'Axial'``, ``'Coronal'``,
+        or ``'Sagittal'``.
+    
+    Returns
+    -------
+    list[numpy.ndarray]
+        Contours represented in voxel coordinates, one array per connected
+        contour on each processed slice.
+    
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from medicalimageanalysis.utils.roi.contour import contours_from_mask
+    >>> mask = np.zeros((4, 16, 16), dtype=np.uint8)
+    >>> contours = contours_from_mask(mask, plane='Axial')
+    """
     mask = mask.astype(np.uint8)
 
     if plane == 'Axial':

@@ -1,5 +1,4 @@
-"""
-Morfeus lab
+"""Morfeus lab
 The University of Texas
 MD Anderson Cancer Center
 Author - Caleb O'Connor
@@ -12,6 +11,12 @@ Description:
 Structure:
     - Display: Manages voxel-to-world coordination, spacing, slicing coordinates, and pixel metrics.
     - Rigid: Coordinates rigid alignment transformations, ROI mapping, and registration parameters.
+
+Examples
+--------
+>>> import medicalimageanalysis as mia
+>>> mia.read_mhd(file='C:/Data/scan.mhd', modality='CT')
+>>> image = mia.Data.image[mia.Data.image_list[0]]
 """
 
 import os
@@ -34,9 +39,8 @@ from ..data import Data
 
 
 class Rigid(object):
-    """
-    Coordinates 3D matrix-based rigid registration operations between tracking volumes.
-
+    """Coordinates 3D matrix-based rigid registration operations between tracking volumes.
+    
     Parameters
     ----------
     reference_name : str
@@ -59,10 +63,24 @@ class Rigid(object):
         An additive combined secondary structural step matrix transformation tracker. Defaults to Identity.
     combo_name : str, optional
         Identification name label matching any multi-stage composite transformations.
+    
+    Examples
+    --------
+    >>> import medicalimageanalysis as mia
+    >>> rigid = mia.Rigid('CT 01', 'MR 01')
+    >>> rigid.retrieve_translation()
     """
     def __init__(self, reference_name, moving_name, rigid_name=None, roi_names=None, reference_sops=None,
                  moving_sops=None, reference_matrix=None, matrix=None, combo_matrix=None, combo_name=None,
                  inverse=False):
+        """Create a rigid registration object and register it globally.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid.__init__(...)
+        """
         self.reference_name = reference_name
         self.moving_name = moving_name
         self.combo_name = combo_name
@@ -103,18 +121,23 @@ class Rigid(object):
         return inv
 
     def add_rigid(self, rigid_name):
-        """
-        Saves the active registration initialization instances into globally accessible data scopes.
-
+        """Saves the active registration initialization instances into globally accessible data scopes.
+        
         Parameters
         ----------
         rigid_name : str or None
             A targeted name for tracker referencing. If None, automatically creates an informative name.
-
+        
         Returns
         -------
         str
             The actual uniquely verified lookup key assigned to this tracking operation.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid.add_rigid(...)
         """
         if rigid_name is None:
             if np.array_equal(self.combo_matrix, np.identity(4)):
@@ -137,9 +160,14 @@ class Rigid(object):
         return rigid_name
 
     def compute_array(self, plane, position, use_moving_spacing=False):
-        """
-        Same call as Display.compute_array: plane + the widget's position (top-left corner of the
+        """Same call as Display.compute_array: plane + the widget's position (top-left corner of the
         reference view). Returns the moved image sampled onto the reference view, plus 'scale'.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid.compute_array(...)
         """
         base = Data.image[self.current_ref].display    # image the view is built on
         mover = Data.image[self.current_mov].display   # image being moved
@@ -159,8 +187,13 @@ class Rigid(object):
         return res
 
     def compute_aspect(self, plane):
-        """
-        Aspect for the resliced image, matching the (sx, sy) Display.compute_array samples with.
+        """Aspect for the resliced image, matching the (sx, sy) Display.compute_array samples with.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid.compute_aspect(...)
         """
         spacing = Data.image[self.current_mov].display.spacing
 
@@ -171,9 +204,8 @@ class Rigid(object):
 
     def compute_icp_vtk(self, source_mesh, target_mesh, distance=1e-3, iterations=100, src_frac=0.1, min_pts=1000,
                         max_pts=20000, com_matching=True, inverse=False, center=None):
-        """
-        Runs an Iterative Closest Point algorithm on mesh pairings via standard VTK backends.
-
+        """Runs an Iterative Closest Point algorithm on mesh pairings via standard VTK backends.
+        
         Parameters
         ----------
         source_mesh : pyvista.PolyData
@@ -192,10 +224,16 @@ class Rigid(object):
             If True, flips matrix operations inside target registration workflows.
         center : str, optional
             Sets specific origin balancing locations. If set to 'image', recalibrates around centers.
-
+        
         Returns
         -------
         None
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid.compute_icp_vtk(...)
         """
         self.inverse = inverse
         if self.inverse:
@@ -236,9 +274,8 @@ class Rigid(object):
     def compute_o3d(self, source_mesh, target_mesh, distance=10, iterations=50, rmse=1e-6, fitness=1e-6, method='point',
                     com_matching=True, inverse=False, src_frac=0.1, tgt_frac=1.0, min_pts=1000, max_pts=20000, seed=0,
                     center=None):
-        """
-        Runs an Iterative Closest Point algorithm on mesh pairings via an Open3D computational backend.
-
+        """Runs an Iterative Closest Point algorithm on mesh pairings via an Open3D computational backend.
+        
         Parameters
         ----------
         source_mesh : pyvista.PolyData
@@ -261,10 +298,16 @@ class Rigid(object):
             If True, flips matrix operations inside target registration workflows.
         center : str, optional
             Sets specific origin balancing locations. If set to 'image', recalibrates around centers.
-
+        
         Returns
         -------
         None
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid.compute_o3d(...)
         """
         target_mesh.transform(self.matrix @ self.combo_matrix, inplace=True)
 
@@ -300,8 +343,13 @@ class Rigid(object):
             self.matrix = icp.get_matrix()
 
     def compute_mesh_slice(self, roi_name, plane, position, offset=0, return_pixel=True):
-        """
-        Slice one of current_mov's ROIs in the same pixel space as compute_array.
+        """Slice one of current_mov's ROIs in the same pixel space as compute_array.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid.compute_mesh_slice(...)
         """
         roi = Data.image[self.current_mov].rois[roi_name]
 
@@ -309,17 +357,22 @@ class Rigid(object):
                                       rigid_matrix=self.get_display_matrix(), return_pixel=return_pixel)
 
     def copy_roi(self, roi_name=None):
-        """
-        Clones and projects an ROI structural mesh model alignment into different volume spaces.
-
+        """Clones and projects an ROI structural mesh model alignment into different volume spaces.
+        
         Parameters
         ----------
         roi_name : str, optional
             The targeted structure lookup key label mapping to the active tracking item.
-
+        
         Returns
         -------
         None
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid.copy_roi(...)
         """
         if roi_name in list(self.rois.keys()):
             reference_roi = Data.image[self.reference_name].rois[roi_name]
@@ -331,8 +384,13 @@ class Rigid(object):
                 moving_roi.mesh = reference_roi.mesh.transform(self.matrix @ self.combo_matrix, inplace=False)
 
     def create_image(self):
-        """
-        Resample current_mov onto current_ref's world (same convention as the display).
+        """Resample current_mov onto current_ref's world (same convention as the display).
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid.create_image(...)
         """
         mov = Data.image[self.current_mov]
         vtk_image = vtk.vtkImageData()
@@ -364,17 +422,22 @@ class Rigid(object):
         return reslice.GetOutput()
 
     def export_image(self, path=None):
-        """
-        Writes the current aligned 3D dataset out to disk as an mhd/raw MetaImage format pair.
-
+        """Writes the current aligned 3D dataset out to disk as an mhd/raw MetaImage format pair.
+        
         Parameters
         ----------
         path : str, optional
             The targeted filename destination write path string.
-
+        
         Returns
         -------
         None
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid.export_image(...)
         """
         if self.moving_name is not None and path is not None:
             image = self.create_image()
@@ -385,8 +448,13 @@ class Rigid(object):
             writer.Write()
 
     def get_center(self, plane=None, position=None):
-        """
-        Pivot: current_mov's center as displayed, projected onto the active slice plane (when given).
+        """Pivot: current_mov's center as displayed, projected onto the active slice plane (when given).
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid.get_center(...)
         """
         A = self.get_display_matrix()
         native_center = np.asarray(Data.image[self.current_mov].get_center(), dtype=float)
@@ -400,30 +468,52 @@ class Rigid(object):
         return center - np.dot(center - np.asarray(position, dtype=float), n_hat) * n_hat
 
     def get_combined_matrix(self):
-        """
-        reference world -> moving world.
+        """reference world -> moving world.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid.get_combined_matrix(...)
         """
 
         return self.matrix @ self.combo_matrix
 
     def get_display_matrix(self):
-        """
-        current_mov native world -> current_ref (displayed) world. Pass this as rigid_matrix.
+        """current_mov native world -> current_ref (displayed) world. Pass this as rigid_matrix.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid.get_display_matrix(...)
         """
         combined = self.get_combined_matrix()
 
         return combined if self.inverse else self._rigid_inv(combined)
 
     def get_view_center(self, plane, position):
-        """Pivot in the widget's view coords (pixel centers at integers, matching the -0.5 placement)."""
+        """Pivot in the widget's view coords (pixel centers at integers, matching the -0.5 placement).
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid.get_view_center(...)
+        """
         grid = Data.image[self.current_ref].display.get_grid(plane, position)
         d = self.get_center(plane, position) - grid['origin']
 
         return float(d @ grid['x_axis']) / grid['sx'], float(d @ grid['y_axis']) / grid['sy']
 
     def get_vtk_matrix(self):
-        """
-        For actor.SetUserMatrix on current_mov's ROI actors (or pyvista: actor.user_matrix = ...).
+        """For actor.SetUserMatrix on current_mov's ROI actors (or pyvista: actor.user_matrix = ...).
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid.get_vtk_matrix(...)
         """
         A = self.get_display_matrix()
         vtk_matrix = vtk.vtkMatrix4x4()
@@ -434,9 +524,8 @@ class Rigid(object):
         return vtk_matrix
 
     def pre_alignment(self, superior=False, center=False, origin=False):
-        """
-        Applies rapid programmatic initializations to roughly align spatial orientation metrics.
-
+        """Applies rapid programmatic initializations to roughly align spatial orientation metrics.
+        
         Parameters
         ----------
         superior : bool, default False
@@ -445,10 +534,16 @@ class Rigid(object):
             Executes concentric 3D center matching steps.
         origin : bool, default False
             Forces coordinate matching origins via translation offsets directly.
-
+        
         Returns
         -------
         None
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid.pre_alignment(...)
         """
         if superior:
             pass
@@ -458,49 +553,64 @@ class Rigid(object):
             self.matrix[:3, 3] = Data.image[self.moving_name].origin - Data.image[self.reference_name].origin
 
     def retrieve_angles(self, order='ZXY'):
-        """
-        Extracts Euler orientation values from the active registration transformation components.
-
+        """Extracts Euler orientation values from the active registration transformation components.
+        
         Parameters
         ----------
         order : str, default 'ZXY'
             The specific axes rotation order tracking matrix factorization.
-
+        
         Returns
         -------
         numpy.ndarray
             A 3D spatial rotation angle vector formatted in degrees.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid.retrieve_angles(...)
         """
         rotation = Rotation.from_matrix(self.matrix[:3, :3])
         return rotation.as_euler(order, degrees=True)
 
     def retrieve_translation(self):
-        """
-        Exposes current alignment spatial position offsets.
-
+        """Exposes current alignment spatial position offsets.
+        
         Parameters
         ----------
         None
-
+        
         Returns
         -------
         numpy.ndarray
             A 3D vector coordinates array tracking translation distance variables.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid.retrieve_translation(...)
         """
         return self.matrix[:3, 3]
 
     def save_rigid(self, path):
-        """
-        Serializes active internal class settings directly out into picked DataFrame file formats.
-
+        """Serializes active internal class settings directly out into picked DataFrame file formats.
+        
         Parameters
         ----------
         path : str
             The system directory output target location to export towards.
-
+        
         Returns
         -------
         None
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid.save_rigid(...)
         """
         variable_names = self.__dict__.keys()
         column_names = [name for name in variable_names if name not in ['rois', 'pois', 'display']]
@@ -512,10 +622,15 @@ class Rigid(object):
         df.to_pickle(os.path.join(path, 'info.p'))
 
     def set_current_order(self, inverse):
-        """
-        Flips which image gets resliced. Does NOT change the registration itself, so the user can
+        """Flips which image gets resliced. Does NOT change the registration itself, so the user can
         toggle at any time. Callers must re-request arrays/slices and move the actor matrix to the
         other image's ROI actors afterwards.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid.set_current_order(...)
         """
         self.inverse = bool(inverse)
         if self.inverse:
@@ -524,13 +639,26 @@ class Rigid(object):
             self.current_ref, self.current_mov = self.reference_name, self.moving_name
 
     def update_rois(self):
+        """Placeholder for future synchronized ROI updates under rigid transforms.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid.update_rois(...)
+        """
         pass
 
     def update_rotation(self, center=None, r_x=0, r_y=0, r_z=0, plane=None, position=None,
                         axis=None, angle=None):
-        """
-        Rotate about center (default: pivot on the current slice). Either Euler r_x/r_y/r_z (world axes, degrees),
+        """Rotate about center (default: pivot on the current slice). Either Euler r_x/r_y/r_z (world axes, degrees),
         or axis + angle (degrees) to rotate about an arbitrary world axis, e.g. an oblique view's normal.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid.update_rotation(...)
         """
         if center is None:
             center = self.get_center(plane=plane, position=position)
@@ -551,6 +679,14 @@ class Rigid(object):
         self._apply_display_transform(T_pos @ R @ T_neg)
 
     def update_translation(self, t_x=0, t_y=0, t_z=0):
+        """Apply a pure translation in displayed world coordinates.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid.update_translation(...)
+        """
         T = np.identity(4)
         T[:3, 3] = [t_x, t_y, t_z]
 

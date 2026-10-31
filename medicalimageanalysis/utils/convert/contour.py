@@ -1,5 +1,4 @@
-"""
-Morfeus lab
+"""Morfeus lab
 The University of Texas
 MD Anderson Cancer Center
 Author - Caleb O'Connor
@@ -10,6 +9,11 @@ Description:
 
 Functions:
 
+Examples
+--------
+>>> import numpy as np
+>>> import medicalimageanalysis as mia
+>>> mask = np.zeros((8, 32, 32), dtype=np.uint8)
 """
 
 import cv2
@@ -22,13 +26,26 @@ from vtk.util import numpy_support
 
 
 class MeshToContour:
-    """
-    Persistent vtkPlaneCutter for static ROI surface meshes.
+    """Persistent vtkPlaneCutter for static ROI surface meshes.
     Caches the sphere tree structure once and uses inverse plane transformations
     to slice without invalidating GPU/CPU spatial indices.
+    
+    Examples
+    --------
+    >>> from medicalimageanalysis.utils.convert.contour import MeshToContour
+    >>> obj = MeshToContour(...)
     """
 
     def __init__(self, mesh, surface_mesh=True, silence=True):
+        """Prepare a persistent plane cutter for repeated slicing of one mesh.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> helper = MeshToContour(pv.Sphere())
+        >>> helper.__init__(...)
+        """
         if surface_mesh:
             self.mesh = mesh
         else:
@@ -49,9 +66,8 @@ class MeshToContour:
         self.cutter.Update()
 
     def slice_transformed(self, normal, origin, matrix):
-        """
-        Slices the static mesh by transforming the plane in reverse.
-
+        """Slices the static mesh by transforming the plane in reverse.
+        
         Parameters
         ----------
         normal : array-like (3,)
@@ -60,6 +76,13 @@ class MeshToContour:
             Slice origin position in world space.
         matrix : np.ndarray (4, 4)
             The current active Rigid registration matrix.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> helper = MeshToContour(pv.Sphere())
+        >>> helper.slice_transformed(...)
         """
         inv_mat = np.linalg.inv(matrix)
 
@@ -84,7 +107,15 @@ class MeshToContour:
         return contour
 
     def update_mesh(self, new_mesh, surface_mesh=True):
-        """Re-initializes the cutter only when mesh geometry actually changes."""
+        """Re-initializes the cutter only when mesh geometry actually changes.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> helper = MeshToContour(pv.Sphere())
+        >>> helper.update_mesh(...)
+        """
         if surface_mesh:
             mesh = new_mesh
         else:
@@ -94,18 +125,28 @@ class MeshToContour:
 
 
 class ContourToDiscreteMesh(object):
-    """
-    Converts 2D contour points into a 3D discrete or smoothed surface mesh, optionally generating a volumetric mask
+    """Converts 2D contour points into a 3D discrete or smoothed surface mesh, optionally generating a volumetric mask
     along the way. It supports multiple anatomical planes (Axial, Coronal, Sagittal).
+    
+    Examples
+    --------
+    >>> from medicalimageanalysis.utils.convert.contour import ContourToDiscreteMesh
+    >>> obj = ContourToDiscreteMesh(...)
     """
     def __init__(self, contour_position=None, contour_pixel=None, spacing=None, origin=None, dimensions=None,
                  matrix=None, plane='Axial', mask=None):
-        """
-        contour_position: Original contour points in physical coordinates.
+        """contour_position: Original contour points in physical coordinates.
         contour_pixel: Contours converted to voxel coordinates.
         spacing, origin, dimensions: Image geometry information.
         matrix: Transformation matrix for voxel conversion.
         plane: Plane along which slices are defined (Axial, Coronal, Sagittal).
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> helper = ContourToDiscreteMesh(contour_pixel=[np.array([[0, 0, 0], [5, 0, 0], [5, 5, 0]])], spacing=(1, 1, 1), origin=(0, 0, 0), dimensions=(8, 16, 16), matrix=np.eye(3))
+        >>> helper.__init__(...)
         """
         self.contour_position = contour_position
         self.contour_pixel = contour_pixel
@@ -128,8 +169,14 @@ class ContourToDiscreteMesh(object):
             self.compute_mask()
 
     def convert_to_pixel_spacing(self):
-        """
-        Converts physical contour points to voxel coordinates using a 4x4 conversion matrix.
+        """Converts physical contour points to voxel coordinates using a 4x4 conversion matrix.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> helper = ContourToDiscreteMesh(contour_pixel=[np.array([[0, 0, 0], [5, 0, 0], [5, 5, 0]])], spacing=(1, 1, 1), origin=(0, 0, 0), dimensions=(8, 16, 16), matrix=np.eye(3))
+        >>> helper.convert_to_pixel_spacing(...)
         """
         matrix = np.identity(3, dtype=np.float32)
         matrix[0, :] = self.matrix[0, :] / self.spacing[0]
@@ -146,8 +193,14 @@ class ContourToDiscreteMesh(object):
             self.contour_pixel += [p_concat.dot(conversion_matrix.T)[:, :3]]
 
     def compute_mask(self):
-        """
-        Generates a 3D binary mask slice-by-slice.
+        """Generates a 3D binary mask slice-by-slice.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> helper = ContourToDiscreteMesh(contour_pixel=[np.array([[0, 0, 0], [5, 0, 0], [5, 5, 0]])], spacing=(1, 1, 1), origin=(0, 0, 0), dimensions=(8, 16, 16), matrix=np.eye(3))
+        >>> helper.compute_mask(...)
         """
         hold_mask = np.zeros([self.dimensions[0], self.dimensions[1], self.dimensions[2]], dtype=np.uint8)
         if self.plane == 'Axial':
@@ -188,8 +241,14 @@ class ContourToDiscreteMesh(object):
         self.mask = (hold_mask > 0).astype(np.uint8)
 
     def compute_mesh(self, discrete=False, smoothing_iterations=20, smoothing_relaxation=.5, smoothing_distance=1):
-        """
-        Converts the mask into a 3D mesh.
+        """Converts the mask into a 3D mesh.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> helper = ContourToDiscreteMesh(contour_pixel=[np.array([[0, 0, 0], [5, 0, 0], [5, 5, 0]])], spacing=(1, 1, 1), origin=(0, 0, 0), dimensions=(8, 16, 16), matrix=np.eye(3))
+        >>> helper.compute_mesh(...)
         """
         label = numpy_support.numpy_to_vtk(num_array=self.mask.ravel(),
                                            deep=True,
@@ -235,18 +294,28 @@ class ContourToDiscreteMesh(object):
 
 
 class ContourToMask(object):
-    """
-    Converts 2D contour points (from medical images or 3D scans) into a 3D volumetric mask, supporting multiple planes
+    """Converts 2D contour points (from medical images or 3D scans) into a 3D volumetric mask, supporting multiple planes
     (Axial, Coronal, Sagittal).
+    
+    Examples
+    --------
+    >>> from medicalimageanalysis.utils.convert.contour import ContourToMask
+    >>> obj = ContourToMask(...)
     """
     def __init__(self, contour_position=None, contour_pixel=None, spacing=None, origin=None, dimensions=None,
                  matrix=None, plane='Axial'):
-        """
-        contour_position: Original contour points in physical coordinates.
+        """contour_position: Original contour points in physical coordinates.
         contour_pixel: Contours converted to pixel indices (voxel coordinates).
         spacing, origin, dimensions: Image geometry information.
         matrix: Transformation matrix to map physical coordinates to pixel space.
         plane: Axis along which slices are interpreted (Axial/Coronal/Sagittal).
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> helper = ContourToMask(contour_position=[np.array([[0, 0, 0], [5, 0, 0], [5, 5, 0]])], spacing=(1, 1, 1), origin=(0, 0, 0), dimensions=(8, 16, 16), matrix=np.eye(3))
+        >>> helper.__init__(...)
         """
         self.contour_position = contour_position
         self.contour_pixel = contour_pixel
@@ -259,8 +328,14 @@ class ContourToMask(object):
         self.mask = None
 
     def create_mask(self):
-        """
-        Converts contours to pixel space if necessary, then computes the 3D mask.
+        """Converts contours to pixel space if necessary, then computes the 3D mask.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> helper = ContourToMask(contour_position=[np.array([[0, 0, 0], [5, 0, 0], [5, 5, 0]])], spacing=(1, 1, 1), origin=(0, 0, 0), dimensions=(8, 16, 16), matrix=np.eye(3))
+        >>> helper.create_mask(...)
         """
         if self.contour_pixel is None:
             self.convert_to_pixel_spacing()
@@ -268,8 +343,14 @@ class ContourToMask(object):
         self.compute_mask()
 
     def convert_to_pixel_spacing(self):
-        """
-        Converts physical contour coordinates to voxel indices using SimpleITK.
+        """Converts physical contour coordinates to voxel indices using SimpleITK.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> helper = ContourToMask(contour_position=[np.array([[0, 0, 0], [5, 0, 0], [5, 5, 0]])], spacing=(1, 1, 1), origin=(0, 0, 0), dimensions=(8, 16, 16), matrix=np.eye(3))
+        >>> helper.convert_to_pixel_spacing(...)
         """
         sitk_image = sitk.Image([int(dim) for dim in self.dimensions], sitk.sitkUInt8)
         matrix_flat = self.matrix[0:3, 0:3].flatten(order='F')
@@ -282,8 +363,14 @@ class ContourToMask(object):
             self.contour_pixel[ii] = [sitk_image.TransformPhysicalPointToContinuousIndex(contour) for contour in contours]
 
     def compute_mask(self):
-        """
-        Generates a 3D mask array from the pixel contours.
+        """Generates a 3D mask array from the pixel contours.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> helper = ContourToMask(contour_position=[np.array([[0, 0, 0], [5, 0, 0], [5, 5, 0]])], spacing=(1, 1, 1), origin=(0, 0, 0), dimensions=(8, 16, 16), matrix=np.eye(3))
+        >>> helper.compute_mask(...)
         """
         hold_mask = np.zeros([self.dimensions[0], self.dimensions[1], self.dimensions[2]], dtype=np.uint8)
         if self.plane == 'Axial':
@@ -325,7 +412,24 @@ class ContourToMask(object):
 
 
 class MaskToContour(object):
+    """Convert a binary mask into slice-wise contour coordinates.
+    
+    Examples
+    --------
+    >>> from medicalimageanalysis.utils.convert.contour import MaskToContour
+    >>> obj = MaskToContour(...)
+    """
+
     def __init__(self, mask=None, spacing=None, origin=None, matrix=None, plane='axial'):
+        """Store mask geometry and initialize output contour containers.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> helper = MaskToContour(mask=np.zeros((8, 16, 16), dtype=np.uint8), spacing=(1, 1, 1), origin=(0, 0, 0), matrix=np.eye(3))
+        >>> helper.__init__(...)
+        """
         self.mask = mask
         self.spacing = spacing
         self.origin = origin
@@ -336,6 +440,15 @@ class MaskToContour(object):
         self.contour_pixel = []
 
     def create_contours(self):
+        """Generate pixel contours and, when geometry is available, world contours.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> helper = MaskToContour(mask=np.zeros((8, 16, 16), dtype=np.uint8), spacing=(1, 1, 1), origin=(0, 0, 0), matrix=np.eye(3))
+        >>> helper.create_contours(...)
+        """
         self.compute_pixel()
         if (self.spacing, self.origin, self.matrix) is not None:
             self.compute_position()
@@ -343,6 +456,15 @@ class MaskToContour(object):
         return self.contour_pixel, self.contour_position
 
     def compute_pixel(self):
+        """Extract contour vertices from each non-empty mask slice.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> helper = MaskToContour(mask=np.zeros((8, 16, 16), dtype=np.uint8), spacing=(1, 1, 1), origin=(0, 0, 0), matrix=np.eye(3))
+        >>> helper.compute_pixel(...)
+        """
         if self.plane.lower() == "axial":
             axis = 0
         elif self.plane.lower() == "coronal":
@@ -389,6 +511,15 @@ class MaskToContour(object):
                     self.contour_pixel.append(contour_xyz)
 
     def compute_position(self):
+        """Transform pixel-space contours into world coordinates.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> helper = MaskToContour(mask=np.zeros((8, 16, 16), dtype=np.uint8), spacing=(1, 1, 1), origin=(0, 0, 0), matrix=np.eye(3))
+        >>> helper.compute_position(...)
+        """
         pixel_to_position_matrix = np.identity(4, dtype=np.float32)
         pixel_to_position_matrix[:3, 0] = self.matrix[0, :] * self.spacing[0]
         pixel_to_position_matrix[:3, 1] = self.matrix[1, :] * self.spacing[1]
@@ -401,17 +532,20 @@ class MaskToContour(object):
 
 
 class ModelToMask(object):
-    """
-    Converts 3D model(s) into a volumetric mask. The mask can either be:
+    """Converts 3D model(s) into a volumetric mask. The mask can either be:
         - an empty array (default)
         - a binary mask representing the models.
-
+    
     The mask is padded with a spacing buffer of 5 units along each axis (x, y, z) to ensure the model fits comfortably.
+    
+    Examples
+    --------
+    >>> from medicalimageanalysis.utils.convert.contour import ModelToMask
+    >>> obj = ModelToMask(...)
     """
     def __init__(self, models, origin=None, spacing=None, dims=None, slice_locations=None, matrix=None,
                  empty_array=True, convert=True):
-        """
-        Parameters
+        """Parameters
         ----------
         models : list
             List of 3D models to convert into a mask.
@@ -429,6 +563,13 @@ class ModelToMask(object):
             If True, only an empty mask is created. If False, the mask is filled with model contours.
         convert : bool
             If True, automatically computes bounds, contours, and mask during initialization.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> helper = ModelToMask(models=[pv.Sphere()], empty_array=False)
+        >>> helper.__init__(...)
         """
         self.models = models
         self.empty_array = empty_array
@@ -454,9 +595,15 @@ class ModelToMask(object):
             self.compute_mask()
 
     def compute_bounds(self):
-        """
-        Computes the bounding box for all models combined. Adds a buffer of 5 units multiplied by the spacing on each
+        """Computes the bounding box for all models combined. Adds a buffer of 5 units multiplied by the spacing on each
         axis. Sets default spacing based on model size if spacing is not provided.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> helper = ModelToMask(models=[pv.Sphere()], empty_array=False)
+        >>> helper.compute_bounds(...)
         """
         model_bounds = [model.GetBounds() for model in self.models]
         model_min = np.min(model_bounds, axis=0)
@@ -481,9 +628,15 @@ class ModelToMask(object):
             self.dims = [len(self.slice_locations), self.bounds[3] - self.bounds[2] + 1, self.bounds[1] - self.bounds[0] + 1]
 
     def compute_contours(self):
-        """
-        Computes 2D contours along the z-axis for each model at the pre-defined slice locations. These contours are
+        """Computes 2D contours along the z-axis for each model at the pre-defined slice locations. These contours are
         later used to fill the mask.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> helper = ModelToMask(models=[pv.Sphere()], empty_array=False)
+        >>> helper.compute_contours(...)
         """
         for model in self.models:
             com = model.center
@@ -501,8 +654,14 @@ class ModelToMask(object):
             self.contours.append(model_contours)
 
     def compute_mask(self):
-        """
-        Creates a 3D mask. Default is an empty array. If empty_array=False, fills mask using computed contours.
+        """Creates a 3D mask. Default is an empty array. If empty_array=False, fills mask using computed contours.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> helper = ModelToMask(models=[pv.Sphere()], empty_array=False)
+        >>> helper.compute_mask(...)
         """
         self.mask = np.zeros((self.dims[0], self.dims[1], self.dims[2]))
         if not self.empty_array:
@@ -518,14 +677,19 @@ class ModelToMask(object):
         self.mask = self.mask.astype(np.int8)
 
     def save_image(self, export_path):
-        """
-        Saves the mask as an image file using SimpleITK.
-
+        """Saves the mask as an image file using SimpleITK.
+        
         Parameters
         ----------
         export_path : str
             Output file path to save the mask.
-
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> helper = ModelToMask(models=[pv.Sphere()], empty_array=False)
+        >>> helper.save_image(...)
         """
         image = sitk.GetImageFromArray(self.mask)
         image.SetSpacing(self.spacing)

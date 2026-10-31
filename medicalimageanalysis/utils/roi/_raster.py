@@ -1,5 +1,4 @@
-"""
-Morfeus lab
+"""Morfeus lab
 The University of Texas
 MD Anderson Cancer Center
 Author - Caleb O'Connor
@@ -11,6 +10,12 @@ _raster.py - shared internals for the conversion modules (not public API).
   volume_to_grid                  field volume -> uint8 0..255 on the CT grid (to_mesh, to_mask)
   _loops / _cut / _flat           mesh plane cuts, VTK segments -> rings     (to_contours, to_mask)
   fill_contours / rings_to_mask   rings on CT slices -> binary / 0..255 mask (to_mask)
+
+Examples
+--------
+>>> import numpy as np
+>>> import medicalimageanalysis as mia
+>>> mask = np.zeros((8, 32, 32), dtype=np.uint8)
 """
 import numpy as np
 import vtk
@@ -31,12 +36,12 @@ def _to_u8(f, w):
 
 def normalize_direction(direction, direction_rows=True):
     """Return a column-oriented direction matrix for the core geometry routines.
-
+    
     The low-level contour/mesh algorithms expect a 3x3 matrix whose columns are the
     image i, j, k axes in world coordinates. The ROI/image objects in this codebase store
     their image matrix with those axes in the rows instead, so the public wrappers accept
     the row-oriented matrix by default and normalize it here.
-
+    
     Parameters
     ----------
     direction : array-like, shape (3, 3)
@@ -44,6 +49,11 @@ def normalize_direction(direction, direction_rows=True):
     direction_rows : bool, default True
         True when ``direction`` stores the image axes in its rows; False when it already
         stores them in its columns.
+    
+    Examples
+    --------
+    >>> from medicalimageanalysis.utils.roi._raster import normalize_direction
+    >>> normalize_direction(...)
     """
     D = np.asarray(direction, float)
     if D.shape != (3, 3):
@@ -74,10 +84,16 @@ def volume_to_grid(vol, frame, shape_zyx, origin, spacing, direction, ramp=None,
     """Sample a _Volume field at every CT voxel centre -> uint8 (nz, ny, nx), 0..255.
     Trilinear in (x, y, plane index), plane index -> z piecewise linear: the same
     interpolation Flying Edges uses along lattice edges. Unions into `out` by max.
-
+    
     BIG sentinels (and values mixed with them) are replaced by +-max(h, w) first: FE only
     interpolates along edges that cross zero (exact at both ends by construction), but a
-    trilinear cell interior sees all 8 corners and a 1e4 corner would drag the boundary."""
+    trilinear cell interior sees all 8 corners and a 1e4 corner would drag the boundary.
+    
+    Examples
+    --------
+    >>> from medicalimageanalysis.utils.roi._raster import volume_to_grid
+    >>> volume_to_grid(...)
+    """
     nz, ny, nx = shape_zyx
     Dc, sc, Oc = (np.asarray(a, float) for a in (direction, spacing, origin))
     if out is None:
@@ -200,7 +216,13 @@ def _flat(rings_by_slice):
 # =============================================================================== rings -> mask
 def fill_contours(rings_by_slice, shape_zyx, origin, spacing, direction):
     """{slice_index: [(n,3) world rings]} -> binary uint8 mask (nz, ny, nx). Even-odd scanline
-    fill of every ring of every slice at once; a pixel is inside when its centre is inside."""
+    fill of every ring of every slice at once; a pixel is inside when its centre is inside.
+    
+    Examples
+    --------
+    >>> from medicalimageanalysis.utils.roi._raster import fill_contours
+    >>> fill_contours(...)
+    """
     nz, ny, nx = shape_zyx
     D = np.asarray(direction, float)
     sp = np.asarray(spacing, float)
@@ -250,7 +272,13 @@ def fill_contours(rings_by_slice, shape_zyx, origin, spacing, direction):
 def rings_to_mask(rings_by_slice, shape_zyx, origin, spacing, direction, ramp=None):
     """{slice_index: [(n,3) world rings]} -> uint8 (nz, ny, nx), 0..255, >= 128 inside.
     Exact in-plane signed distance near the rings (same quantity as the field's slice
-    planes), even-odd fill for the sign and for the saturated interior."""
+    planes), even-odd fill for the sign and for the saturated interior.
+    
+    Examples
+    --------
+    >>> from medicalimageanalysis.utils.roi._raster import rings_to_mask
+    >>> rings_to_mask(...)
+    """
     nz, ny, nx = shape_zyx
     D, sp, O = (np.asarray(a, float) for a in (direction, spacing, origin))
     w = float(min(sp[0], sp[1]) if ramp is None else ramp)

@@ -1,5 +1,4 @@
-"""
-Morfeus lab
+"""Morfeus lab
 The University of Texas
 MD Anderson Cancer Center
 Author - Caleb O'Connor
@@ -12,6 +11,12 @@ Description:
 Structure:
     - CreateDicomImage: Class to generate and write physical .dcm slice files from an array.
     - CreateImageFromMask: Class to instantiate frame-of-reference compliant dataset models.
+
+Examples
+--------
+>>> import numpy as np
+>>> import medicalimageanalysis as mia
+>>> mask = np.zeros((8, 32, 32), dtype=np.uint8)
 """
 
 import os
@@ -28,9 +33,8 @@ from ..structure import Image
 
 
 class CreateDicomImage(object):
-    """
-    Handles the generation and physical serialization of standard DICOM images from voxel data.
-
+    """Handles the generation and physical serialization of standard DICOM images from voxel data.
+    
     Parameters
     ----------
     output_dir : str
@@ -49,9 +53,21 @@ class CreateDicomImage(object):
         The physical distance (X, Y) between adjacent pixels. Defaults to [1, 1].
     thickness : float, optional
         The nominal thickness of the image slice along the Z-axis. Defaults to 1.
+    
+    Examples
+    --------
+    >>> from medicalimageanalysis.utils.creation import CreateDicomImage
+    >>> obj = CreateDicomImage(...)
     """
     def __init__(self, output_dir, data, study=None, series=None, frame=None, origin=None, spacing=None,
                  thickness=None):
+        """Store voxel data and metadata needed to emit a synthetic DICOM series.
+        
+        Examples
+        --------
+        >>> obj = CreateDicomImage(...)
+        >>> obj.__init__(...)
+        """
         self.output_dir = output_dir
         self.data = data
         self.study = study
@@ -64,68 +80,92 @@ class CreateDicomImage(object):
         self.orientation = [1, 0, 0, 0, 1, 0]
 
     def set_study(self, study):
-        """
-        Sets the Study Instance UID.
-
+        """Sets the Study Instance UID.
+        
         Parameters
         ----------
         study : str
             The new Study Instance UID.
+        
+        Examples
+        --------
+        >>> obj = CreateDicomImage(...)
+        >>> obj.set_study(...)
         """
         self.study = study
 
     def set_series(self, series):
-        """
-        Sets the Series Instance UID.
-
+        """Sets the Series Instance UID.
+        
         Parameters
         ----------
         series : str
             The new Series Instance UID.
+        
+        Examples
+        --------
+        >>> obj = CreateDicomImage(...)
+        >>> obj.set_series(...)
         """
         self.series = series
 
     def set_frame(self, frame):
-        """
-        Sets the Frame of Reference UID.
-
+        """Sets the Frame of Reference UID.
+        
         Parameters
         ----------
         frame : str
             The new Frame of Reference UID.
+        
+        Examples
+        --------
+        >>> obj = CreateDicomImage(...)
+        >>> obj.set_frame(...)
         """
         self.frame = frame
 
     def set_origin(self, origin):
-        """
-        Sets the physical image origin coordinates.
-
+        """Sets the physical image origin coordinates.
+        
         Parameters
         ----------
         origin : list of float
             The [X, Y, Z] components of the new origin.
+        
+        Examples
+        --------
+        >>> obj = CreateDicomImage(...)
+        >>> obj.set_origin(...)
         """
         self.origin = origin
 
     def set_spacing(self, spacing):
-        """
-        Sets the internal pixel grid resolution spacing.
-
+        """Sets the internal pixel grid resolution spacing.
+        
         Parameters
         ----------
         spacing : list of float
             The [X, Y] spacing components.
+        
+        Examples
+        --------
+        >>> obj = CreateDicomImage(...)
+        >>> obj.set_spacing(...)
         """
         self.spacing = spacing
 
     def set_thickness(self, thickness):
-        """
-        Sets the thickness configuration for each slice.
-
+        """Sets the thickness configuration for each slice.
+        
         Parameters
         ----------
         thickness : float
             The thickness value.
+        
+        Examples
+        --------
+        >>> obj = CreateDicomImage(...)
+        >>> obj.set_thickness(...)
         """
         self.thickness = thickness
 
@@ -230,9 +270,8 @@ class CreateDicomImage(object):
 
 
 class CreateImageFromMask(object):
-    """
-    Constructs an internal image coordinate frame context from segmentation masks.
-
+    """Constructs an internal image coordinate frame context from segmentation masks.
+    
     Parameters
     ----------
     array : numpy.ndarray
@@ -253,9 +292,21 @@ class CreateImageFromMask(object):
         Textual details stored in the Series Description metadata field. Defaults to 'Mask to Image'.
     modality : str, optional
         Target medical system scan string abbreviation. Defaults to 'CT'.
+    
+    Examples
+    --------
+    >>> from medicalimageanalysis.utils.creation import CreateImageFromMask
+    >>> obj = CreateImageFromMask(...)
     """
     def __init__(self, array, origin, spacing, image_name, dimensions=None, orientation=None, plane='Axial',
                  description='Mask to Image', modality='CT'):
+        """Build an in-memory image object from array data and geometric metadata.
+        
+        Examples
+        --------
+        >>> obj = CreateImageFromMask(...)
+        >>> obj.__init__(...)
+        """
         self.rois = {}
         self.pois = {}
 
@@ -365,30 +416,38 @@ class CreateImageFromMask(object):
         self.image_set = dicoms
 
     def add_image(self):
-        """
-        Registers the configured mask instance directly to global tracking states.
-
+        """Registers the configured mask instance directly to global tracking states.
+        
         Returns
         -------
         None
+        
+        Examples
+        --------
+        >>> obj = CreateImageFromMask(...)
+        >>> obj.add_image(...)
         """
         Data.image[self.image_name] = Image(self)
         Data.image_list += [self.image_name]
 
     def add_mesh_roi(self, mesh, roi_name):
-        """
-        Appends complex physical 3D mesh elements inside sub-region tracking fields.
-
+        """Appends complex physical 3D mesh elements inside sub-region tracking fields.
+        
         Parameters
         ----------
         mesh : object
             A mesh structure instance exposing metric fields (.volume, .center, .bounds).
         roi_name : str
             The lookup dictionary sub-key label name assigned to this ROI.
-
+        
         Returns
         -------
         None
+        
+        Examples
+        --------
+        >>> obj = CreateImageFromMask(...)
+        >>> obj.add_mesh_roi(...)
         """
         Data.image[self.image_name].create_roi(self, name=roi_name, color=[0, 0, 255], visible=False, filepath=None)
         self.rois[roi_name].mesh = mesh
@@ -398,18 +457,22 @@ class CreateImageFromMask(object):
         self.rois[roi_name].bounds = mesh.bounds
 
     def compute_position(self, z):
-        """
-        Calculates the real-world spatial position context of a slice index.
-
+        """Calculates the real-world spatial position context of a slice index.
+        
         Parameters
         ----------
         z : int or float
             The slice layer index stepping component along the direction axis.
-
+        
         Returns
         -------
         numpy.ndarray
             A 3-element vector array denoting coordinates [X, Y, Z].
+        
+        Examples
+        --------
+        >>> obj = CreateImageFromMask(...)
+        >>> obj.compute_position(...)
         """
         matrix = copy.deepcopy(self.image_matrix)
 

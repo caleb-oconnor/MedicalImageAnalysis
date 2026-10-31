@@ -1,11 +1,16 @@
-"""
-Morfeus lab
+"""Morfeus lab
 The University of Texas
 MD Anderson Cancer Center
 Author - Caleb O'Connor
 Email - csoconnor@mdanderson.org
 
 Description:
+
+Examples
+--------
+>>> import numpy as np
+>>> import medicalimageanalysis as mia
+>>> mask = np.zeros((8, 32, 32), dtype=np.uint8)
 """
 
 import numpy as np
@@ -15,10 +20,15 @@ from skimage.measure import label, regionprops
 
 
 def external(array, threshold=-250, min_volume=100, only_mask=True, less_than=False):
-    """
-    Identifies the largest connected component in a 3D array (e.g., CT/MRI volume) above or below a threshold,
+    """Identifies the largest connected component in a 3D array (e.g., CT/MRI volume) above or below a threshold,
     optionally returning its mask, centroid positions per slice, number of external components per slice, and bounding
     box. Useful for isolating external anatomy or dominant structures.
+    
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from medicalimageanalysis.utils.image.threshold import external
+    >>> mask = external(np.zeros((8, 32, 32), dtype=np.int16), threshold=-250, only_mask=True)
     """
     if less_than:
         binary = array < threshold

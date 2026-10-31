@@ -1,5 +1,4 @@
-"""
-Morfeus lab
+"""Morfeus lab
 The University of Texas
 MD Anderson Cancer Center
 Author - Caleb O'Connor
@@ -40,6 +39,11 @@ Usage:
     >>> # Load the DICOMs found
     >>> mia.read_dicoms(file_list=files['Dicom'])
 
+Examples
+--------
+>>> import medicalimageanalysis as mia
+>>> files = mia.file_parser(folder_path='C:/Data/Patient01')
+>>> mia.read_dicoms(file_list=files['Dicom'])
 """
 
 import os

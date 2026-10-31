@@ -1,5 +1,4 @@
-"""
-Morfeus lab
+"""Morfeus lab
 The University of Texas
 MD Anderson Cancer Center
 Author - Caleb O'Connor
@@ -14,6 +13,12 @@ to_mask.py - conversions that produce a uint8 0..255 mask (>= 128 inside).
 contours_to_mask samples the shape-interpolation field that Flying Edges meshes (no mesh is
 built); contours_to_mask_direct fills contours that already sit on every CT slice;
 mesh_to_mask cuts the mesh at the CT slice centres and uses the signed distance to the cuts.
+
+Examples
+--------
+>>> import numpy as np
+>>> import medicalimageanalysis as mia
+>>> mask = np.zeros((8, 32, 32), dtype=np.uint8)
 """
 import numpy as np
 
@@ -25,7 +30,13 @@ def contours_to_mask(contours, shape_zyx, origin, spacing, direction, ramp=None,
                      direction_rows=True, **kw):
     """Contours (list of (n,3) world arrays) -> uint8 mask (0..255) sampled from the
     shape-based-interpolation field. No mesh is built. Works when contours skip CT slices
-    and for sagittal / coronal contours on an axial grid."""
+    and for sagittal / coronal contours on an axial grid.
+    
+    Examples
+    --------
+    >>> from medicalimageanalysis.utils.roi.to_mask import contours_to_mask
+    >>> contours_to_mask(...)
+    """
     direction = normalize_direction(direction, direction_rows=direction_rows)
     slices, frame, dz = _group(contours, origin, spacing, direction)
     mask = np.zeros(shape_zyx, np.uint8)
@@ -37,7 +48,13 @@ def contours_to_mask(contours, shape_zyx, origin, spacing, direction, ramp=None,
 def contours_to_mask_direct(contours, shape_zyx, origin, spacing, direction, ramp=None,
                             direction_rows=True):
     """Contours drawn on the CT slices themselves -> uint8 mask (0..255), no field or mesh.
-    Only valid when every CT slice inside the structure has its own contour."""
+    Only valid when every CT slice inside the structure has its own contour.
+    
+    Examples
+    --------
+    >>> from medicalimageanalysis.utils.roi.to_mask import contours_to_mask_direct
+    >>> contours_to_mask_direct(...)
+    """
     direction = normalize_direction(direction, direction_rows=direction_rows)
     D, O = np.asarray(direction, float), np.asarray(origin, float)
     by_k = {}
@@ -50,7 +67,13 @@ def contours_to_mask_direct(contours, shape_zyx, origin, spacing, direction, ram
 
 def mesh_to_mask(poly, shape_zyx, origin, spacing, direction, ramp=None,
                  direction_rows=True):
-    """Closed mesh -> uint8 mask (0..255): cut at CT slice centres, signed distance to the cuts."""
+    """Closed mesh -> uint8 mask (0..255): cut at CT slice centres, signed distance to the cuts.
+    
+    Examples
+    --------
+    >>> from medicalimageanalysis.utils.roi.to_mask import mesh_to_mask
+    >>> mesh_to_mask(...)
+    """
     direction = normalize_direction(direction, direction_rows=direction_rows)
     rc = _cut(poly, origin, direction, np.arange(shape_zyx[0]) * spacing[2])  # key = slice index
     return rings_to_mask(rc, shape_zyx, origin, spacing, direction, ramp)

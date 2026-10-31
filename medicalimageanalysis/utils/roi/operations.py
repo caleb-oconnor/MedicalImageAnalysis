@@ -1,5 +1,4 @@
-"""
-Morfeus lab
+"""Morfeus lab
 The University of Texas
 MD Anderson Cancer Center
 Author - Caleb O'Connor
@@ -42,6 +41,12 @@ How it works
     Booleans: the 0..255 masks are signed-distance ramps across each boundary, so
         union = max(a, b),   intersect = min(a, b),   a minus b = min(a, 255 - b)
     keeps each ROI's sub-pixel boundary instead of snapping to voxels.
+
+Examples
+--------
+>>> import numpy as np
+>>> import medicalimageanalysis as mia
+>>> mask = np.zeros((8, 32, 32), dtype=np.uint8)
 """
 
 from dataclasses import dataclass
@@ -60,13 +65,29 @@ from .to_mesh import contours_to_mask_and_mesh, contours_to_mesh
 
 @dataclass
 class Grid:
-    """The CT grid all ROIs are put on (same conventions as the to_* conversions)."""
+    """The CT grid all ROIs are put on (same conventions as the to_* conversions).
+    
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from medicalimageanalysis.utils.roi.operations import Grid
+    >>> grid = Grid((16, 64, 64), np.zeros(3), np.ones(3), np.eye(3))
+    """
     shape_zyx: tuple            # (nz, ny, nx)
     origin: np.ndarray          # world (x, y, z) of voxel (0, 0, 0)
     spacing: np.ndarray         # (sx, sy, sz) mm
     direction: np.ndarray       # 3x3, columns = image i, j, k axes in world
 
     def __post_init__(self):
+        """Normalize incoming grid metadata to typed NumPy arrays and tuples.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> grid = Grid((16, 64, 64), np.zeros(3), np.ones(3), np.eye(3))
+        >>> grid.__post_init__(...)
+        """
         self.shape_zyx = tuple(int(v) for v in self.shape_zyx)
         self.origin = np.asarray(self.origin, float)
         self.spacing = np.asarray(self.spacing, float)
@@ -74,6 +95,15 @@ class Grid:
 
     @property
     def ramp(self):
+        """Return the intensity-ramp width used when generating soft mask boundaries.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> grid = Grid((16, 64, 64), np.zeros(3), np.ones(3), np.eye(3))
+        >>> grid.ramp(...)
+        """
         # Width (mm) of the 0..255 ramp for masks made here. Two in-plane pixels keeps both
         # pixels either side of a boundary unclipped, so mask -> contours interpolates the
         # true sub-pixel boundary. Only the 127.5 level matters downstream.
@@ -81,14 +111,30 @@ class Grid:
 
     @property
     def geom(self):
+        """Return ``(origin, spacing, direction)`` for downstream conversion helpers.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> grid = Grid((16, 64, 64), np.zeros(3), np.ones(3), np.eye(3))
+        >>> grid.geom(...)
+        """
         # (origin, spacing, direction): the positional args every conversion takes
         return self.origin, self.spacing, self.direction
 
 
 # =============================================================================== public API
 def dilate(roi, grid, mm, output="mesh", reduction=0.5, **kw):
-    """
-    Grow one ROI by mm (scalar or (x, y, z), >= 0).
+    """Grow one ROI by mm (scalar or (x, y, z), >= 0).
+    
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from medicalimageanalysis.utils.roi.operations import Grid, dilate
+    >>> grid = Grid((16, 64, 64), np.zeros(3), np.ones(3), np.eye(3))
+    >>> mask = np.zeros((16, 64, 64), dtype=np.uint8)
+    >>> result = dilate(mask, grid, 3)
     """
     if np.any(np.asarray(mm) < 0):
         raise ValueError("dilate takes a positive margin; use erode to shrink")
@@ -97,8 +143,15 @@ def dilate(roi, grid, mm, output="mesh", reduction=0.5, **kw):
 
 
 def erode(roi, grid, mm, output="mesh", reduction=0.5, **kw):
-    """
-    Shrink one ROI by mm (scalar or (x, y, z), given as a positive number).
+    """Shrink one ROI by mm (scalar or (x, y, z), given as a positive number).
+    
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from medicalimageanalysis.utils.roi.operations import Grid, erode
+    >>> grid = Grid((16, 64, 64), np.zeros(3), np.ones(3), np.eye(3))
+    >>> mask = np.zeros((16, 64, 64), dtype=np.uint8)
+    >>> result = erode(mask, grid, 3)
     """
     if np.any(np.asarray(mm) < 0):
         raise ValueError("erode takes a positive margin (the amount to shrink by)")
@@ -107,8 +160,15 @@ def erode(roi, grid, mm, output="mesh", reduction=0.5, **kw):
 
 
 def intersect(rois, grid, margins=None, output="mesh", reduction=0.5, **kw):
-    """
-    rois[0] & rois[1] & ...  margins: None or one margin per ROI, applied first.
+    """rois[0] & rois[1] & ...  margins: None or one margin per ROI, applied first.
+    
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from medicalimageanalysis.utils.roi.operations import Grid, intersect
+    >>> grid = Grid((16, 64, 64), np.zeros(3), np.ones(3), np.eye(3))
+    >>> mask = np.zeros((16, 64, 64), dtype=np.uint8)
+    >>> result = intersect([mask, mask], grid)
     """
     masks = _roi_masks(rois, grid, margins, **kw)
     out = masks[0].copy()
@@ -119,10 +179,17 @@ def intersect(rois, grid, margins=None, output="mesh", reduction=0.5, **kw):
 
 
 def subtract(main, others, grid, margins=None, output="mesh", reduction=0.5, **kw):
-    """
-    main minus (others[0] | others[1] | ...).
+    """main minus (others[0] | others[1] | ...).
     margins: None or one margin per ROI in the order [main, *others], applied first.
     `others` may also be a single ROI.
+    
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from medicalimageanalysis.utils.roi.operations import Grid, subtract
+    >>> grid = Grid((16, 64, 64), np.zeros(3), np.ones(3), np.eye(3))
+    >>> mask = np.zeros((16, 64, 64), dtype=np.uint8)
+    >>> result = subtract([mask, mask], grid)
     """
     if not isinstance(others, (list, tuple)) or _is_ring(others[0]):
         others = [others]                      # a single ROI (contour list counts as one ROI)
@@ -138,8 +205,15 @@ def subtract(main, others, grid, margins=None, output="mesh", reduction=0.5, **k
 
 
 def union(rois, grid, margins=None, output="mesh", reduction=0.5, **kw):
-    """
-    rois[0] | rois[1] | ...  margins: None or one margin per ROI, applied first.
+    """rois[0] | rois[1] | ...  margins: None or one margin per ROI, applied first.
+    
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from medicalimageanalysis.utils.roi.operations import Grid, union
+    >>> grid = Grid((16, 64, 64), np.zeros(3), np.ones(3), np.eye(3))
+    >>> mask = np.zeros((16, 64, 64), dtype=np.uint8)
+    >>> result = union([mask, mask], grid)
     """
     masks = _roi_masks(rois, grid, margins, **kw)
     out = masks[0].copy()

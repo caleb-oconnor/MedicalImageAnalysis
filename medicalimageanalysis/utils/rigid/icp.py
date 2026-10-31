@@ -1,5 +1,4 @@
-"""
-Morfeus lab
+"""Morfeus lab
 The University of Texas
 MD Anderson Cancer Center
 Author - Caleb O'Connor
@@ -9,6 +8,11 @@ Description:
 
 Structure:
 
+Examples
+--------
+>>> import numpy as np
+>>> import medicalimageanalysis as mia
+>>> mask = np.zeros((8, 32, 32), dtype=np.uint8)
 """
 import copy
 
@@ -27,14 +31,19 @@ from open3d.pipelines.registration import (registration_icp, ICPConvergenceCrite
 
 
 class ICP(object):
-    """
-    Performs Iterative Closest Point (ICP) registration between a source and a target mesh or point cloud. Supports
+    """Performs Iterative Closest Point (ICP) registration between a source and a target mesh or point cloud. Supports
     both VTK-based and Open3D-based ICP implementations.
+    
+    Examples
+    --------
+    >>> import pyvista as pv
+    >>> from medicalimageanalysis.utils.rigid.icp import ICP
+    >>> icp = ICP(pv.Sphere(), pv.Sphere(center=(2, 0, 0)))
+    >>> matrix = icp.get_matrix()
     """
     def __init__(self, source: pv.PolyData, target: pv.PolyData, matrix: np.ndarray | None = None):
-        """
-        Initializes the ICP object.
-
+        """Initializes the ICP object.
+        
         Parameters
         ----------
         source : pyvista.PolyData
@@ -43,13 +52,19 @@ class ICP(object):
             The reference/target mesh.
         matrix : (4, 4) ndarray, optional
             Initial transformation matrix. Defaults to identity.
-
+        
         Raises
         ------
         TypeError
             If source or target is not a pyvista.PolyData.
         ValueError
             If matrix is not 4x4.
+        
+        Examples
+        --------
+        >>> import pyvista as pv
+        >>> icp = ICP(pv.Sphere(), pv.Sphere(center=(2, 0, 0)))
+        >>> icp.__init__(...)
         """
 
         for name, mesh in (('source', source), ('target', target)):
@@ -129,8 +144,13 @@ class ICP(object):
         return pts[idx], (normals[idx] if normals is not None else None)
 
     def compute_com(self):
-        """
-        Computes an initial translation by matching the center of mass (COM) of the source and target meshes.
+        """Computes an initial translation by matching the center of mass (COM) of the source and target meshes.
+        
+        Examples
+        --------
+        >>> import pyvista as pv
+        >>> icp = ICP(pv.Sphere(), pv.Sphere(center=(2, 0, 0)))
+        >>> icp.compute_com(...)
         """
         translation = np.asarray(self.target.center) - np.asarray(self.source.center)
 
@@ -139,9 +159,8 @@ class ICP(object):
 
     def compute_o3d(self, distance=10, iterations=50, rmse=1e-6, fitness=1e-6, method='point', com_matching=True,
                     inverse=False, src_frac=0.1, tgt_frac=1.0, min_pts=1000, max_pts=20000, seed=0):
-        """
-        Performs rigid ICP using Open3D on subsampled source/target points.
-
+        """Performs rigid ICP using Open3D on subsampled source/target points.
+        
         Parameters
         ----------
         distance : float
@@ -168,19 +187,25 @@ class ICP(object):
             Maximum number of source points kept. None means no cap.
         seed : int
             Random seed for subsampling.
-
+        
         Uses
         ----
         self.source : pyvista.PolyData
             Mesh that is moved onto the target.
         self.target : pyvista.PolyData
             Fixed mesh; must have point_normals for method='plane'.
-
+        
         Returns
         -------
         None
             Sets self.icp (open3d RegistrationResult) and
             self.matrix ((4, 4) ndarray, source -> target, or its inverse if inverse=True).
+        
+        Examples
+        --------
+        >>> import pyvista as pv
+        >>> icp = ICP(pv.Sphere(), pv.Sphere(center=(2, 0, 0)))
+        >>> icp.compute_o3d(...)
         """
 
         src_pts = np.asarray(self.source.points)
@@ -214,9 +239,8 @@ class ICP(object):
 
     def compute_vtk(self, distance=1e-3, iterations=100, src_frac=0.1, min_pts=1000, max_pts=20000, com_matching=True,
                     inverse=False):
-        """
-        Performs rigid ICP using VTK, with landmark count set as a fraction of source points.
-
+        """Performs rigid ICP using VTK, with landmark count set as a fraction of source points.
+        
         Parameters
         ----------
         distance : float
@@ -233,19 +257,25 @@ class ICP(object):
             If True, starts by matching the source and target centroids.
         inverse : bool
             If True, stores the inverse of the resulting transformation matrix.
-
+        
         Uses
         ----
         self.source : pyvista.PolyData
             Mesh that is moved onto the target (landmarks are taken from here).
         self.target : pyvista.PolyData
             Fixed mesh; full resolution is used for the closest-point search.
-
+        
         Returns
         -------
         None
             Sets self.icp (vtkIterativeClosestPointTransform) and
             self.matrix ((4, 4) ndarray, source -> target, or its inverse if inverse=True).
+        
+        Examples
+        --------
+        >>> import pyvista as pv
+        >>> icp = ICP(pv.Sphere(), pv.Sphere(center=(2, 0, 0)))
+        >>> icp.compute_vtk(...)
         """
 
         landmarks = self._sample_count(self.source.n_points, src_frac, min_pts, max_pts)
@@ -266,25 +296,35 @@ class ICP(object):
         self.matrix = np.linalg.inv(m) if inverse else m
 
     def get_matrix(self):
-        """
-        Returns the resulting transformation matrix.
-
+        """Returns the resulting transformation matrix.
+        
         Returns
         -------
         np.ndarray
             4x4 transformation matrix.
+        
+        Examples
+        --------
+        >>> import pyvista as pv
+        >>> icp = ICP(pv.Sphere(), pv.Sphere(center=(2, 0, 0)))
+        >>> icp.get_matrix(...)
         """
 
         return self.matrix
 
     def get_correspondence_set(self):
-        """
-        Returns the set of corresponding point indices (if available).
-
+        """Returns the set of corresponding point indices (if available).
+        
         Returns
         -------
         np.ndarray or None
             Correspondence set from ICP.
+        
+        Examples
+        --------
+        >>> import pyvista as pv
+        >>> icp = ICP(pv.Sphere(), pv.Sphere(center=(2, 0, 0)))
+        >>> icp.get_correspondence_set(...)
         """
         if hasattr(self.icp, 'correspondence_set'):
             return np.asarray(self.icp.correspondence_set)

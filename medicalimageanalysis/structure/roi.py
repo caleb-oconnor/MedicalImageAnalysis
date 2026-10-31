@@ -1,5 +1,4 @@
-"""
-Morfeus lab
+"""Morfeus lab
 The University of Texas
 MD Anderson Cancer Center
 Author - Caleb O'Connor
@@ -12,6 +11,12 @@ Description:
 Structure:
     - random_color: Helper function to generate random RGB values.
     - Roi: Core class managing volumetric region data, contours, and surface meshes.
+
+Examples
+--------
+>>> import medicalimageanalysis as mia
+>>> mia.read_mhd(file='C:/Data/scan.mhd', modality='CT')
+>>> image = mia.Data.image[mia.Data.image_list[0]]
 """
 
 import random
@@ -63,13 +68,17 @@ def random_color(rgb_255=True):
 
 
 class Roi(object):
-    """
-    Region of Interest (ROI) manager for internal image contours and 3D meshes.
+    """Region of Interest (ROI) manager for internal image contours and 3D meshes.
+    
+    Examples
+    --------
+    >>> import medicalimageanalysis as mia
+    >>> image = mia.Data.image[mia.Data.image_list[0]]
+    >>> roi = image.rois['PTV']
     """
     def __init__(self, image, position=None, name=None, color=None, visible=False, filepaths=None, plane=None):
-        """
-        Initialize the Roi object.
-
+        """Initialize the Roi object.
+        
         Parameters
         ----------
         image : object
@@ -86,6 +95,13 @@ class Roi(object):
             Associated source or configuration files for the ROI.
         plane : str, optional
             The orientation plane ('Axial', 'Coronal', or 'Sagittal'). Defaults to image plane.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> roi = image.rois['PTV']
+        >>> roi.__init__(...)
         """
         self.image = image
 
@@ -121,17 +137,23 @@ class Roi(object):
         self.misc = {}
 
     def add_mesh(self, mesh):
-        """
-        Bind an existing mesh to the ROI and extract its spatial attributes.
-
+        """Bind an existing mesh to the ROI and extract its spatial attributes.
+        
         Parameters
         ----------
         mesh : object
             A mesh object containing structural parameters (volume, center, bounds).
-
+        
         Returns
         -------
         None
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> roi = image.rois['PTV']
+        >>> roi.add_mesh(...)
         """
         self.mesh = mesh
 
@@ -140,16 +162,22 @@ class Roi(object):
         self.bounds = mesh.bounds
 
     def clear(self):
-        """
-        Reset the geometric metrics, mesh, and structural bindings of the ROI.
-
+        """Reset the geometric metrics, mesh, and structural bindings of the ROI.
+        
         Parameters
         ----------
         None
-
+        
         Returns
         -------
         None
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> roi = image.rois['PTV']
+        >>> roi.clear(...)
         """
         self.contour_position = None
         self.contour_pixel = None
@@ -165,6 +193,15 @@ class Roi(object):
         self.misc = {}
 
     def convert_position_to_pixel(self, points, base=True, plane=None, origin=None):
+        """Convert world-space contour points into image or display pixel coordinates.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> roi = image.rois['PTV']
+        >>> roi.convert_position_to_pixel(...)
+        """
         if base:
             position_to_pixel_matrix = self.image.compute_matrix_position_to_pixel()
             pixel = []
@@ -193,18 +230,24 @@ class Roi(object):
             return pixel
 
     def convert_pixel_to_position(self, pixel=None):
-        """
-        Convert pixel coordinates into physical spatial world coordinates.
-
+        """Convert pixel coordinates into physical spatial world coordinates.
+        
         Parameters
         ----------
         pixel : list of numpy.ndarray, optional
             A list of image pixel-index matrices to be mapped.
-
+        
         Returns
         -------
         list of numpy.ndarray
             The physical coordinates corresponding to the pixel indexes.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> roi = image.rois['PTV']
+        >>> roi.convert_pixel_to_position(...)
         """
         pixel_to_position_matrix = self.image.compute_matrix_pixel_to_position()
 
@@ -216,12 +259,18 @@ class Roi(object):
         return position
 
     def create_mesh(self, reduction=0):
-        """
-        Generate a smoothed 3D surface mesh from the current pixel contours.
-
+        """Generate a smoothed 3D surface mesh from the current pixel contours.
+        
         Returns
         -------
         None
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> roi = image.rois['PTV']
+        >>> roi.create_mesh(...)
         """
         self.mesh = contours_to_mesh(self.contour_position,
                                      self.image.origin,
@@ -235,16 +284,22 @@ class Roi(object):
             self.bounds = self.mesh.bounds
 
     def create_discrete_mesh(self):
-        """
-        Compute an un-smoothed, step-like discrete mesh straight from pixel contour tracks.
-
+        """Compute an un-smoothed, step-like discrete mesh straight from pixel contour tracks.
+        
         Parameters
         ----------
         None
-
+        
         Returns
         -------
         None
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> roi = image.rois['PTV']
+        >>> roi.create_discrete_mesh(...)
         """
         meshing = ContourToDiscreteMesh(contour_pixel=self.contour_pixel,
                                         spacing=self.image.spacing,
@@ -259,9 +314,8 @@ class Roi(object):
         self.bounds = self.mesh.bounds
 
     def create_display_mesh(self, iterations=20, angle=60, passband=0.001):
-        """
-        Refine and smooth the loaded mesh for optimized presentation and rendering.
-
+        """Refine and smooth the loaded mesh for optimized presentation and rendering.
+        
         Parameters
         ----------
         iterations : int, default 20
@@ -270,29 +324,42 @@ class Roi(object):
             Feature angle threshold to protect defined corners/edges.
         passband : float, default 0.001
             Low-pass filter frequency option specifying overall detail preservation.
-
+        
         Returns
         -------
         None
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> roi = image.rois['PTV']
+        >>> roi.create_display_mesh(...)
         """
         refine = Refinement(self.mesh)
         self.mesh = refine.smooth(iterations=iterations, angle=angle, passband=passband)
 
     def create_decimate_mesh(self, percent=None, set_mesh=False):
-        """
-        Reduce the poly/triangle count of the active mesh framework.
-
+        """Reduce the poly/triangle count of the active mesh framework.
+        
         Parameters
         ----------
         percent : float, optional
             Decimation target coefficient. Calculated based on total nodes if None.
         set_mesh : bool, default False
             If True, overrides `self.mesh` directly with the decimated structure.
-
+        
         Returns
         -------
         object
             The decimated mesh instance.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> roi = image.rois['PTV']
+        >>> roi.create_decimate_mesh(...)
         """
         if percent is None:
             points = np.round(10 * np.sqrt(self.mesh.number_of_points))
@@ -305,20 +372,26 @@ class Roi(object):
         return mesh
 
     def create_cluster_mesh(self, points=None, set_mesh=False):
-        """
-        Cluster vertices across the mesh workspace to modify structural density.
-
+        """Cluster vertices across the mesh workspace to modify structural density.
+        
         Parameters
         ----------
         points : int, optional
             Target total cluster sample instances to evaluate.
         set_mesh : bool, default False
             If True, overrides `self.mesh` directly with the output cluster mesh.
-
+        
         Returns
         -------
         object
             The clustered mesh instance.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> roi = image.rois['PTV']
+        >>> roi.create_cluster_mesh(...)
         """
         refine = Refinement(self.mesh)
         mesh = refine.cluster(points=points)
@@ -328,19 +401,25 @@ class Roi(object):
         return mesh
 
     def compute_bounding_box(self, position=True):
-        """
-        Compute the 3D bounding box coordinates from the contour data.
-
+        """Compute the 3D bounding box coordinates from the contour data.
+        
         Parameters
         ----------
         position : bool, default True
             If True, evaluates physical position coordinates (`self.contour_position`).
             If False, evaluates pixel-space coordinates (`self.contour_pixel`).
-
+        
         Returns
         -------
         tuple
             The bounding box boundaries ordered as (xmin, xmax, ymin, ymax, zmin, zmax).
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> roi = image.rois['PTV']
+        >>> roi.compute_bounding_box(...)
         """
         if position:
             contour_stacked = np.vstack(self.contour_position)
@@ -353,6 +432,15 @@ class Roi(object):
         return contour_min[0], contour_max[0], contour_min[1], contour_max[1], contour_min[2], contour_max[2]
 
     def compute_components(self):
+        """Return connected components of the current ROI mesh, when available.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> roi = image.rois['PTV']
+        >>> roi.compute_components(...)
+        """
         if self.mesh is not None:
             return compute_components(self.mesh)
 
@@ -360,20 +448,26 @@ class Roi(object):
             return None
 
     def compute_contour(self, slice_location, offset=0):
-        """
-        Extract specific loop coordinates along a given anatomical frame intersection.
-
+        """Extract specific loop coordinates along a given anatomical frame intersection.
+        
         Parameters
         ----------
         slice_location : int
             The dimensional location slice coordinate to evaluate.
         offset : int/float, default 0
             Coordinate indexing padding offset adjustments.
-
+        
         Returns
         -------
         list of numpy.ndarray
             Extracted closed loops representing the slice intersection.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> roi = image.rois['PTV']
+        >>> roi.compute_contour(...)
         """
         contour_list = []
         if self.contour_pixel is not None:
@@ -412,13 +506,19 @@ class Roi(object):
         return contour_list
 
     def compute_mask(self):
-        """
-        Generate a binary voxel index mask reflecting the active contour perimeter profile.
-
+        """Generate a binary voxel index mask reflecting the active contour perimeter profile.
+        
         Returns
         -------
         numpy.ndarray
             A binary segmentation volume masking the underlying dataset space.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> roi = image.rois['PTV']
+        >>> roi.compute_mask(...)
         """
         mask = contours_to_mask(self.contour_position,
                                 self.image.dimensions,
@@ -435,9 +535,8 @@ class Roi(object):
         return mask
 
     def compute_mesh_slice(self, origin=None, plane=None, offset=0, rigid_matrix=None, return_pixel=False):
-        """
-        Slice the internal 3D mesh volume along an orthogonal viewing section.
-
+        """Slice the internal 3D mesh volume along an orthogonal viewing section.
+        
         Parameters
         ----------
         origin : float/list, optional
@@ -450,11 +549,18 @@ class Roi(object):
             Lets you slice based on a rigid registration
         return_pixel : bool, default False
             If True, calculates and formats structural data outputs as pixel indexes.
-
+        
         Returns
         -------
         tuple
             (pixel_corrected, colors) if return_pixel is True, otherwise (roi_slice, colors).
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> roi = image.rois['PTV']
+        >>> roi.compute_mesh_slice(...)
         """
 
         if self.mesh is None:
@@ -493,17 +599,23 @@ class Roi(object):
             return roi_slice, colors
 
     def create_sitk_mask(self):
-        """
-        Build an object instance conforming to a dedicated SimpleITK Image representation format.
-
+        """Build an object instance conforming to a dedicated SimpleITK Image representation format.
+        
         Parameters
         ----------
         None
-
+        
         Returns
         -------
         SimpleITK.Image
             An image structure mapped into SimpleITK space containing metadata properties.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> roi = image.rois['PTV']
+        >>> roi.create_sitk_mask(...)
         """
         mask = self.compute_mask()
 
@@ -516,17 +628,23 @@ class Roi(object):
         return sitk_mask
 
     def convert_mask(self, mask):
-        """
-        Deconstruct a spatial binary mask array template back into contours and updated tracking meshes.
-
+        """Deconstruct a spatial binary mask array template back into contours and updated tracking meshes.
+        
         Parameters
         ----------
         mask : numpy.ndarray
             The volumetric matrix profile used to update contour paths.
-
+        
         Returns
         -------
         None
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> roi = image.rois['PTV']
+        >>> roi.convert_mask(...)
         """
         mask_to_contour = MaskToContour(mask, spacing=self.image.spacing, origin=self.image.origin,
                                         matrix=self.image.matrix, plane=self.plane)
@@ -541,19 +659,25 @@ class Roi(object):
             self.bounds = None
 
     def update_pixel(self, pixel, plane='Axial', ):
-        """
-        Manually assign a new configuration of pixel layers and regenerate corresponding meshes.
-
+        """Manually assign a new configuration of pixel layers and regenerate corresponding meshes.
+        
         Parameters
         ----------
         pixel : list of numpy.ndarray
             The target dataset coordinates to update the contours with.
         plane : str, default 'Axial'
             The new structural evaluation orientation workspace.
-
+        
         Returns
         -------
         None
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> roi = image.rois['PTV']
+        >>> roi.update_pixel(...)
         """
         self.plane = plane
         self.contour_pixel = pixel
@@ -567,17 +691,23 @@ class Roi(object):
             self.mesh = None
 
     def update_mesh(self, mesh):
-        """
-        Manually substitute an external tracking mesh structure and update metadata attributes.
-
+        """Manually substitute an external tracking mesh structure and update metadata attributes.
+        
         Parameters
         ----------
         mesh : object
             The physical alternative surface mesh properties database.
-
+        
         Returns
         -------
         None
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> roi = image.rois['PTV']
+        >>> roi.update_mesh(...)
         """
         self.mesh = mesh
         self.volume = mesh.volume

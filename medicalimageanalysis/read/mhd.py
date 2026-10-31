@@ -1,5 +1,4 @@
-"""
-Morfeus lab
+"""Morfeus lab
 The University of Texas
 MD Anderson Cancer Center
 Author - Caleb O'Connor
@@ -34,6 +33,11 @@ Usage:
     >>> reader = MhdReader(file="path/to/data.mhd", modality="CT")
     >>> reader.load()  # This populates Data.image and Data.image_list
 
+Examples
+--------
+>>> import medicalimageanalysis as mia
+>>> files = mia.file_parser(folder_path='C:/Data/Patient01')
+>>> mia.read_dicoms(file_list=files['Dicom'])
 """
 
 import os
@@ -97,9 +101,8 @@ class MhdReader(object):
 
     def __init__(self, file, modality=None, reference_name=None,
                  moving_name=None, roi_name=None, dose=None, dvf=None):
-        """
-        Initialize the MHD reader.
-
+        """Initialize the MHD reader.
+        
         Parameters
         ----------
         file : str
@@ -116,6 +119,12 @@ class MhdReader(object):
             Dose object (not implemented).
         dvf : object, optional
             DVF flag/object.
+        
+        Examples
+        --------
+        >>> from medicalimageanalysis.read.mhd import MhdReader
+        >>> reader = MhdReader(file='C:/Data/scan.mhd', modality='CT')
+        >>> reader.__init__()
         """
         self.file = file
         self.modality = modality
@@ -128,15 +137,20 @@ class MhdReader(object):
         self.mhd = None
 
     def load(self):
-        """
-        Load the `.mhd` file and dispatch processing based on configuration.
-
+        """Load the `.mhd` file and dispatch processing based on configuration.
+        
         Logic:
         - If `reference_name` is provided:
             - Create DVF if `dvf` and `moving_name` are set
             - Dose/ROI hooks are reserved
         - Otherwise:
             - Create image object
+        
+        Examples
+        --------
+        >>> from medicalimageanalysis.read.mhd import MhdReader
+        >>> reader = MhdReader(file='C:/Data/scan.mhd', modality='CT')
+        >>> reader.load()
         """
         self.mhd = sitk.ReadImage(self.file)
 
@@ -155,13 +169,18 @@ class MhdReader(object):
             self.create_image()
 
     def create_image(self):
-        """
-        Convert `.mhd` image into internal Image object and register it.
-
+        """Convert `.mhd` image into internal Image object and register it.
+        
         The image is converted from a SimpleITK volume into:
         - NumPy array
         - Proper spacing/origin/orientation metadata
         - Registered via `CreateImageFromMask`
+        
+        Examples
+        --------
+        >>> from medicalimageanalysis.read.mhd import MhdReader
+        >>> reader = MhdReader(file='C:/Data/scan.mhd', modality='CT')
+        >>> reader.create_image()
         """
         if self.modality is None:
             filename = os.path.basename(self.file)
@@ -196,29 +215,44 @@ class MhdReader(object):
         creator.add_image()
 
     def create_roi(self):
-        """
-        Placeholder for ROI creation from `.mhd`.
-
+        """Placeholder for ROI creation from `.mhd`.
+        
         Not yet implemented.
+        
+        Examples
+        --------
+        >>> from medicalimageanalysis.read.mhd import MhdReader
+        >>> reader = MhdReader(file='C:/Data/scan.mhd', modality='CT')
+        >>> reader.create_roi()
         """
         pass
 
     def create_dose(self):
-        """
-        Placeholder for dose creation from `.mhd`.
-
+        """Placeholder for dose creation from `.mhd`.
+        
         Not yet implemented.
+        
+        Examples
+        --------
+        >>> from medicalimageanalysis.read.mhd import MhdReader
+        >>> reader = MhdReader(file='C:/Data/scan.mhd', modality='CT')
+        >>> reader.create_dose()
         """
         pass
 
     def create_dvf(self):
-        """
-        Create a deformable vector field (DVF) from `.mhd`.
-
+        """Create a deformable vector field (DVF) from `.mhd`.
+        
         Handles:
         - Name collision resolution in `Data.deformable_list`
         - Conversion of voxel field into DVF object
         - Registration of DVF into global `Data` structure
+        
+        Examples
+        --------
+        >>> from medicalimageanalysis.read.mhd import MhdReader
+        >>> reader = MhdReader(file='C:/Data/scan.mhd', modality='CT')
+        >>> reader.create_dvf()
         """
         registration_name = (
             f"DVF_{self.reference_name}_{self.moving_name}"

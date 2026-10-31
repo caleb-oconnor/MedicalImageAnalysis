@@ -1,5 +1,4 @@
-"""
-Morfeus lab
+"""Morfeus lab
 The University of Texas
 MD Anderson Cancer Center
 Author - Caleb O'Connor
@@ -9,6 +8,12 @@ to_mesh.py - conversions that produce a surface mesh.
 
   contours -> mesh          contours_to_mesh(contours, origin, spacing, direction)
   contours -> mesh + mask   contours_to_mesh_and_mask(contours, shape_zyx, origin, spacing, direction)
+
+Examples
+--------
+>>> import numpy as np
+>>> import medicalimageanalysis as mia
+>>> mask = np.zeros((8, 32, 32), dtype=np.uint8)
 """
 import numpy as np
 
@@ -26,7 +31,13 @@ def contours_to_mesh(contours, origin, spacing, direction, reduction=0.5,
                      as_polydata=True, direction_rows=True, **kw):
     """Contours (list of (n,3) world arrays) -> closed surface mesh (vtkPolyData).
     Each separate region gets its own h; decimated once at the end.
-    kw: _contourmesh options (m, c, gap_factor, pad, workers, mid, flat_caps, cap_radius)."""
+    kw: _contourmesh options (m, c, gap_factor, pad, workers, mid, flat_caps, cap_radius).
+    
+    Examples
+    --------
+    >>> from medicalimageanalysis.utils.roi.to_mesh import contours_to_mesh
+    >>> contours_to_mesh(...)
+    """
     direction = normalize_direction(direction, direction_rows=direction_rows)
     slices, frame, dz = _group(contours, origin, spacing, direction)
     return _mesh_regions(slices, frame, dz, reduction=reduction, as_polydata=as_polydata, **kw)
@@ -35,7 +46,13 @@ def contours_to_mesh(contours, origin, spacing, direction, reduction=0.5,
 def contours_to_mask_and_mesh(contours, shape_zyx, origin, spacing, direction,
                               reduction=0.5, ramp=None, as_polydata=True,
                               direction_rows=True, **kw):
-    """Contours -> (mesh, uint8 mask) from one field build per region."""
+    """Contours -> (mesh, uint8 mask) from one field build per region.
+    
+    Examples
+    --------
+    >>> from medicalimageanalysis.utils.roi.to_mesh import contours_to_mask_and_mesh
+    >>> contours_to_mask_and_mesh(...)
+    """
     direction = normalize_direction(direction, direction_rows=direction_rows)
     slices, frame, dz = _group(contours, origin, spacing, direction)
     mask = np.zeros(shape_zyx, np.uint8)

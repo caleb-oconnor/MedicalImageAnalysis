@@ -1,3 +1,16 @@
+"""Geometric measurement utilities for contours and meshes.
+
+This module provides convenience functions for estimating the longest internal
+distance of a contour stack or mesh, either in full 3D or per anatomical slice
+orientation.
+
+Examples
+--------
+>>> import numpy as np
+>>> import medicalimageanalysis as mia
+>>> mask = np.zeros((8, 32, 32), dtype=np.uint8)
+"""
+
 from itertools import combinations
 
 import numpy as np
@@ -8,10 +21,16 @@ from shapely.geometry import LineString, Polygon
 
 
 def contour_longest_distance(contours, exact=False):
-    """
-    Longest in-plane distance across a stack of (N,2)/(N,3) contours, in mm.
+    """Longest in-plane distance across a stack of (N,2)/(N,3) contours, in mm.
     exact=False: only hull vertices considered (fast, can undercount on
     concave contours). exact=True: all points considered (slower, exact).
+    
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from medicalimageanalysis.utils.roi.statistics import contour_longest_distance
+    >>> contour = np.array([[0, 0], [20, 0], [20, 10], [0, 10]])
+    >>> contour_longest_distance([contour], exact=True)
     """
     best = 0.0
     for c in contours:
@@ -40,15 +59,21 @@ def contour_longest_distance(contours, exact=False):
 
 def mesh_longest_distance(mesh, mode='all', array_shape=None, origin=None, spacing=None,
                            direction=None, n_line_samples=20, exact_2d=False):
-    """
-    mesh: pyvista mesh, already in mm.
+    """mesh: pyvista mesh, already in mm.
     mode: '3d', 'axial', 'sagittal', 'coronal', or 'all' (returns each's own max).
-
+    
     array_shape, origin, spacing, direction: all in xyz order (axis 0 = x/
     sagittal, axis 1 = y/coronal, axis 2 = z/axial). Required for any mode
     besides '3d' -- used to find the actual image slice positions to cut
     through. direction columns are the world-space direction of each array
     axis: physical = origin + direction @ (spacing * index).
+    
+    Examples
+    --------
+    >>> import pyvista as pv
+    >>> from medicalimageanalysis.utils.roi.statistics import mesh_longest_distance
+    >>> mesh = pv.Sphere(radius=10.0)
+    >>> mesh_longest_distance(mesh, mode='3d')
     """
     def slice_plane_max(normal, point):
         sl = mesh.slice(normal=normal, origin=point).strip()

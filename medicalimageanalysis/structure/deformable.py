@@ -1,5 +1,4 @@
-"""
-Morfeus Lab
+"""Morfeus Lab
 The University of Texas
 MD Anderson Cancer Center
 Author - Caleb O'Connor
@@ -24,6 +23,12 @@ Conventions (unchanged from the registration code):
 
 Structure:
     * Deformable: Manages DVF computations, registration tracking, display sampling and ROI transformations.
+
+Examples
+--------
+>>> import medicalimageanalysis as mia
+>>> mia.read_mhd(file='C:/Data/scan.mhd', modality='CT')
+>>> image = mia.Data.image[mia.Data.image_list[0]]
 """
 
 import os
@@ -180,9 +185,8 @@ def _field_corner(field, fi, fj, fk):
 
 
 class Deformable(object):
-    """
-    Manages non-rigid transformation workflows, holding non-rigid fields, parameters, and morph functions.
-
+    """Manages non-rigid transformation workflows, holding non-rigid fields, parameters, and morph functions.
+    
     Display API mirrors Rigid so the same viewer code can drive either:
         compute_array(plane, position)          -> dict with 'array', 'grid', 'pixel_spacing', 'scale', ...
         compute_grid(plane, position, vector)   -> DVF component / magnitude on the same grid
@@ -190,7 +194,7 @@ class Deformable(object):
         compute_aspect(plane)
         set_current_order(inverse)              -> flip which image is shown deformed onto which
         current_ref / current_mov               -> image names the view is built on / being deformed
-
+    
     Attributes
     ----------
     reference_name : str
@@ -231,13 +235,24 @@ class Deformable(object):
         False: moving deformed onto reference. True: reference deformed onto moving.
     deformable_name : str
         Registry ID tracking active parameters in runtime contexts.
+    
+    Examples
+    --------
+    >>> import medicalimageanalysis as mia
+    >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+    >>> deform.get_inverted_dvf()
     """
 
     def __init__(self, dvf=None, origin=None, spacing=None, dimensions=None, roi_names=None,
                  rigid_matrix=None, dvf_matrix=None, registration_name=None, reference_name=None, moving_name=None,
                  reference_sops=None, moving_sops=None, reference_meshes=None, moving_meshes=None, inverse=False):
-        """
-        Initializes a Deformable registration record holding transformation parameters.
+        """Initializes a Deformable registration record holding transformation parameters.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform.__init__(...)
         """
         self.reference_name = reference_name
         self.reference_sops = reference_sops
@@ -283,10 +298,12 @@ class Deformable(object):
 
     @staticmethod
     def _apply_affine(matrix, points):
+        """Apply a 4x4 affine transform to an ``(N, 3)`` point array."""
         points = np.asarray(points, dtype=float)
         return points @ matrix[:3, :3].T + matrix[:3, 3]
 
     def _collect_masks(self):
+        """Collect combined reference and moving ROI masks for selected structures."""
         ref_mask = None
         mov_mask = None
         for roi_name in self.roi_names:
@@ -300,6 +317,7 @@ class Deformable(object):
         return ref_mask, mov_mask
 
     def _field_grid(self):
+        """Return the DVF origin and spacing as float32 arrays for sampling kernels."""
         return np.asarray(self.origin, dtype=np.float32), np.asarray(self.spacing, dtype=np.float32)
 
     def _get_field(self, which='forward'):
@@ -391,6 +409,7 @@ class Deformable(object):
         return cache['entries']
 
     def _view_grid(self, plane, position, use_moving_spacing=False):
+        """Return the reference display grid and the sampling grid used for rendering."""
         base = Data.image[self.current_ref].display
         ref_grid = base.get_grid(plane, position)
         grid = ref_grid
@@ -413,18 +432,23 @@ class Deformable(object):
         return self._apply_affine(self.rigid_matrix, q)
 
     def add_deformable(self, deformable_name):
-        """
-        Registers this transformation instance inside the repository storage tracking framework.
-
+        """Registers this transformation instance inside the repository storage tracking framework.
+        
         Parameters
         ----------
         deformable_name : str
             Preferred tracking title identity. If None, an identifier is generated.
-
+        
         Returns
         -------
         str
             The final tracking registry label used to locate this specific deformable context.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform.add_deformable(...)
         """
         if deformable_name is None:
             if self.reference_name is None and self.moving_name is None:
@@ -447,7 +471,14 @@ class Deformable(object):
         return deformable_name
 
     def clear_mesh_slice_cache(self, plane=None):
-        """Drop cached mesh slices for one plane, or all planes."""
+        """Drop cached mesh slices for one plane, or all planes.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform.clear_mesh_slice_cache(...)
+        """
         caches = self._display_cache.get('mesh_slices', {})
         if plane is None:
             caches.clear()
@@ -455,12 +486,17 @@ class Deformable(object):
             caches.pop(plane, None)
 
     def compute_array(self, plane, position, use_moving_spacing=False, percent=100, background=-3001.0):
-        """
-        Same call as Rigid.compute_array: plane + the widget's position (top-left corner of the current_ref view).
+        """Same call as Rigid.compute_array: plane + the widget's position (top-left corner of the current_ref view).
         Returns current_mov rigidly + deformably mapped onto that view, plus 'scale' and 'pixel_offset'.
-
+        
         percent scales the displacement (0 = rigid only, 100 = full deformation). For the forward view this scales the
         inverted field, which is the usual approximation for partial-deformation animation.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform.compute_array(...)
         """
         if self.dvf is None or self.current_ref is None or self.current_mov is None:
             return None
@@ -487,9 +523,14 @@ class Deformable(object):
                 'pixel_offset': (0.0, 0.0)}
 
     def compute_grid(self, plane, position, vector='magnitude', use_moving_spacing=False, outside=0.0):
-        """
-        DVF component ('x', 'y', 'z') or 'magnitude' (mm) on the same view grid as compute_array, for overlaying the
+        """DVF component ('x', 'y', 'z') or 'magnitude' (mm) on the same view grid as compute_array, for overlaying the
         field on the current_ref view. Always the forward field, evaluated at the rigid-frame point under each pixel.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform.compute_grid(...)
         """
         if self.dvf is None or self.current_ref is None:
             return None
@@ -513,7 +554,14 @@ class Deformable(object):
                 'pixel_offset': (0.0, 0.0)}
 
     def compute_aspect(self, plane, use_moving_spacing=False):
-        """Aspect matching the (sx, sy) compute_array samples with."""
+        """Aspect matching the (sx, sy) compute_array samples with.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform.compute_aspect(...)
+        """
         _PLANE_AXES = {'Axial': (0, 1, 2), 'Sagittal': (1, 2, 0), 'Coronal': (0, 2, 1)}
         name = self.current_mov if use_moving_spacing else self.current_ref
         spacing = Data.image[name].display.spacing
@@ -522,16 +570,20 @@ class Deformable(object):
         return np.round(spacing[xi] / spacing[yi], 2)
 
     def compute_biomechanical(self):
-        """
-        Placeholder method for biomechanical simulation algorithms or finite element extensions.
+        """Placeholder method for biomechanical simulation algorithms or finite element extensions.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform.compute_biomechanical(...)
         """
         pass
 
     def compute_bspline(self, modality_gradient=True, sigma=2, control_spacing=None, mesh_size=None, gradient=1e-5,
                         iterations=100, crop=5):
-        """
-        Runs a B-Spline deformable registration workflow using metrics managed via SimpleITK components.
-
+        """Runs a B-Spline deformable registration workflow using metrics managed via SimpleITK components.
+        
         Parameters
         ----------
         modality_gradient : bool, optional
@@ -548,6 +600,12 @@ class Deformable(object):
             Optimization limits capping evaluation routines. Defaults to 100.
         crop : int, optional
             Boundary truncation thickness processing parameters stripping edges. Defaults to 5.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform.compute_bspline(...)
         """
         ref = Data.image[self.reference_name]
         mov = Data.image[self.moving_name]
@@ -586,9 +644,8 @@ class Deformable(object):
 
     def compute_demons(self, method=None, modality_gradient=True, sigma=2, smooth=True, std=1, iterations=50,
                        intensity_threshold=0.001, step=2.0, crop=5):
-        """
-        Executes dense fluid registration variants including standard, fast, or diffeomorphic Demons models.
-
+        """Executes dense fluid registration variants including standard, fast, or diffeomorphic Demons models.
+        
         Parameters
         ----------
         method : str, optional
@@ -609,6 +666,12 @@ class Deformable(object):
             Field translation step scale factor. Defaults to 2.0.
         crop : int, optional
             Boundary exclusion padding pixel counts. Defaults to 5.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform.compute_demons(...)
         """
         ref = Data.image[self.reference_name]
         mov = Data.image[self.moving_name]
@@ -648,6 +711,14 @@ class Deformable(object):
         self.invalidate_display()
 
     def compute_components(self, roi_name):
+        """Split a deformed ROI mesh into connected components.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform.compute_components(...)
+        """
         if self.rois[roi_name] is not None:
             return compute_components(self.rois[roi_name])
 
@@ -655,9 +726,14 @@ class Deformable(object):
             return None
 
     def compute_inverted_dvf(self, iterations=50, mean_tolerance=1e-3, max_tolerance=1e-1, set_inverted=True):
-        """
-        dvf: numpy array, shape (Z, Y, X, 3), displacement in mm, ordered (dx, dy, dz)
+        """dvf: numpy array, shape (Z, Y, X, 3), displacement in mm, ordered (dx, dy, dz)
         Returns inverted DVF as a numpy array of the same shape/ordering.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform.compute_inverted_dvf(...)
         """
         dvf_sitk = sitk.GetImageFromArray(self.dvf, isVector=True)
         dvf_sitk.SetSpacing(self.spacing)
@@ -676,14 +752,19 @@ class Deformable(object):
         return inverted
 
     def compute_mesh_slice(self, roi_name, plane, position, percent=100, return_pixel=True, use_cache=True):
-        """
-        Slice current_mov's deformed ROI in the same pixel space as compute_array: (col, row) floats relative to the
+        """Slice current_mov's deformed ROI in the same pixel space as compute_array: (col, row) floats relative to the
         view's top-left corner, pixel centers at integers. Each contour is closed (first point repeated).
-
+        
         Results are cached per plane, keyed by (roi, percent, position rounded to 1 um, return_pixel). An entry is
         reused only if it was cut from the same deformed mesh object, so a new DVF / rigid / percent / ROI edit (which
         builds a new mesh in get_display_mesh) is picked up automatically. The returned list is the cached object;
         copy it before modifying it in place.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform.compute_mesh_slice(...)
         """
         mesh = self.get_display_mesh(roi_name, percent=percent)
         if mesh is None:
@@ -727,10 +808,9 @@ class Deformable(object):
 
     @staticmethod
     def correct_dvf_direction(dvf, spacing, origin, matrix):
-        """
-        Rotates a DVF to a new direction, adjusting vectors and origin so that the DVF
+        """Rotates a DVF to a new direction, adjusting vectors and origin so that the DVF
         stays aligned in physical space (rotation about the center of the volume).
-
+        
         Parameters
         ----------
         dvf : np.ndarray
@@ -741,11 +821,17 @@ class Deformable(object):
             Starting structural boundary spatial point.
         matrix : np.ndarray
             Target directional rotation transformation matrix mapping properties.
-
+        
         Returns
         -------
         tuple
             Contains updated (dvf_rotated, spacing, origin_new, dimensions) structures.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform.correct_dvf_direction(...)
         """
         D_new = np.identity(3)
         R = D_new @ np.linalg.inv(matrix)
@@ -766,19 +852,24 @@ class Deformable(object):
         return dvf_rotated, spacing, origin_new, dimensions
 
     def create_image(self, ratio=1):
-        """
-        Applies combined rigid parameters and displacement fields to resample the moving image volume onto the
+        """Applies combined rigid parameters and displacement fields to resample the moving image volume onto the
         reference grid (full 3D, for export). The display path does NOT use this; see compute_array.
-
+        
         Parameters
         ----------
         ratio : float, optional
             Displacement scaling factor (0 = rigid only, 1 = full). Defaults to 1.
-
+        
         Returns
         -------
         SimpleITK.Image
             Resampled and transformed image data volume.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform.create_image(...)
         """
         affine = sitk.AffineTransform(3)
         affine.SetMatrix(self.rigid_matrix[:3, :3].flatten())
@@ -798,6 +889,14 @@ class Deformable(object):
         return sitk.Resample(resampled_image, dis_tx, sitk.sitkLinear, -3001, resampled_image.GetPixelID())
 
     def create_roi_image(self, roi_name, sitk_image=True):
+        """Rasterize a deformed ROI mesh onto the reference image grid.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform.create_roi_image(...)
+        """
         mesh = self.rois[roi_name].triangulate()
 
         image = vtk.vtkImageData()
@@ -834,13 +933,18 @@ class Deformable(object):
             return mask
 
     def export_image(self, path=None):
-        """
-        Saves the transformed moving image to a specified file path.
-
+        """Saves the transformed moving image to a specified file path.
+        
         Parameters
         ----------
         path : str, optional
             Target file system write location destination path. Defaults to None.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform.export_image(...)
         """
         if self.moving_name is not None and path is not None:
             image = self.create_image()
@@ -848,9 +952,14 @@ class Deformable(object):
             sitk.WriteImage(image, path)
 
     def get_display_mesh(self, roi_name, percent=100):
-        """
-        current_mov's ROI warped into current_ref's world (cached per order / percent / dvf / rigid).
+        """current_mov's ROI warped into current_ref's world (cached per order / percent / dvf / rigid).
         Forward: moving ROI -> reference world. Inverse: reference ROI -> moving world.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform.get_display_mesh(...)
         """
         if self.dvf is None:
             return None
@@ -873,14 +982,28 @@ class Deformable(object):
         return mesh
 
     def get_inverted_dvf(self):
-        """Inverted DVF, recomputed only when self.dvf has been replaced since the last inversion."""
+        """Inverted DVF, recomputed only when self.dvf has been replaced since the last inversion.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform.get_inverted_dvf(...)
+        """
         if self.inverted_dvf is None or self._display_cache.get('inverted_source') is not self.dvf:
             self.compute_inverted_dvf()
 
         return self.inverted_dvf
 
     def get_view_center(self, plane, position):
-        """current_ref's slice center in view pixel coords (pixel centers at integers), for crosshair / zoom anchors."""
+        """current_ref's slice center in view pixel coords (pixel centers at integers), for crosshair / zoom anchors.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform.get_view_center(...)
+        """
         base = Data.image[self.current_ref].display
         grid = base.get_grid(plane, position)
         d = base.crosshair - grid['origin']
@@ -888,11 +1011,26 @@ class Deformable(object):
         return float(d @ grid['x_axis']) / grid['sx'], float(d @ grid['y_axis']) / grid['sy']
 
     def invalidate_display(self):
-        """Drop cached display fields/meshes. Only needed if dvf or rigid_matrix are edited in place."""
+        """Drop cached display fields/meshes. Only needed if dvf or rigid_matrix are edited in place.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform.invalidate_display(...)
+        """
         self._display_cache = {}
         self.inverted_dvf = None
 
     def map_mesh(self, roi_name, percent=100, set_moving=True, return_mesh=False):
+        """Map a deformed display ROI back into the moving image space.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform.map_mesh(...)
+        """
         if self.rois[roi_name] is None:
             self.update_rois(roi_name)
 
@@ -917,13 +1055,18 @@ class Deformable(object):
             return None
 
     def save_deformable(self, path):
-        """
-        Serializes structural transform attributes and displacement tensor files to disk.
-
+        """Serializes structural transform attributes and displacement tensor files to disk.
+        
         Parameters
         ----------
         path : str
             File system directory path destination target.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform.save_deformable(...)
         """
         variable_names = self.__dict__.keys()
         column_names = [name for name in variable_names if name not in ['rois', 'dvf', 'inverted_dvf', 'rigid_rois',
@@ -937,11 +1080,16 @@ class Deformable(object):
         np.save(os.path.join(path, 'dvf.npy'), self.dvf, allow_pickle=True)
 
     def set_current_order(self, inverse):
-        """
-        Flips which image gets deformed onto which, same as Rigid.set_current_order. Does NOT change the registration.
+        """Flips which image gets deformed onto which, same as Rigid.set_current_order. Does NOT change the registration.
         inverse=False: view built on reference, moving shown deformed onto it (uses the inverted DVF).
         inverse=True:  view built on moving, reference shown deformed onto it (uses the forward DVF directly).
         Callers re-request arrays/slices afterwards.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform.set_current_order(...)
         """
         self.inverse = bool(inverse)
         if self.inverse:
@@ -950,15 +1098,20 @@ class Deformable(object):
             self.current_ref, self.current_mov = self.reference_name, self.moving_name
 
     def update_rois(self, roi_name=None, percent=100):
-        """
-        Warps visible moving ROI meshes into the reference world: rigid^-1, then + dvf.
-
+        """Warps visible moving ROI meshes into the reference world: rigid^-1, then + dvf.
+        
         Parameters
         ----------
         roi_name : str, optional
             Target ROI. If None, all instances are updated. Defaults to None.
         percent : float, optional
             Magnitude modifier scaling field vector step sizes. Defaults to 100.
+        
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform.update_rois(...)
         """
         for name in list(self.rois.keys()):
             if name not in Data.roi_list:

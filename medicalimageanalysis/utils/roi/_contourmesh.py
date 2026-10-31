@@ -1,5 +1,4 @@
-"""
-Morfeus lab
+"""Morfeus lab
 The University of Texas
 MD Anderson Cancer Center
 Author - Caleb O'Connor
@@ -75,6 +74,12 @@ The implementation is tuned to avoid doing expensive work everywhere:
   faster than meshing slabs independently and stitching them afterwards.
 * Geometry is computed in a local frame and only rotated back to world coordinates at the
   very end.
+
+Examples
+--------
+>>> import numpy as np
+>>> import medicalimageanalysis as mia
+>>> mask = np.zeros((8, 32, 32), dtype=np.uint8)
 """
 from __future__ import annotations
 
@@ -99,11 +104,18 @@ _S2D[1] = True                               # 8-connected in-plane, no z connec
 @dataclass
 class Frame:
     """Local orthonormal-ish coordinate frame used by the whole pipeline.
-
+    
     ``u`` and ``v`` span the contour drawing plane, while ``n`` is the direction along
     which slices are stacked. Contours are converted into this frame immediately so the
     algorithm can treat each slice as a 2D problem. That greatly simplifies filling,
     distance calculations, overlap classification, and interpolation.
+    
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from medicalimageanalysis.utils.roi._contourmesh import Frame, AdaptiveContourToMesh
+    >>> frame = Frame.standard('axial')
+    >>> builder = AdaptiveContourToMesh(frame=frame, slice_spacing=3.0)
     """
     origin: np.ndarray
     u: np.ndarray
@@ -113,9 +125,16 @@ class Frame:
     @classmethod
     def standard(cls, plane: str, origin=(0.0, 0.0, 0.0)):
         """Construct a standard axial/coronal/sagittal frame.
-
+        
         This is a convenience helper for the common case where contours already align with
         a standard anatomical plane.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> frame = Frame.standard('axial')
+        >>> frame.standard(...)
         """
         e = np.eye(3)
         u, v, n = {"axial": (e[0], e[1], e[2]),
@@ -125,30 +144,60 @@ class Frame:
 
     @classmethod
     def from_direction(cls, origin, direction):
-        """direction: 3x3, columns = image i, j, k axes (contours drawn in the i-j plane)."""
+        """direction: 3x3, columns = image i, j, k axes (contours drawn in the i-j plane).
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> frame = Frame.standard('axial')
+        >>> frame.from_direction(...)
+        """
         d = np.asarray(direction, float)
         return cls(np.asarray(origin, float), d[:, 0], d[:, 1], d[:, 2])
 
     def to_local(self, p):
         """World -> local coordinates.
-
+        
         The result has columns ``(u, v, n)``. Converting to local coordinates lets the
         rest of the code operate in a slice-aligned coordinate system independent of the
         original image orientation.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> frame = Frame.standard('axial')
+        >>> frame.to_local(...)
         """
         q = np.asarray(p, float) - self.origin
         return np.stack([q @ self.u, q @ self.v, q @ self.n], axis=-1)
 
     def to_world(self, q):
-        """Local -> world coordinates for a stack of points ``q`` with columns ``u,v,n``."""
+        """Local -> world coordinates for a stack of points ``q`` with columns ``u,v,n``.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> frame = Frame.standard('axial')
+        >>> frame.to_world(...)
+        """
         return self.origin + q[:, :1] * self.u + q[:, 1:2] * self.v + q[:, 2:3] * self.n
 
     @property
     def flips(self) -> bool:
         """Whether the basis is left-handed.
-
+        
         If true, triangle winding must be reversed after meshing so normals/orientation are
         consistent in world space.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> frame = Frame.standard('axial')
+        >>> frame.flips(...)
         """
         return float(np.dot(np.cross(self.u, self.v), self.n)) < 0
 
@@ -203,21 +252,33 @@ def _seg_dist(q, a, b):
 # =============================================================================== state
 class _Volume:
     """Internal state for the scalar field volume and all metadata derived from contours.
-
+    
     This class is the engine of the reconstruction. It owns:
-
+    
     * slice masks and connected-component labels,
     * overlap classification between neighbouring slices,
     * exact/narrow-band signed distance fields,
     * the layout of real slice planes and interpolated sub-planes,
     * the dense 3D scalar volume consumed by Flying Edges.
-
+    
     ``EditSession`` keeps an instance of this class alive specifically so only the parts
     affected by a local contour edit need to be recomputed.
+    
+    Examples
+    --------
+    >>> from medicalimageanalysis.utils.roi._contourmesh import _Volume
+    >>> obj = _Volume(...)
     """
 
     def __init__(self, slices_local, s, delta, h, m, c, margin, pad, gap_factor, workers,
                  mid=True, flat_caps=False, cap_radius=None):
+        """Initialize the scalar-field workspace used for contour-to-mesh reconstruction.
+        
+        Examples
+        --------
+        >>> obj = _Volume(...)
+        >>> obj.__init__(...)
+        """
         # ``slices_local`` is already sorted by slice position ``s`` and each slice holds a
         # list of 2D rings in the local frame. From here onward everything happens in local
         # coordinates on a regular x/y lattice with spacing ``h``.
@@ -336,17 +397,22 @@ class _Volume:
     # --------------------------------------------------------------- step 1-2: rings, fill, labels
     def set_contours(self, ks, rings_per_slice):
         """Rasterize contours for selected slices and rebuild their local geometric state.
-
+        
         For each target slice this method:
-
+        
         1. vectorizes all ring edges,
         2. fills interiors with an even-odd scanline rule,
         3. labels connected components within the slice,
         4. assigns each ring to its filled component,
         5. resamples ring polylines densely enough for exact distance queries.
-
+        
         The expensive parts are batched across the requested slices to minimize Python-level
         overhead.
+        
+        Examples
+        --------
+        >>> obj = _Volume(...)
+        >>> obj.set_contours(...)
         """
         h, i0, j0, ny, nx = self.h, self.i0, self.j0, self.ny, self.nx
         nb = len(ks)
@@ -460,12 +526,17 @@ class _Volume:
     # --------------------------------------------------------------- overlap classification
     def classify(self, slabs):
         """Classify overlapping components between linked neighbouring slices.
-
+        
         ``Aup[k]`` marks components on slice ``k`` that overlap slice ``k+1``.
         ``Bdn[k+1]`` marks components on slice ``k+1`` that overlap slice ``k``.
-
+        
         Components present on one slice but not overlapping the next are later handled by the
         hat fields so they can appear/disappear cleanly.
+        
+        Examples
+        --------
+        >>> obj = _Volume(...)
+        >>> obj.classify(...)
         """
         slabs = np.asarray(slabs, np.int64)
         slabs = slabs[(slabs >= 0) & (slabs < self.S - 1)]
@@ -509,11 +580,16 @@ class _Volume:
 
     def fields(self, ks):
         """Build per-slice signed distance fields and subset fields for requested slices.
-
+        
         The full field ``dM`` is the signed distance to the whole slice contour. Additional
         subset fields are only created for slices where overlapping and isolated components
         coexist, because only then do we need separate fields for the linear part versus the
         hat part of the interpolation.
+        
+        Examples
+        --------
+        >>> obj = _Volume(...)
+        >>> obj.fields(...)
         """
         ks = np.unique(np.asarray(ks, np.int64))
         S = self.S
@@ -598,13 +674,18 @@ class _Volume:
     # --------------------------------------------------------------- volume planes
     def planes(self, p0, p1):
         """Evaluate the scalar field on plane indices ``p0..p1``.
-
+        
         Each plane kind corresponds to a different formula:
-
+        
         * kind 0: real contour slice, use its full signed distance field.
         * kind 1: linked slab interpolation between two slices.
         * kind 2/3: top/bottom caps or isolated-component hats.
         * kind 4: all-BIG plane used to close flat lids.
+        
+        Examples
+        --------
+        >>> obj = _Volume(...)
+        >>> obj.planes(...)
         """
         c = self.c
         idx = np.arange(p0, p1 + 1)
@@ -648,9 +729,14 @@ class _Volume:
     # --------------------------------------------------------------- meshing
     def extract(self, p0, p1):
         """Run ``vtkFlyingEdges3D`` on a subset of the field volume.
-
+        
         The returned z coordinate is a *plane index*, not yet the true physical slice
         position. ``to_local_xyz`` performs the exact plane-index -> z mapping afterwards.
+        
+        Examples
+        --------
+        >>> obj = _Volume(...)
+        >>> obj.extract(...)
         """
         img = vtk.vtkImageData()
         img.SetExtent(self.i0, self.i0 + self.nx - 1, self.j0, self.j0 + self.ny - 1, p0, p1)
@@ -672,7 +758,13 @@ class _Volume:
         return P, T
 
     def to_local_xyz(self, P):
-        """Convert Flying Edges plane indices into true local-frame z coordinates."""
+        """Convert Flying Edges plane indices into true local-frame z coordinates.
+        
+        Examples
+        --------
+        >>> obj = _Volume(...)
+        >>> obj.to_local_xyz(...)
+        """
         Q = P.copy()
         Q[:, 2] = np.interp(P[:, 2], np.arange(len(self.pz)), self.pz)
         return Q
@@ -706,12 +798,17 @@ class _Volume:
 # =============================================================================== post-processing
 def postprocess(P, T, reduction=0.5, smooth_iters=0, passband=0.1, method="auto"):
     """Optional mesh simplification and smoothing stage.
-
+    
     Why this exists:
     the raw Flying Edges mesh is faithful to the field but often denser than needed for
     storage or downstream interactive rendering. The decimation step reduces triangle count,
     and optional windowed-sinc smoothing can soften voxel-grid artefacts while preserving
     overall shape.
+    
+    Examples
+    --------
+    >>> from medicalimageanalysis.utils.roi._contourmesh import postprocess
+    >>> postprocess(...)
     """
     if method == "auto":
         try: # noqa: F401
@@ -774,16 +871,32 @@ def _from_polydata(pd):
 # =============================================================================== public API
 class AdaptiveContourToMesh:
     """User-facing builder for the contour-to-mesh workflow.
-
+    
     This class mostly packages configuration and exposes the pipeline in smaller logical
     pieces: grouping/normalization, volume construction, raw meshing, post-processing, and
     region-wise meshing.
+    
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from medicalimageanalysis.utils.roi._contourmesh import Frame, AdaptiveContourToMesh
+    >>> frame = Frame.standard('axial')
+    >>> builder = AdaptiveContourToMesh(frame=frame, slice_spacing=3.0)
     """
 
     def __init__(self, frame, slice_spacing, m=1, h=None, c=None, gap_factor=1.5,
                  post=True, reduction=0.5, smooth_iters=0, method="auto",
                  workers=1, as_polydata=True, mid='auto', flat_caps=False,
                  cap_radius=None):
+        """Store reconstruction settings for later contour-to-mesh builds.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> builder = AdaptiveContourToMesh(frame=Frame.standard('axial'), slice_spacing=3.0)
+        >>> builder.__init__(...)
+        """
         self.frame = frame
         self.slice_spacing = float(slice_spacing)
         self.m = int(m)
@@ -802,14 +915,30 @@ class AdaptiveContourToMesh:
 
     @staticmethod
     def finish(frame, Pw, T):
-        """Apply final triangle winding correction for left-handed frames."""
+        """Apply final triangle winding correction for left-handed frames.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> builder = AdaptiveContourToMesh(frame=Frame.standard('axial'), slice_spacing=3.0)
+        >>> builder.finish(...)
+        """
         if frame.flips:
             T = T[:, ::-1]
         return Pw, T
 
     @staticmethod
     def inside(p, poly):
-        """Even-odd point-in-polygon: point p (2,), ring poly (n, 2)."""
+        """Even-odd point-in-polygon: point p (2,), ring poly (n, 2).
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> builder = AdaptiveContourToMesh(frame=Frame.standard('axial'), slice_spacing=3.0)
+        >>> builder.inside(...)
+        """
         x, y = p
         a, b = poly, np.roll(poly, -1, 0)
         cross = (a[:, 1] > y) != (b[:, 1] > y)
@@ -819,7 +948,15 @@ class AdaptiveContourToMesh:
 
     @staticmethod
     def dense(r, step):
-        """Resample a closed ring so neighbouring points are at most ``step`` apart."""
+        """Resample a closed ring so neighbouring points are at most ``step`` apart.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> builder = AdaptiveContourToMesh(frame=Frame.standard('axial'), slice_spacing=3.0)
+        >>> builder.dense(...)
+        """
         b = np.roll(r, -1, 0)
         n = np.maximum(1, np.ceil(np.linalg.norm(b - r, axis=1) / step).astype(int))
         e = np.repeat(np.arange(len(r)), n)
@@ -829,10 +966,17 @@ class AdaptiveContourToMesh:
     @staticmethod
     def split_keyholes(r, tol=1e-3):
         """Split a self-touching "keyhole" contour into separate simple loops.
-
+        
         Some contouring systems represent holes using a contour that touches itself along a
         zero-width channel. That encoding is awkward for filling and distance queries, so this
         function removes the duplicated channel edges and extracts the remaining simple loops.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> builder = AdaptiveContourToMesh(frame=Frame.standard('axial'), slice_spacing=3.0)
+        >>> builder.split_keyholes(...)
         """
         k = np.round(np.asarray(r)[:, :2] / tol).astype(np.int64)
         key = k[:, 0] * (1 << 31) + (k[:, 1] + (1 << 30))
@@ -877,12 +1021,19 @@ class AdaptiveContourToMesh:
     @classmethod
     def prepare_for_frame(cls, slices, frame):
         """Normalize input contours into the local frame and sort them by slice position.
-
+        
         Output is:
-
+        
         * original slice keys in sorted order,
         * slice positions along the local ``n`` axis,
         * 2D rings (local ``u,v`` only) for each slice.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> builder = AdaptiveContourToMesh(frame=Frame.standard('axial'), slice_spacing=3.0)
+        >>> builder.prepare_for_frame(...)
         """
         items = []
         for key, rings in slices.items():
@@ -904,10 +1055,17 @@ class AdaptiveContourToMesh:
     @classmethod
     def split_regions(cls, slices, frame, slice_spacing, gap_factor=1.5, pad=0.5, step=0.25):
         """Split a contour set into disconnected spatial regions.
-
+        
         This is useful when the same ROI contains separate islands. Meshing them as separate
         regions lets each region choose its own grid spacing ``h`` and avoids unnecessary work
         in large empty space between components.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> builder = AdaptiveContourToMesh(frame=Frame.standard('axial'), slice_spacing=3.0)
+        >>> builder.split_regions(...)
         """
         items = []
         for key, rings in slices.items():
@@ -962,14 +1120,21 @@ class AdaptiveContourToMesh:
     @staticmethod
     def auto_h(slices, frame, k=0.013, h_min=0.5, h_max=2.5, max_voxels=4e6):
         """Choose a working in-plane lattice spacing ``h`` automatically.
-
+        
         The heuristic balances two competing goals:
-
+        
         * smaller ``h`` improves geometric fidelity,
         * larger ``h`` keeps the field volume computationally manageable.
-
+        
         One term scales with the cube root of approximate object volume; another enforces a
         rough voxel-count budget. The final value is clamped to a practical range.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> builder = AdaptiveContourToMesh(frame=Frame.standard('axial'), slice_spacing=3.0)
+        >>> builder.auto_h(...)
         """
         area, zs, allp = 0.0, [], []
         for rings in slices.values():
@@ -990,11 +1155,18 @@ class AdaptiveContourToMesh:
     def group_contours(contours, direction, origin=(0, 0, 0), spacing=(1, 1, 1),
                        index_space=False, index_order="xyz", slice_spacing=None):
         """Infer a frame from contour/image orientation and group contours by slice.
-
+        
         This is the usual entry point when starting from a flat list of world-coordinate
         contour rings. It determines which image axis acts as the slice axis, groups contours
         by rounded slice index along that axis, and returns the slice dictionary plus frame
         metadata required by the meshing pipeline.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> builder = AdaptiveContourToMesh(frame=Frame.standard('axial'), slice_spacing=3.0)
+        >>> builder.group_contours(...)
         """
         D = np.asarray(direction, float)
         origin = np.asarray(origin, float)
@@ -1027,17 +1199,41 @@ class AdaptiveContourToMesh:
         return slices, frame, slice_spacing
 
     def prepare(self, slices):
-        """Instance wrapper around :meth:`prepare_for_frame`."""
+        """Instance wrapper around :meth:`prepare_for_frame`.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> builder = AdaptiveContourToMesh(frame=Frame.standard('axial'), slice_spacing=3.0)
+        >>> builder.prepare(...)
+        """
         return self.prepare_for_frame(slices, self.frame)
 
     def resolve_h(self, slices):
-        """Use user-specified ``h`` or fall back to the automatic heuristic."""
+        """Use user-specified ``h`` or fall back to the automatic heuristic.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> builder = AdaptiveContourToMesh(frame=Frame.standard('axial'), slice_spacing=3.0)
+        >>> builder.resolve_h(...)
+        """
         if self.h is not None:
             return self.h
         return self.auto_h(slices, self.frame)
 
     def build_volume(self, slices):
-        """Construct the internal field volume object for a contour set."""
+        """Construct the internal field volume object for a contour set.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> builder = AdaptiveContourToMesh(frame=Frame.standard('axial'), slice_spacing=3.0)
+        >>> builder.build_volume(...)
+        """
         h = self.resolve_h(slices)
         _, s, loc = self.prepare(slices)
         return _Volume(loc, s, self.slice_spacing, h, self.m, h if self.c is None else self.c,
@@ -1045,7 +1241,15 @@ class AdaptiveContourToMesh:
                        self.flat_caps, self.cap_radius)
 
     def build_raw_mesh(self, slices):
-        """Build the unsmoothed, undecimated mesh in world coordinates."""
+        """Build the unsmoothed, undecimated mesh in world coordinates.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> builder = AdaptiveContourToMesh(frame=Frame.standard('axial'), slice_spacing=3.0)
+        >>> builder.build_raw_mesh(...)
+        """
         vol = self.build_volume(slices)
         P, T = vol.extract(0, len(vol.pz) - 1)
         P = self.frame.to_world(vol.to_local_xyz(P))
@@ -1053,7 +1257,15 @@ class AdaptiveContourToMesh:
         return P, T
 
     def build_mesh(self, slices):
-        """Build the final mesh, optionally applying post-processing."""
+        """Build the final mesh, optionally applying post-processing.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> builder = AdaptiveContourToMesh(frame=Frame.standard('axial'), slice_spacing=3.0)
+        >>> builder.build_mesh(...)
+        """
         P, T = self.build_raw_mesh(slices)
         if self.post:
             P, T = postprocess(P, T, self.reduction, self.smooth_iters, method=self.method)
@@ -1061,7 +1273,15 @@ class AdaptiveContourToMesh:
 
     def build_region_mesh(self, slices, reduction=None, pad=0.5, gap_factor=None,
                           as_polydata=None, **kw):
-        """Mesh each disconnected spatial region separately, then merge the results."""
+        """Mesh each disconnected spatial region separately, then merge the results.
+        
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> builder = AdaptiveContourToMesh(frame=Frame.standard('axial'), slice_spacing=3.0)
+        >>> builder.build_region_mesh(...)
+        """
         reduction = self.reduction if reduction is None else reduction
         gap_factor = self.gap_factor if gap_factor is None else gap_factor
         as_polydata = self.as_polydata if as_polydata is None else as_polydata
@@ -1115,12 +1335,24 @@ def _dense(r, step):
 
 
 def split_keyholes(r, tol=1e-3):
-    """Functional wrapper for splitting self-touching keyhole contours."""
+    """Functional wrapper for splitting self-touching keyhole contours.
+    
+    Examples
+    --------
+    >>> from medicalimageanalysis.utils.roi._contourmesh import split_keyholes
+    >>> split_keyholes(...)
+    """
     return AdaptiveContourToMesh.split_keyholes(r, tol=tol)
 
 
 def split_regions(slices, frame, slice_spacing, gap_factor=1.5, pad=0.5, step=0.25):
-    """Functional wrapper for dividing contours into disconnected spatial regions."""
+    """Functional wrapper for dividing contours into disconnected spatial regions.
+    
+    Examples
+    --------
+    >>> from medicalimageanalysis.utils.roi._contourmesh import split_regions
+    >>> split_regions(...)
+    """
     return AdaptiveContourToMesh.split_regions(
         slices, frame, slice_spacing, gap_factor=gap_factor, pad=pad, step=step
     )
@@ -1128,7 +1360,13 @@ def split_regions(slices, frame, slice_spacing, gap_factor=1.5, pad=0.5, step=0.
 
 def contours_to_mesh_regions(slices, frame, slice_spacing, reduction=0.5, pad=0.5,
                              gap_factor=1.5, as_polydata=True, **kw):
-    """Convenience wrapper for region-wise meshing with one final decimation pass."""
+    """Convenience wrapper for region-wise meshing with one final decimation pass.
+    
+    Examples
+    --------
+    >>> from medicalimageanalysis.utils.roi._contourmesh import contours_to_mesh_regions
+    >>> contours_to_mesh_regions(...)
+    """
     builder = AdaptiveContourToMesh(frame, slice_spacing, gap_factor=gap_factor,
                                     reduction=reduction, as_polydata=as_polydata, **kw)
     return builder.build_region_mesh(slices, reduction=reduction, pad=pad,
@@ -1136,7 +1374,13 @@ def contours_to_mesh_regions(slices, frame, slice_spacing, reduction=0.5, pad=0.
 
 
 def auto_h(slices, frame, k=0.013, h_min=0.5, h_max=2.5, max_voxels=4e6):
-    """Functional wrapper for the automatic in-plane grid-spacing heuristic."""
+    """Functional wrapper for the automatic in-plane grid-spacing heuristic.
+    
+    Examples
+    --------
+    >>> from medicalimageanalysis.utils.roi._contourmesh import auto_h
+    >>> auto_h(...)
+    """
     return AdaptiveContourToMesh.auto_h(
         slices, frame, k=k, h_min=h_min, h_max=h_max, max_voxels=max_voxels
     )
@@ -1146,14 +1390,19 @@ def contours_to_mesh(slices, frame, slice_spacing, m=1, h=None, c=None, gap_fact
                      post=True, reduction=0.5, smooth_iters=0, method="auto",
                      workers=1, as_polydata=True, mid='auto', flat_caps=False, cap_radius=None):
     """One-shot user API for contour -> mesh.
-
+    
     Parameters are intentionally close to the underlying algorithm:
-
+    
     * ``m`` controls how many sub-planes are inserted between neighbouring slices,
     * ``h`` is the in-plane lattice spacing,
     * ``c`` is the hat-field cap constant,
     * ``gap_factor`` decides when neighbouring slices are considered linked,
     * post-processing options control decimation and smoothing.
+    
+    Examples
+    --------
+    >>> from medicalimageanalysis.utils.roi._contourmesh import contours_to_mesh
+    >>> contours_to_mesh(...)
     """
     builder = AdaptiveContourToMesh(frame, slice_spacing, m=m, h=h, c=c,
                                     gap_factor=gap_factor, post=post,
@@ -1166,7 +1415,13 @@ def contours_to_mesh(slices, frame, slice_spacing, m=1, h=None, c=None, gap_fact
 
 def group_contours(contours, direction, origin=(0, 0, 0), spacing=(1, 1, 1),
                    index_space=False, index_order="xyz", slice_spacing=None):
-    """Functional wrapper for contour grouping and frame inference."""
+    """Functional wrapper for contour grouping and frame inference.
+    
+    Examples
+    --------
+    >>> from medicalimageanalysis.utils.roi._contourmesh import group_contours
+    >>> group_contours(...)
+    """
     return AdaptiveContourToMesh.group_contours(
         contours,
         direction,

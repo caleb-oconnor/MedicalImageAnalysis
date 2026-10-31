@@ -1,5 +1,4 @@
-"""
-Morfeus lab
+"""Morfeus lab
 The University of Texas
 MD Anderson Cancer Center
 Author - Caleb O'Connor
@@ -36,6 +35,11 @@ Usage:
     >>> reader = ThreeMfReader("path/to/implant.3mf", roi_name="Implant")
     >>> reader.load()
 
+Examples
+--------
+>>> import medicalimageanalysis as mia
+>>> files = mia.file_parser(folder_path='C:/Data/Patient01')
+>>> mia.read_dicoms(file_list=files['Dicom'])
 """
 
 import zipfile
@@ -84,23 +88,27 @@ class ThreeMfReader(object):
     """
 
     def __init__(self, file, roi_name=None):
-        """
-        Initialize the 3MF reader.
-
+        """Initialize the 3MF reader.
+        
         Parameters
         ----------
         file : str
             Path to `.3mf` file.
         roi_name : str, optional
             ROI name to assign to generated mesh.
+        
+        Examples
+        --------
+        >>> from medicalimageanalysis.read.mf3 import ThreeMfReader
+        >>> reader = ThreeMfReader('C:/Data/model.3mf', roi_name='Mandible')
+        >>> reader.__init__()
         """
         self.file = file
         self.roi_name = roi_name
 
     def load(self):
-        """
-        Load and parse a `.3mf` file.
-
+        """Load and parse a `.3mf` file.
+        
         Steps performed:
         1. Extract XML model from archive
         2. Parse vertices and triangles
@@ -109,6 +117,12 @@ class ThreeMfReader(object):
         5. Decimate mesh
         6. Convert mesh to internal mask/image
         7. Register ROI in global `Data` structure
+        
+        Examples
+        --------
+        >>> from medicalimageanalysis.read.mf3 import ThreeMfReader
+        >>> reader = ThreeMfReader('C:/Data/model.3mf', roi_name='Mandible')
+        >>> reader.load()
         """
 
         ns = {
