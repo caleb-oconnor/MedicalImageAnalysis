@@ -17,7 +17,7 @@ Examples
 --------
 >>> import medicalimageanalysis as mia
 >>> mia.read_mhd(file='C:/Data/scan.mhd', modality='CT')
->>> image = mia.Data.image[mia.Data.image_list[0]]
+>>> image = mia.Data.image[mia.Data.image_list()[0]]
 """
 
 import os
@@ -65,7 +65,7 @@ class Display(object):
     Examples
     --------
     >>> import medicalimageanalysis as mia
-    >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+    >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
     >>> display = dose.display
     """
 
@@ -80,7 +80,7 @@ class Display(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
         >>> display = dose.display
         >>> display.__init__(...)
         """
@@ -108,7 +108,7 @@ class Display(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
         >>> display = dose.display
         >>> display.compute_matrix_pixel_to_position(...)
         """
@@ -134,7 +134,7 @@ class Display(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
         >>> display = dose.display
         >>> display.compute_matrix_position_to_pixel(...)
         """
@@ -168,7 +168,7 @@ class Display(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
         >>> display = dose.display
         >>> display.compute_array(...)
         """
@@ -205,7 +205,7 @@ class Display(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
         >>> display = dose.display
         >>> display.compute_index_positions(...)
         """
@@ -223,7 +223,7 @@ class Display(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
         >>> display = dose.display
         >>> display.compute_offaxis_array(...)
         """
@@ -282,7 +282,7 @@ class Display(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
         >>> display = dose.display
         >>> display.compute_scroll_max(...)
         """
@@ -311,7 +311,7 @@ class Display(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
         >>> display = dose.display
         >>> display.compute_vtk_slice(...)
         """
@@ -366,7 +366,7 @@ class Display(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
         >>> display = dose.display
         >>> display.update_slice_location(...)
         """
@@ -434,7 +434,7 @@ class Dose(object):
         Cached perspective camera spatial coordinates for visualization scenes.
     misc : dict
         Arbitrary configuration store tracking analytical parameter sets.
-    rois : dict
+    roi : dict
         Collection tracking regions of interest linked to the dataset module.
     display : Display
         Active view reconstruction component parsing orthogonal mapping matrices.
@@ -442,8 +442,8 @@ class Dose(object):
     Examples
     --------
     >>> import medicalimageanalysis as mia
-    >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
-    >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+    >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
+    >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
     """
 
     def __init__(self, dose):
@@ -452,7 +452,7 @@ class Dose(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
         >>> dose.__init__(...)
         """
         self.tags = dose.image_set
@@ -485,7 +485,7 @@ class Dose(object):
         self.camera_position = None
         self.misc = {}
 
-        self.rois = {}
+        self.roi = {}
         self.display = Display(self)
 
     def get_patient_name(self):
@@ -499,7 +499,7 @@ class Dose(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
         >>> dose.get_patient_name(...)
         """
         if 'PatientName' in self.tags[0]:
@@ -518,7 +518,7 @@ class Dose(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
         >>> dose.get_mrn(...)
         """
         if 'PatientID' in self.tags[0]:
@@ -537,7 +537,7 @@ class Dose(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
         >>> dose.get_birthdate(...)
         """
         if 'PatientBirthDate' in self.tags[0]:
@@ -556,7 +556,7 @@ class Dose(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
         >>> dose.get_date(...)
         """
         if 'SeriesDate' in self.tags[0]:
@@ -581,7 +581,7 @@ class Dose(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
         >>> dose.get_time(...)
         """
         if 'SeriesTime' in self.tags[0]:
@@ -606,7 +606,7 @@ class Dose(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
         >>> dose.get_study_uid(...)
         """
         if 'StudyInstanceUID' in self.tags[0]:
@@ -625,7 +625,7 @@ class Dose(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
         >>> dose.get_series_uid(...)
         """
         if 'SeriesInstanceUID' in self.tags[0]:
@@ -644,7 +644,7 @@ class Dose(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
         >>> dose.get_acq_number(...)
         """
         if 'AcquisitionNumber' in self.tags[0]:
@@ -663,7 +663,7 @@ class Dose(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
         >>> dose.get_frame_ref(...)
         """
         if 'FrameOfReferenceUID' in self.tags[0]:
@@ -682,7 +682,7 @@ class Dose(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
         >>> dose.get_window(...)
         """
         if (0x0028, 0x1050) in self.tags[0] and (0x0028, 0x1051) in self.tags[0]:
@@ -719,7 +719,7 @@ class Dose(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
         >>> dose.get_specific_tag(...)
         """
         if tag in self.tags[0]:
@@ -743,7 +743,7 @@ class Dose(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
         >>> dose.compute_aspect(...)
         """
         if slice_plane == 'Axial':
@@ -766,7 +766,7 @@ class Dose(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
         >>> dose.compute_bounds(...)
         """
         shape = self.array.shape
@@ -799,7 +799,7 @@ class Dose(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
         >>> dose.compute_center(...)
         """
         pixel_index = [int(self.dimensions[2] / 2),
@@ -833,7 +833,7 @@ class Dose(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
         >>> dose.compute_corner_positions(...)
         """
         shape = self.array.shape
@@ -868,7 +868,7 @@ class Dose(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
         >>> dose.compute_corner_sides(...)
         """
         corner_points = self.compute_corner_positions()
@@ -889,7 +889,7 @@ class Dose(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
         >>> dose.compute_dose_statistics(...)
         """
         pass
@@ -914,12 +914,12 @@ class Dose(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
         >>> dose.compute_roi_dose_array(...)
         """
         dose_image = self.create_sitk_image()
         image = Data.image[image_name].create_sitk_image()
-        roi_image = Data.image[image_name].rois[roi_name].create_sitk_mask()
+        roi_image = Data.image[image_name].roi[roi_name].create_sitk_mask()
 
         resampler = sitk.ResampleImageFilter()
         resampler.SetReferenceImage(image)
@@ -957,7 +957,7 @@ class Dose(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
         >>> dose.compute_roi_dose_statistics(...)
         """
         spacing = Data.image[image_name].spacing
@@ -1000,7 +1000,7 @@ class Dose(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
         >>> dose.compute_pixel(...)
         """
         matrix = copy.deepcopy(self.matrix)
@@ -1034,7 +1034,7 @@ class Dose(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
         >>> dose.compute_position(...)
         """
         matrix = copy.deepcopy(self.matrix)
@@ -1061,7 +1061,7 @@ class Dose(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
         >>> dose.compute_matrix_pixel_to_position(...)
         """
         matrix = copy.deepcopy(self.matrix)
@@ -1091,7 +1091,7 @@ class Dose(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
         >>> dose.create_sitk_image(...)
         """
         if empty:
@@ -1112,7 +1112,7 @@ class Dose(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
         >>> dose.reset_array(...)
         """
         self.display.secondary_array = None
@@ -1136,7 +1136,7 @@ class Dose(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
         >>> dose.retrieve_angles(...)
         """
         rotation = Rotation.from_matrix(self.display.matrix[:3, :3])
@@ -1159,7 +1159,7 @@ class Dose(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
         >>> dose.retrieve_array_plane(...)
         """
         return self.display.compute_array(slice_plane=slice_plane)
@@ -1180,7 +1180,7 @@ class Dose(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
         >>> dose.retrieve_slice_location(...)
         """
         if slice_plane == 'Axial':
@@ -1208,7 +1208,7 @@ class Dose(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
         >>> dose.retrieve_slice_position(...)
         """
         pixel_to_position_matrix = self.display.compute_matrix_pixel_to_position()
@@ -1244,7 +1244,7 @@ class Dose(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
         >>> dose.retrieve_scroll_max(...)
         """
         if slice_plane == 'Axial':
@@ -1272,7 +1272,7 @@ class Dose(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
         >>> dose.retrieve_vtk_slice(...)
         """
         return self.display.compute_vtk_slice(slice_plane)
@@ -1293,7 +1293,7 @@ class Dose(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
         >>> dose.retrieve_vtk_volume(...)
         """
         return self.display.compute_vtk_volume(slice_plane)
@@ -1309,11 +1309,11 @@ class Dose(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
         >>> dose.save_image(...)
         """
         variable_names = self.__dict__.keys()
-        column_names = [name for name in variable_names if name not in ['tags', 'array', 'display', 'rois']]
+        column_names = [name for name in variable_names if name not in ['tags', 'array', 'display', 'roi']]
 
         df = pd.DataFrame(index=[0], columns=column_names)
         for name in column_names:
@@ -1343,7 +1343,7 @@ class Dose(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list[0]]
+        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
         >>> dose.update_rotation(...)
         """
         if r_x != 0 or r_y != 0 or r_z != 0:

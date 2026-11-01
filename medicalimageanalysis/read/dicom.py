@@ -332,7 +332,7 @@ def get_modality(series_sop_class):
 
 
 def sort_images_by_datetime():
-    """Reorder the global `Data.image` dictionary and `Data.image_list`
+    """Reorder the global `Data.image` dictionary and `Data.image_list()`
     based on DICOM acquisition date and time.
     
     Sorting is performed lexicographically on:
@@ -345,15 +345,14 @@ def sort_images_by_datetime():
     """
     date_time = [
         str(Data.image[name].date) + str(Data.image[name].time)
-        for name in Data.image_list
+        for name in Data.image_list()
     ]
 
     new_key_order = [
-        Data.image_list[idx] for idx in np.argsort(date_time)
+        Data.image_list()[idx] for idx in np.argsort(date_time)
     ]
 
     Data.image = {key: Data.image[key] for key in new_key_order}
-    Data.image_list = list(Data.image.keys())
 
 
 def thread_process_dicom(path, stop_before_pixels=False):
@@ -843,7 +842,6 @@ class Read3D(object):
         # --- register into global system ---
         image = Image(self)
         Data.image[self.image_name] = image
-        Data.image_list.append(self.image_name)
 
     @staticmethod
     def _functional_item(ds, frame_index, keyword):
@@ -1349,7 +1347,6 @@ class ReadXRay:
 
         image = Image(self)
         Data.image[self.image_name] = image
-        Data.image_list.append(self.image_name)
 
     @staticmethod
     def _fg_value(frame, shared, seq_name, attr):
@@ -1743,7 +1740,6 @@ class ReadRF:
 
         image = Image(self)
         Data.image[self.image_name] = image
-        Data.image_list.append(self.image_name)
 
     @staticmethod
     def _functional_group_spacing(img):
@@ -2065,7 +2061,6 @@ class ReadUS:
 
         image = Image(self)
         Data.image[self.image_name] = image
-        Data.image_list.append(self.image_name)
 
     @staticmethod
     def _detector_spacing(ds):
@@ -2585,7 +2580,7 @@ class ReadREG:
         ref_first = self.reference_sops[0] if self.reference_sops else None
         mov_first = self.moving_sops[0] if self.moving_sops else None
 
-        for image_name in Data.image_list:
+        for image_name in Data.image_list():
             sops = Data.image[image_name].sops
             if self.reference_name is None and ref_first in sops:
                 self.reference_name = image_name
@@ -2596,7 +2591,7 @@ class ReadREG:
         prefix = 'DVF_' if self.deformable else ''
         base = f"{prefix}{self.reference_name or 'Unknown'}_{self.moving_name or 'Unknown'}"
 
-        registry = Data.deformable_list if self.deformable else Data.rigid_list
+        registry = Data.deformable_list() if self.deformable else Data.rigid_list()
         name, i = base, 1
         while name in registry:
             name = f'{base}_{i}'
@@ -2769,7 +2764,6 @@ class ReadRTDose:
 
         self.dose_name = create_dose_name(self.modality)
         Data.dose[self.dose_name] = Dose(self)
-        Data.dose_list.append(self.dose_name)
 
     def _num_frames(self):
         """Return the number of dose planes encoded in the dataset."""
@@ -2900,14 +2894,14 @@ def create_image_name(modality):
 
     Examples
     --------
-    >>> # Assuming Data.image_list is empty
+    >>> # Assuming Data.image_list() is empty
     >>> create_image_name('CT')
     'CT 01'
-    >>> # Assuming Data.image_list has 9 items
+    >>> # Assuming Data.image_list() has 9 items
     >>> create_image_name('MR')
     'MR 10'
     """
-    idx = len(Data.image_list)
+    idx = len(Data.image_list())
     if idx < 9:
         image_name = modality + ' 0' + str(1 + idx)
     else:
@@ -2936,11 +2930,11 @@ def create_dose_name(modality):
 
     Examples
     --------
-    >>> # Assuming Data.dose_list has 2 items
+    >>> # Assuming Data.dose_list() has 2 items
     >>> create_dose_name('Dose')
     'Dose 03'
     """
-    idx = len(Data.dose_list)
+    idx = len(Data.dose_list())
     if idx < 9:
         image_name = modality + ' 0' + str(1 + idx)
     else:

@@ -307,8 +307,8 @@ class CreateImageFromMask(object):
         >>> obj = CreateImageFromMask(...)
         >>> obj.__init__(...)
         """
-        self.rois = {}
-        self.pois = {}
+        self.roi = {}
+        self.poi = {}
 
         self.array = array
         self.spacing = spacing
@@ -428,7 +428,6 @@ class CreateImageFromMask(object):
         >>> obj.add_image(...)
         """
         Data.image[self.image_name] = Image(self)
-        Data.image_list += [self.image_name]
 
     def add_mesh_roi(self, mesh, roi_name):
         """Appends complex physical 3D mesh elements inside sub-region tracking fields.
@@ -450,11 +449,11 @@ class CreateImageFromMask(object):
         >>> obj.add_mesh_roi(...)
         """
         Data.image[self.image_name].create_roi(self, name=roi_name, color=[0, 0, 255], visible=False, filepath=None)
-        self.rois[roi_name].mesh = mesh
+        self.roi[roi_name].mesh = mesh
 
-        self.rois[roi_name].volume = mesh.volume
-        self.rois[roi_name].com = mesh.center
-        self.rois[roi_name].bounds = mesh.bounds
+        self.roi[roi_name].volume = mesh.volume
+        self.roi[roi_name].com = mesh.center
+        self.roi[roi_name].bounds = mesh.bounds
 
     def compute_position(self, z):
         """Calculates the real-world spatial position context of a slice index.

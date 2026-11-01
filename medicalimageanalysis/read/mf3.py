@@ -229,7 +229,7 @@ class ThreeMfReader(object):
         decimate_mesh = mesh.decimate_pro(1 - (50000 / len(mesh.points)))
 
         # --- Convert mesh to image/mask ---
-        image_name = f"CT {len(Data.image_list) + 1:02d}"
+        image_name = f"CT {len(Data.image_list()) + 1:02d}"
 
         model_to_mask = ModelToMask([decimate_mesh])
         mask = model_to_mask.mask
@@ -242,7 +242,6 @@ class ThreeMfReader(object):
         )
 
         Data.image[image_name] = Image(new_image)
-        Data.image_list.append(image_name)
 
         # --- ROI creation ---
         Data.image[image_name].create_roi(
@@ -251,8 +250,8 @@ class ThreeMfReader(object):
             filepath=self.file
         )
 
-        Data.image[image_name].rois[self.roi_name].add_mesh(decimate_mesh)
-        Data.image[image_name].rois[self.roi_name].color = [128, 128, 128]
-        Data.image[image_name].rois[self.roi_name].multi_color = True
+        Data.image[image_name].roi[self.roi_name].add_mesh(decimate_mesh)
+        Data.image[image_name].roi[self.roi_name].color = [128, 128, 128]
+        Data.image[image_name].roi[self.roi_name].multi_color = True
 
         Data.match_rois()

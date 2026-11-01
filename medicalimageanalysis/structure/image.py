@@ -16,7 +16,7 @@ Examples
 --------
 >>> import medicalimageanalysis as mia
 >>> mia.read_mhd(file='C:/Data/scan.mhd', modality='CT')
->>> image = mia.Data.image[mia.Data.image_list[0]]
+>>> image = mia.Data.image[mia.Data.image_list()[0]]
 """
 
 import os
@@ -125,7 +125,7 @@ class Display(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> display = image.display
         >>> display.__init__(...)
         """
@@ -263,7 +263,7 @@ class Display(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> display = image.display
         >>> display.compute_array('Axial', image.get_center())
         """
@@ -366,7 +366,7 @@ class Display(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> display = image.display
         >>> display.compute_plane_geometry('Axial', image.get_center())
         """
@@ -387,7 +387,7 @@ class Display(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> display = image.display
         >>> display.compute_slice_lines('Axial', image.get_center())
         """
@@ -417,7 +417,7 @@ class Display(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> display = image.display
         >>> display.get_grid('Axial', image.get_center())
         """
@@ -436,7 +436,7 @@ class Display(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> display = image.display
         >>> display.grid_with_spacing(...)
         """
@@ -456,7 +456,7 @@ class Display(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> display = image.display
         >>> display.pivot_position(...)
         """
@@ -470,7 +470,7 @@ class Display(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> display = image.display
         >>> display.set_rotation_center(image.get_center())
         """
@@ -491,7 +491,7 @@ class Display(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> display = image.display
         >>> display.update_rotation(...)
         """
@@ -517,7 +517,7 @@ class Display(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> display = image.display
         >>> display.wheel_position('Axial', image.get_center())
         """
@@ -546,7 +546,7 @@ class Image(object):
     --------
     >>> import medicalimageanalysis as mia
     >>> mia.read_mhd(file='C:/Data/scan.mhd', modality='CT')
-    >>> image = mia.Data.image[mia.Data.image_list[0]]
+    >>> image = mia.Data.image[mia.Data.image_list()[0]]
     """
     def __init__(self, image):
         """Copy image data and metadata from a reader object into the runtime image model.
@@ -554,11 +554,11 @@ class Image(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> image.__init__(...)
         """
-        self.rois = {}
-        self.pois = {}
+        self.roi = {}
+        self.poi = {}
 
         self.tags = image.image_set
         self.array = np.ascontiguousarray(image.array)
@@ -602,8 +602,8 @@ class Image(object):
         """Return a lightweight state dictionary suitable for pickling metadata only."""
         state = self.__dict__.copy()
         state.pop("array", None)
-        state.pop("rois", None)
-        state.pop("pois", None)
+        state.pop("roi", None)
+        state.pop("poi", None)
 
         return state
 
@@ -611,8 +611,8 @@ class Image(object):
         """Restore metadata-only state and recreate empty in-memory containers."""
         self.__dict__.update(state)
         self.array = None
-        self.rois = {}
-        self.pois = {}
+        self.roi = {}
+        self.poi = {}
 
     def input_mhd(self, filename, roi_names, values, plane='Axial'):
         """Parses an explicit MetaImage (.mhd/.raw) dataset and adds segmented regions as tracking ROIs.
@@ -635,18 +635,18 @@ class Image(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> image.input_mhd(...)
         """
         roi_image = sitk.ReadImage(filename)
         roi_array = sitk.GetArrayFromImage(roi_image)
         for ii, roi_name in enumerate(roi_names):
-            if roi_name not in list(self.rois.keys()):
-                self.rois[roi_name] = Roi(self, name=roi_name, visible=True, filepaths=filename,
+            if roi_name not in list(self.roi.keys()):
+                self.roi[roi_name] = Roi(self, name=roi_name, visible=True, filepaths=filename,
                                           plane=plane)
 
             roi_mask = roi_array == values[ii]
-            self.rois[roi_name].convert_mask(roi_mask)
+            self.roi[roi_name].convert_mask(roi_mask)
 
     def input_rtstruct(self, rtstruct):
         """Imports structured DICOM RT-Struct data elements, populating the local instances with ROI/POI objects.
@@ -663,17 +663,17 @@ class Image(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> image.input_rtstruct(...)
         """
         for ii, roi_name in enumerate(rtstruct.roi_names):
-            if roi_name not in list(self.rois.keys()) or self.rois[roi_name].contour_position is None:
-                self.rois[roi_name] = Roi(self, position=rtstruct.contours[ii], name=roi_name,
+            if roi_name not in list(self.roi.keys()) or self.roi[roi_name].contour_position is None:
+                self.roi[roi_name] = Roi(self, position=rtstruct.contours[ii], name=roi_name,
                                           color=rtstruct.roi_colors[ii], visible=False, filepaths=rtstruct.filepaths)
 
         for ii, poi_name in enumerate(rtstruct.poi_names):
-            if poi_name not in list(self.pois.keys()) or self.pois[poi_name].point_position is None:
-                self.pois[poi_name] = Poi(self, position=rtstruct.points[ii], name=poi_name,
+            if poi_name not in list(self.poi.keys()) or self.poi[poi_name].point_position is None:
+                self.poi[poi_name] = Poi(self, position=rtstruct.points[ii], name=poi_name,
                                           color=rtstruct.poi_colors[ii], visible=False, filepaths=rtstruct.filepaths)
 
         Data.match_rois()
@@ -704,10 +704,10 @@ class Image(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> image.add_roi(...)
         """
-        self.rois[roi_name] = Roi(self, position=contour, name=roi_name, color=color, visible=visible, filepaths=path,
+        self.roi[roi_name] = Roi(self, position=contour, name=roi_name, color=color, visible=visible, filepaths=path,
                                   plane=plane)
         Data.match_rois()
 
@@ -734,10 +734,10 @@ class Image(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> image.add_poi(...)
         """
-        self.pois[poi_name] = Poi(self, position=point, name=poi_name, color=color, visible=visible, filepaths=path)
+        self.poi[poi_name] = Poi(self, position=point, name=poi_name, color=color, visible=visible, filepaths=path)
         Data.match_pois()
 
     def create_roi(self, name=None, color=None, visible=False, filepath=None):
@@ -761,10 +761,10 @@ class Image(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> image.create_roi(...)
         """
-        self.rois[name] = Roi(self, name=name, color=color, visible=visible, filepaths=filepath)
+        self.roi[name] = Roi(self, name=name, color=color, visible=visible, filepaths=filepath)
         Data.match_rois()
 
     def create_rtstruct(self, roi_names=None, poi_names=None):
@@ -784,7 +784,7 @@ class Image(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> image.create_rtstruct(...)
         """
         pass
@@ -800,7 +800,7 @@ class Image(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> image.get_patient_name(...)
         """
         if 'PatientName' in self.tags[0]:
@@ -819,7 +819,7 @@ class Image(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> image.get_mrn(...)
         """
         if 'PatientID' in self.tags[0]:
@@ -838,7 +838,7 @@ class Image(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> image.get_birthdate(...)
         """
         if 'PatientBirthDate' in self.tags[0]:
@@ -857,7 +857,7 @@ class Image(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> image.get_date(...)
         """
         if 'SeriesDate' in self.tags[0]:
@@ -882,7 +882,7 @@ class Image(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> image.get_time(...)
         """
         if 'SeriesTime' in self.tags[0]:
@@ -907,7 +907,7 @@ class Image(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> image.get_study_uid(...)
         """
         if 'StudyInstanceUID' in self.tags[0]:
@@ -926,7 +926,7 @@ class Image(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> image.get_series_uid(...)
         """
         if 'SeriesInstanceUID' in self.tags[0]:
@@ -945,7 +945,7 @@ class Image(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> image.get_acq_number(...)
         """
         if 'AcquisitionNumber' in self.tags[0]:
@@ -964,7 +964,7 @@ class Image(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> image.get_frame_ref(...)
         """
         if 'FrameOfReferenceUID' in self.tags[0]:
@@ -983,7 +983,7 @@ class Image(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> image.get_window(...)
         """
         if (0x0028, 0x1050) in self.tags[0] and (0x0028, 0x1051) in self.tags[0]:
@@ -1020,7 +1020,7 @@ class Image(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> image.get_specific_tag(...)
         """
         if tag in self.tags[0]:
@@ -1044,7 +1044,7 @@ class Image(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> image.get_specific_tag_on_all_files(...)
         """
         if tag in self.tags[0]:
@@ -1058,7 +1058,7 @@ class Image(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> image.save(...)
         """
         aes = AESGCM(key)
@@ -1084,7 +1084,7 @@ class Image(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> image.load_metadata(...)
         """
         with open(metadata_path, "rb") as f:
@@ -1095,7 +1095,6 @@ class Image(object):
         self.__setstate__(loaded.__dict__)
 
         Data.image[self.image_name] = self
-        Data.image_list.append(self.image_name)
 
     def load_array(self, array_path, key):
         """Load, decrypt, and decompress the persisted array data for this image.
@@ -1103,7 +1102,7 @@ class Image(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> image.load_array(...)
         """
         with open(array_path, "rb") as f:
@@ -1132,11 +1131,11 @@ class Image(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> image.save_unencrypted(...)
         """
         variable_names = self.__dict__.keys()
-        column_names = [name for name in variable_names if name not in ['rois', 'pois', 'tags', 'array', 'display']]
+        column_names = [name for name in variable_names if name not in ['roi', 'poi', 'tags', 'array', 'display']]
 
         df = pd.DataFrame(index=[0], columns=column_names)
         for name in column_names:
@@ -1147,10 +1146,10 @@ class Image(object):
         np.save(os.path.join(path, 'array.npy'), self.array, allow_pickle=True)
 
         if rois:
-            self.save_rois(path, create_main_folder=True)
+            self.save_unencrypted_rois(path, create_main_folder=True)
 
         if pois:
-            self.save_pois(path, create_main_folder=True)
+            self.save_unencrypted_pois(path, create_main_folder=True)
 
     def save_unencrypted_rois(self, path, create_main_folder=False):
         """Iterates over trackable ROI dictionary values to store serialized NumPy matrices configurations.
@@ -1169,24 +1168,24 @@ class Image(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> image.save_unencrypted_rois(...)
         """
         if create_main_folder:
             path = os.path.join(path, 'ROIs')
             os.mkdir(path)
 
-        for name in list(self.rois.keys()):
+        for name in list(self.roi.keys()):
             roi_path = os.path.join(os.path.join(path, name))
             os.mkdir(roi_path)
 
-            np.save(os.path.join(roi_path, 'name.npy'), self.rois[name].name, allow_pickle=True)
-            np.save(os.path.join(roi_path, 'visible.npy'), self.rois[name].visible, allow_pickle=True)
-            np.save(os.path.join(roi_path, 'color.npy'), self.rois[name].color, allow_pickle=True)
-            np.save(os.path.join(roi_path, 'filepaths.npy'), self.rois[name].filepaths, allow_pickle=True)
-            if self.rois[name].contour_position is not None:
+            np.save(os.path.join(roi_path, 'name.npy'), self.roi[name].name, allow_pickle=True)
+            np.save(os.path.join(roi_path, 'visible.npy'), self.roi[name].visible, allow_pickle=True)
+            np.save(os.path.join(roi_path, 'color.npy'), self.roi[name].color, allow_pickle=True)
+            np.save(os.path.join(roi_path, 'filepaths.npy'), self.roi[name].filepaths, allow_pickle=True)
+            if self.roi[name].contour_position is not None:
                 np.save(os.path.join(roi_path, 'contour_position.npy'),
-                        np.array(self.rois[name].contour_position, dtype=object),
+                        np.array(self.roi[name].contour_position, dtype=object),
                         allow_pickle=True)
 
     def save_unencrypted_pois(self, path, create_main_folder=False):
@@ -1206,22 +1205,22 @@ class Image(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> image.save_unencrypted_pois(...)
         """
         if create_main_folder:
             path = os.path.join(path, 'POIs')
             os.mkdir(path)
 
-        for name in list(self.pois.keys()):
+        for name in list(self.poi.keys()):
             poi_path = os.path.join(os.path.join(path, name))
             os.mkdir(poi_path)
 
-            np.save(os.path.join(poi_path, 'name.npy'), self.pois[name].name, allow_pickle=True)
-            np.save(os.path.join(poi_path, 'visible.npy'), self.pois[name].visible, allow_pickle=True)
-            np.save(os.path.join(poi_path, 'color.npy'), self.pois[name].color, allow_pickle=True)
-            np.save(os.path.join(poi_path, 'filepaths.npy'), self.pois[name].filepaths, allow_pickle=True)
-            np.save(os.path.join(poi_path, 'point_position.npy'), self.pois[name].point_position, allow_pickle=True)
+            np.save(os.path.join(poi_path, 'name.npy'), self.poi[name].name, allow_pickle=True)
+            np.save(os.path.join(poi_path, 'visible.npy'), self.poi[name].visible, allow_pickle=True)
+            np.save(os.path.join(poi_path, 'color.npy'), self.poi[name].color, allow_pickle=True)
+            np.save(os.path.join(poi_path, 'filepaths.npy'), self.poi[name].filepaths, allow_pickle=True)
+            np.save(os.path.join(poi_path, 'point_position.npy'), self.poi[name].point_position, allow_pickle=True)
 
     def load_unencrypted_image(self, image_path, rois=True, pois=True):
         """Loads and populates volumetric imaging elements out from saved system processing sub-directories.
@@ -1242,7 +1241,7 @@ class Image(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> image.load_unencrypted_image(...)
         """
         self.array = np.load(os.path.join(image_path, 'array.npy'), allow_pickle=True)
@@ -1254,12 +1253,12 @@ class Image(object):
         if rois:
             roi_names = os.listdir(os.path.join(image_path, 'ROIs'))
             for name in roi_names:
-                self.load_rois(os.path.join(image_path, 'ROIs', name))
+                self.load_unencrypted_rois(os.path.join(image_path, 'ROIs', name))
 
         if pois:
             roi_names = os.listdir(os.path.join(image_path, 'POIs'))
             for name in roi_names:
-                self.load_pois(os.path.join(image_path, 'POIs', name))
+                self.load_unencrypted_pois(os.path.join(image_path, 'POIs', name))
 
     def load_unencrypted_rois(self, roi_path):
         """Parses archived individual target ROI binary properties, formatting components to avoid index namespace conflicts.
@@ -1276,12 +1275,12 @@ class Image(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> image.load_unencrypted_rois(...)
         """
         name = str(np.load(os.path.join(roi_path, 'name.npy'), allow_pickle=True))
 
-        existing_rois = list(self.rois.keys())
+        existing_rois = list(self.roi.keys())
         if name in existing_rois:
             n = 0
             while n >= 0:
@@ -1291,14 +1290,14 @@ class Image(object):
                     name = new_name
                     n = -1
 
-        self.rois[name] = Roi(self)
-        self.rois[name].name = name
-        self.rois[name].visible = bool(np.load(os.path.join(roi_path, 'visible.npy'), allow_pickle=True))
-        self.rois[name].color = list(np.load(os.path.join(roi_path, 'color.npy'), allow_pickle=True))
-        self.rois[name].filepaths = str(np.load(os.path.join(roi_path, 'filepaths.npy'), allow_pickle=True))
+        self.roi[name] = Roi(self)
+        self.roi[name].name = name
+        self.roi[name].visible = bool(np.load(os.path.join(roi_path, 'visible.npy'), allow_pickle=True))
+        self.roi[name].color = list(np.load(os.path.join(roi_path, 'color.npy'), allow_pickle=True))
+        self.roi[name].filepaths = str(np.load(os.path.join(roi_path, 'filepaths.npy'), allow_pickle=True))
 
         if os.path.exists(os.path.join(roi_path, 'contour_position.npy')):
-            self.rois[name].contour_position = list(np.load(os.path.join(roi_path, 'contour_position.npy'),
+            self.roi[name].contour_position = list(np.load(os.path.join(roi_path, 'contour_position.npy'),
                                                             allow_pickle=True))
 
     def load_unencrypted_pois(self, poi_path):
@@ -1316,12 +1315,12 @@ class Image(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> image.load_unencrypted_pois(...)
         """
         name = str(np.load(os.path.join(poi_path, 'name.npy'), allow_pickle=True))
 
-        existing_pois = list(self.pois.keys())
+        existing_pois = list(self.poi.keys())
         if name in existing_pois:
             n = 0
             while n >= 0:
@@ -1331,15 +1330,15 @@ class Image(object):
                     name = new_name
                     n = -1
 
-        self.pois[name] = Poi(self)
-        self.pois[name].name = name
-        self.pois[name].visible = bool(np.load(os.path.join(poi_path, 'visible.npy'), allow_pickle=True))
-        self.pois[name].color = list(np.load(os.path.join(poi_path, 'color.npy'), allow_pickle=True))
-        self.pois[name].filepaths = str(np.load(os.path.join(poi_path, 'filepaths.npy'), allow_pickle=True))
+        self.poi[name] = Poi(self)
+        self.poi[name].name = name
+        self.poi[name].visible = bool(np.load(os.path.join(poi_path, 'visible.npy'), allow_pickle=True))
+        self.poi[name].color = list(np.load(os.path.join(poi_path, 'color.npy'), allow_pickle=True))
+        self.poi[name].filepaths = str(np.load(os.path.join(poi_path, 'filepaths.npy'), allow_pickle=True))
 
         if os.path.exists(os.path.join(poi_path, 'point_position.npy')):
-            self.rois[name].contour_position = list(np.load(os.path.join(poi_path, 'point_position.npy'),
-                                                            allow_pickle=True))
+            self.poi[name].point_position = list(np.load(os.path.join(poi_path, 'point_position.npy'),
+                                                         allow_pickle=True))
 
     def create_sitk_image(self, empty=False):
         """Converts the active internal image data block matrix into a native SimpleITK image container.
@@ -1357,7 +1356,7 @@ class Image(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> image.create_sitk_image(...)
         """
         if empty:
@@ -1383,7 +1382,7 @@ class Image(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> image.create_rotated_sitk_image(...)
         """
         sitk_image = sitk.GetImageFromArray(self.array)
@@ -1394,7 +1393,7 @@ class Image(object):
 
         transform = sitk.Euler3DTransform()
         transform.SetRotation(0, 0, 10 * np.pi / 180)
-        transform.SetCenter(self.rois['Liver'].mesh.center)
+        transform.SetCenter(self.roi['Liver'].mesh.center)
         transform.SetComputeZYX(True)
 
         resample_image = sitk.ResampleImageFilter()
@@ -1429,22 +1428,22 @@ class Image(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> image.create_external(...)
         """
         if color is None:
             color = [0, 255, 0]
 
-        if name not in list(self.rois.keys()):
-            self.rois[name] = Roi(self, name=name, color=color, visible=visible, filepaths=filepaths)
+        if name not in list(self.roi.keys()):
+            self.roi[name] = Roi(self, name=name, color=color, visible=visible, filepaths=filepaths)
 
         mask = external(self.array, threshold=threshold, only_mask=True)
         contours = contours_from_mask(mask.astype(np.uint8))
-        positions = self.rois[name].convert_pixel_to_position(pixel=contours)
+        positions = self.roi[name].convert_pixel_to_position(pixel=contours)
 
-        self.rois[name].contour_pixel = contours
-        self.rois[name].contour_position = positions
-        self.rois[name].create_mesh(reduction=0.50)
+        self.roi[name].contour_pixel = contours
+        self.roi[name].contour_position = positions
+        self.roi[name].create_mesh(reduction=0.50)
 
     def compute_initial_origin(self, plane):
         """Top-left corner of this plane's slice, at the volume's center index
@@ -1458,7 +1457,7 @@ class Image(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> image.compute_initial_origin(...)
         """
 
@@ -1491,7 +1490,7 @@ class Image(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> image.compute_pixel(...)
         """
         matrix = copy.deepcopy(self.matrix)
@@ -1522,7 +1521,7 @@ class Image(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> image.compute_position(...)
         """
         matrix = copy.deepcopy(self.matrix)
@@ -1546,7 +1545,7 @@ class Image(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> image.compute_matrix_pixel_to_position(...)
         """
         matrix = copy.deepcopy(self.matrix)
@@ -1570,7 +1569,7 @@ class Image(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> image.compute_matrix_position_to_pixel(...)
         """
         matrix = copy.deepcopy(self.matrix)
@@ -1603,7 +1602,7 @@ class Image(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> image.get_aspect(...)
         """
         if slice_plane == 'Axial':
@@ -1626,7 +1625,7 @@ class Image(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> image.get_bounds(...)
         """
         shape = self.array.shape
@@ -1659,7 +1658,7 @@ class Image(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> image.get_center(...)
         """
         pixel_index = [int(self.dimensions[2] / 2),
@@ -1690,7 +1689,7 @@ class Image(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> image.get_corner_sides(...)
         """
         corner_points = self.compute_corner_positions()
@@ -1715,7 +1714,7 @@ class Image(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> image.reset_display(...)
         """
         self.display.matrix = np.eye(3)
@@ -1737,7 +1736,7 @@ class Image(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
         >>> image.retrieve_angles(...)
         """
         rotation = Rotation.from_matrix(self.display.matrix[:3, :3])

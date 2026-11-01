@@ -27,7 +27,7 @@ Key Components:
 Usage:
     Import the class and access attributes directly:
     >>> from medicalimageanalysis import Data
-    >>> Data.image_list
+    >>> Data.image_list()
 
 Warning:
     Because this class uses global state, calling `Data.clear()` will affect
@@ -37,7 +37,7 @@ Examples
 --------
 >>> from medicalimageanalysis import Data
 >>> Data.clear()
->>> Data.image_list
+>>> Data.image_list()
 []
 """
 
@@ -55,15 +55,15 @@ class Data(object):
         rigid (dict): Mapping of transformation IDs to rigid transform objects.
         deformable (dict): Mapping of transformation IDs to deformable transform objects.
         dose (dict): Mapping of dose IDs to dose distribution objects.
-        image_list (list): Ordered keys for registered images.
-        roi_list (list): Master list of unique Region of Interest names.
-        poi_list (list): Master list of unique Point of Interest names.
+        image_list (callable): Classmethod returning the current image names.
+        roi_list (callable): Classmethod returning current unique ROI names.
+        poi_list (callable): Classmethod returning current unique POI names.
     
     Examples
     --------
     >>> from medicalimageanalysis import Data
     >>> Data.clear()
-    >>> Data.image_list
+    >>> Data.image_list()
     []
     """
 
@@ -72,12 +72,87 @@ class Data(object):
     deformable = {}
     dose = {}
 
-    image_list = []
-    deformable_list = []
-    dose_list = []
-    poi_list = []
-    rigid_list = []
-    roi_list = []
+    @classmethod
+    def image_list(cls):
+        """Return the names of all currently loaded images.
+
+        Examples
+        --------
+        >>> from medicalimageanalysis import Data
+        >>> Data.image_list()
+        []
+        """
+        return list(cls.image.keys())
+
+    @classmethod
+    def deformable_list(cls):
+        """Return the names of all stored deformable registrations.
+
+        Examples
+        --------
+        >>> from medicalimageanalysis import Data
+        >>> Data.deformable_list()
+        []
+        """
+        return list(cls.deformable.keys())
+
+    @classmethod
+    def dose_list(cls):
+        """Return the names of all stored dose objects.
+
+        Examples
+        --------
+        >>> from medicalimageanalysis import Data
+        >>> Data.dose_list()
+        []
+        """
+        return list(cls.dose.keys())
+
+    @classmethod
+    def poi_list(cls):
+        """Return the unique POI names present across all loaded images.
+
+        Examples
+        --------
+        >>> from medicalimageanalysis import Data
+        >>> Data.poi_list()
+        []
+        """
+        poi_names = []
+        for image in cls.image.values():
+            for poi_name in image.poi:
+                if poi_name not in poi_names:
+                    poi_names.append(poi_name)
+        return poi_names
+
+    @classmethod
+    def rigid_list(cls):
+        """Return the names of all stored rigid registrations.
+
+        Examples
+        --------
+        >>> from medicalimageanalysis import Data
+        >>> Data.rigid_list()
+        []
+        """
+        return list(cls.rigid.keys())
+
+    @classmethod
+    def roi_list(cls):
+        """Return the unique ROI names present across all loaded images.
+
+        Examples
+        --------
+        >>> from medicalimageanalysis import Data
+        >>> Data.roi_list()
+        []
+        """
+        roi_names = []
+        for image in cls.image.values():
+            for roi_name in image.roi:
+                if roi_name not in roi_names:
+                    roi_names.append(roi_name)
+        return roi_names
 
     @classmethod
     def clear(cls):
@@ -89,7 +164,7 @@ class Data(object):
         
         Example:
             >>> Data.clear()
-            >>> len(Data.image_list)
+            >>> len(Data.image_list())
             0
         
         Examples
@@ -101,13 +176,6 @@ class Data(object):
         cls.rigid = {}
         cls.deformable = {}
         cls.dose = {}
-
-        cls.image_list = []
-        cls.poi_list = []
-        cls.roi_list = []
-        cls.rigid_list = []
-        cls.deformable_list = []
-        cls.dose_list = []
 
     @classmethod
     def delete_image(cls, image_name):
@@ -125,7 +193,6 @@ class Data(object):
         >>> Data.delete_image(... )
         """
         del cls.image[image_name]
-        cls.image_list.remove(image_name)
 
     @classmethod
     def match_rois(cls):
@@ -146,14 +213,12 @@ class Data(object):
         >>> from medicalimageanalysis import Data
         >>> Data.match_rois()
         """
-        roi_names = list(cls.roi_list)
+        roi_names = list(cls.roi_list())
 
         for image_name in cls.image:
-            for roi_name in cls.image[image_name].rois:
+            for roi_name in cls.image[image_name].roi:
                 if roi_name not in roi_names:
                     roi_names.append(roi_name)
-
-        cls.roi_list = roi_names
 
         # Determine authoritative color/visibility for each ROI
         color = [[128, 128, 128] for _ in roi_names]
@@ -161,8 +226,8 @@ class Data(object):
 
         for ii, roi_name in enumerate(roi_names):
             for image_name in cls.image:
-                if roi_name in cls.image[image_name].rois:
-                    roi = cls.image[image_name].rois[roi_name]
+                if roi_name in cls.image[image_name].roi:
+                    roi = cls.image[image_name].roi[roi_name]
 
                     if roi.color is not None:
                         color[ii] = roi.color
@@ -172,7 +237,7 @@ class Data(object):
         # Add missing ROIs to each image
         for ii, roi_name in enumerate(roi_names):
             for image_name in cls.image:
-                if roi_name not in cls.image[image_name].rois:
+                if roi_name not in cls.image[image_name].roi:
                     cls.image[image_name].add_roi(roi_name=roi_name, color=color[ii], visible=visible[ii])
 
     @classmethod
@@ -193,22 +258,21 @@ class Data(object):
         >>> from medicalimageanalysis import Data
         >>> Data.match_pois()
         """
-        image_pois = [list(cls.image[image_name].pois.keys()) for image_name in list(cls.image.keys())]
+        image_pois = [list(cls.image[image_name].poi.keys()) for image_name in list(cls.image.keys())]
         poi_names = list({x for r in image_pois for x in r})
-        cls.poi_list = poi_names
 
         color = [[128, 128, 128]] * len(poi_names)
         visible = [False] * len(poi_names)
         for ii, poi_name in enumerate(poi_names):
             for image_name in list(cls.image.keys()):
-                pois_on_image = list(cls.image[image_name].pois.keys())
+                pois_on_image = list(cls.image[image_name].poi.keys())
                 if poi_name in pois_on_image:
-                    if cls.image[image_name].pois[poi_name].color is not None:
-                        color[ii] = cls.image[image_name].pois[poi_name].color
-                        visible[ii] = cls.image[image_name].pois[poi_name].visible
+                    if cls.image[image_name].poi[poi_name].color is not None:
+                        color[ii] = cls.image[image_name].poi[poi_name].color
+                        visible[ii] = cls.image[image_name].poi[poi_name].visible
 
         for ii, poi_name in enumerate(poi_names):
             for image_name in list(cls.image.keys()):
-                pois_on_image = list(cls.image[image_name].pois.keys())
+                pois_on_image = list(cls.image[image_name].poi.keys())
                 if poi_name not in pois_on_image:
                     cls.image[image_name].add_poi(poi_name=poi_name, color=color[ii], visible=visible[ii])

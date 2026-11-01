@@ -28,7 +28,7 @@ Examples
 --------
 >>> import medicalimageanalysis as mia
 >>> mia.read_mhd(file='C:/Data/scan.mhd', modality='CT')
->>> image = mia.Data.image[mia.Data.image_list[0]]
+>>> image = mia.Data.image[mia.Data.image_list()[0]]
 """
 
 import os
@@ -209,7 +209,7 @@ class Deformable(object):
         Descriptive structural ROI names associated with the target datasets.
     rigid_rois : dict
         Intermediary cache tracking rigid positional adjustments prior to applying non-rigid deformations.
-    rois : dict
+    roi : dict
         Moving ROI meshes deformed into the reference world (100 %).
     reference_mesh : PolyData
         Master structural surface reference asset definition tracking target anatomy elements.
@@ -239,7 +239,7 @@ class Deformable(object):
     Examples
     --------
     >>> import medicalimageanalysis as mia
-    >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+    >>> deform = mia.Data.deformable[mia.Data.deformable_list()[0]]
     >>> deform.get_inverted_dvf()
     """
 
@@ -251,7 +251,7 @@ class Deformable(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list()[0]]
         >>> deform.__init__(...)
         """
         self.reference_name = reference_name
@@ -259,8 +259,8 @@ class Deformable(object):
         self.moving_name = moving_name
         self.moving_sops = moving_sops
         self.roi_names = roi_names
-        self.rigid_rois = dict.fromkeys(Data.roi_list)
-        self.rois = dict.fromkeys(Data.roi_list)
+        self.rigid_rois = dict.fromkeys(Data.roi_list())
+        self.roi = dict.fromkeys(Data.roi_list())
         self.reference_mesh = reference_meshes
         self.moving_mesh = moving_meshes
         self.local_uid = generate_uid()
@@ -307,8 +307,8 @@ class Deformable(object):
         ref_mask = None
         mov_mask = None
         for roi_name in self.roi_names:
-            ref_roi = Data.image[self.reference_name].rois[roi_name]
-            mov_roi = Data.image[self.moving_name].rois[roi_name]
+            ref_roi = Data.image[self.reference_name].roi[roi_name]
+            mov_roi = Data.image[self.moving_name].roi[roi_name]
             if ref_roi.mesh is not None or ref_roi.contour_pixel is not None:
                 if mov_roi.mesh is not None or mov_roi.contour_pixel is not None:
                     ref_mask = ref_roi.compute_mask() if ref_mask is None else ref_mask + ref_roi.compute_mask()
@@ -447,7 +447,7 @@ class Deformable(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list()[0]]
         >>> deform.add_deformable(...)
         """
         if deformable_name is None:
@@ -456,17 +456,16 @@ class Deformable(object):
             else:
                 deformable_name = 'DVF_' + self.reference_name + '_' + self.moving_name
 
-            if deformable_name in Data.deformable_list:
+            if deformable_name in Data.deformable_list():
                 n = 0
                 while n > -1:
                     n += 1
                     new_name = copy.deepcopy(deformable_name + '_' + str(n))
-                    if new_name not in Data.deformable_list:
+                    if new_name not in Data.deformable_list():
                         deformable_name = new_name
                         n = -100
 
         Data.deformable[deformable_name] = self
-        Data.deformable_list += [deformable_name]
 
         return deformable_name
 
@@ -476,7 +475,7 @@ class Deformable(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list()[0]]
         >>> deform.clear_mesh_slice_cache(...)
         """
         caches = self._display_cache.get('mesh_slices', {})
@@ -495,7 +494,7 @@ class Deformable(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list()[0]]
         >>> deform.compute_array(...)
         """
         if self.dvf is None or self.current_ref is None or self.current_mov is None:
@@ -529,7 +528,7 @@ class Deformable(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list()[0]]
         >>> deform.compute_grid(...)
         """
         if self.dvf is None or self.current_ref is None:
@@ -559,7 +558,7 @@ class Deformable(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list()[0]]
         >>> deform.compute_aspect(...)
         """
         _PLANE_AXES = {'Axial': (0, 1, 2), 'Sagittal': (1, 2, 0), 'Coronal': (0, 2, 1)}
@@ -575,7 +574,7 @@ class Deformable(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list()[0]]
         >>> deform.compute_biomechanical(...)
         """
         pass
@@ -604,7 +603,7 @@ class Deformable(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list()[0]]
         >>> deform.compute_bspline(...)
         """
         ref = Data.image[self.reference_name]
@@ -670,7 +669,7 @@ class Deformable(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list()[0]]
         >>> deform.compute_demons(...)
         """
         ref = Data.image[self.reference_name]
@@ -716,11 +715,11 @@ class Deformable(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list()[0]]
         >>> deform.compute_components(...)
         """
-        if self.rois[roi_name] is not None:
-            return compute_components(self.rois[roi_name])
+        if self.roi[roi_name] is not None:
+            return compute_components(self.roi[roi_name])
 
         else:
             return None
@@ -732,7 +731,7 @@ class Deformable(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list()[0]]
         >>> deform.compute_inverted_dvf(...)
         """
         dvf_sitk = sitk.GetImageFromArray(self.dvf, isVector=True)
@@ -763,7 +762,7 @@ class Deformable(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list()[0]]
         >>> deform.compute_mesh_slice(...)
         """
         mesh = self.get_display_mesh(roi_name, percent=percent)
@@ -830,7 +829,7 @@ class Deformable(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list()[0]]
         >>> deform.correct_dvf_direction(...)
         """
         D_new = np.identity(3)
@@ -868,7 +867,7 @@ class Deformable(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list()[0]]
         >>> deform.create_image(...)
         """
         affine = sitk.AffineTransform(3)
@@ -894,10 +893,10 @@ class Deformable(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list()[0]]
         >>> deform.create_roi_image(...)
         """
-        mesh = self.rois[roi_name].triangulate()
+        mesh = self.roi[roi_name].triangulate()
 
         image = vtk.vtkImageData()
         image.SetDimensions(np.flip(Data.image[self.reference_name].dimensions))
@@ -943,7 +942,7 @@ class Deformable(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list()[0]]
         >>> deform.export_image(...)
         """
         if self.moving_name is not None and path is not None:
@@ -958,13 +957,13 @@ class Deformable(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list()[0]]
         >>> deform.get_display_mesh(...)
         """
         if self.dvf is None:
             return None
 
-        source = Data.image[self.current_mov].rois.get(roi_name)
+        source = Data.image[self.current_mov].roi.get(roi_name)
         if source is None or source.mesh is None:
             return None
 
@@ -987,7 +986,7 @@ class Deformable(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list()[0]]
         >>> deform.get_inverted_dvf(...)
         """
         if self.inverted_dvf is None or self._display_cache.get('inverted_source') is not self.dvf:
@@ -1001,7 +1000,7 @@ class Deformable(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list()[0]]
         >>> deform.get_view_center(...)
         """
         base = Data.image[self.current_ref].display
@@ -1016,7 +1015,7 @@ class Deformable(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list()[0]]
         >>> deform.invalidate_display(...)
         """
         self._display_cache = {}
@@ -1028,26 +1027,26 @@ class Deformable(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list()[0]]
         >>> deform.map_mesh(...)
         """
-        if self.rois[roi_name] is None:
+        if self.roi[roi_name] is None:
             self.update_rois(roi_name)
 
-        if self.rois[roi_name] is None or self.dvf is None:
+        if self.roi[roi_name] is None or self.dvf is None:
             return None
 
-        deformed_points = np.asarray(self.rois[roi_name].points)
+        deformed_points = np.asarray(self.roi[roi_name].points)
         disp = (percent / 100) * self._sample_field_points(self.get_inverted_dvf(), deformed_points)
 
-        self.rigid_rois[roi_name] = copy.deepcopy(self.rois[roi_name])
+        self.rigid_rois[roi_name] = copy.deepcopy(self.roi[roi_name])
         self.rigid_rois[roi_name].points = deformed_points + disp
 
         # undo rigid: forward transform undoes the inv() applied originally
         mapped_mesh = copy.deepcopy(self.rigid_rois[roi_name])
         mapped_mesh.transform(self.rigid_matrix, inplace=True)
         if set_moving:
-            Data.image[self.moving_name].rois[roi_name].update_mesh(mapped_mesh)
+            Data.image[self.moving_name].roi[roi_name].update_mesh(mapped_mesh)
 
         if return_mesh:
             return mapped_mesh
@@ -1065,11 +1064,11 @@ class Deformable(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list()[0]]
         >>> deform.save_deformable(...)
         """
         variable_names = self.__dict__.keys()
-        column_names = [name for name in variable_names if name not in ['rois', 'dvf', 'inverted_dvf', 'rigid_rois',
+        column_names = [name for name in variable_names if name not in ['roi', 'dvf', 'inverted_dvf', 'rigid_rois',
                                                                         '_display_cache']]
 
         df = pd.DataFrame(index=[0], columns=column_names)
@@ -1088,7 +1087,7 @@ class Deformable(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list()[0]]
         >>> deform.set_current_order(...)
         """
         self.inverse = bool(inverse)
@@ -1110,23 +1109,23 @@ class Deformable(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> deform = mia.Data.deformable[mia.Data.deformable_list[0]]
+        >>> deform = mia.Data.deformable[mia.Data.deformable_list()[0]]
         >>> deform.update_rois(...)
         """
-        for name in list(self.rois.keys()):
-            if name not in Data.roi_list:
-                del self.rois[name]
+        for name in list(self.roi.keys()):
+            if name not in Data.roi_list():
+                del self.roi[name]
 
-        for name in Data.roi_list:
-            if name not in list(self.rois.keys()):
-                self.rois[name] = None
+        for name in Data.roi_list():
+            if name not in list(self.roi.keys()):
+                self.roi[name] = None
 
-        for name in Data.roi_list:
+        for name in Data.roi_list():
             if roi_name is None or name == roi_name:
-                roi = Data.image[self.moving_name].rois[name]
+                roi = Data.image[self.moving_name].roi[name]
                 if roi.mesh is not None and roi.visible:
                     self.rigid_rois[name] = roi.mesh.transform(np.linalg.inv(self.rigid_matrix), inplace=False)
 
                     points = np.asarray(self.rigid_rois[name].points)
-                    self.rois[name] = copy.deepcopy(self.rigid_rois[name])
-                    self.rois[name].points = points + (percent / 100) * self._sample_field_points(self.dvf, points)
+                    self.roi[name] = copy.deepcopy(self.rigid_rois[name])
+                    self.roi[name].points = points + (percent / 100) * self._sample_field_points(self.dvf, points)

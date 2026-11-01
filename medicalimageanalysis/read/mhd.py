@@ -31,7 +31,7 @@ Dependencies:
 
 Usage:
     >>> reader = MhdReader(file="path/to/data.mhd", modality="CT")
-    >>> reader.load()  # This populates Data.image and Data.image_list
+    >>> reader.load()  # This populates Data.image and Data.image_list()
 
 Examples
 --------
@@ -187,7 +187,7 @@ class MhdReader(object):
             image_name = os.path.splitext(filename)[0]
             self.modality = 'CT'
         else:
-            idx = len(Data.image_list)
+            idx = len(Data.image_list())
             image_name = (
                 f"{self.modality} {idx + 1:02d}"
                 if idx < 9 else
@@ -244,7 +244,7 @@ class MhdReader(object):
         """Create a deformable vector field (DVF) from `.mhd`.
         
         Handles:
-        - Name collision resolution in `Data.deformable_list`
+        - Name collision resolution in `Data.deformable_list()`
         - Conversion of voxel field into DVF object
         - Registration of DVF into global `Data` structure
         
@@ -258,12 +258,12 @@ class MhdReader(object):
             f"DVF_{self.reference_name}_{self.moving_name}"
         )
 
-        if registration_name in Data.deformable_list:
+        if registration_name in Data.deformable_list():
             n = 0
             while True:
                 n += 1
                 new_name = f"{registration_name}_{n}"
-                if new_name not in Data.deformable_list:
+                if new_name not in Data.deformable_list():
                     registration_name = new_name
                     break
 

@@ -7,7 +7,7 @@ Examples
 --------
 >>> import medicalimageanalysis as mia
 >>> mia.read_mhd(file='C:/Data/scan.mhd', modality='CT')
->>> image = mia.Data.image[mia.Data.image_list[0]]
+>>> image = mia.Data.image[mia.Data.image_list()[0]]
 """
 
 import copy
@@ -20,8 +20,8 @@ class Poi(object):
     Examples
     --------
     >>> import medicalimageanalysis as mia
-    >>> image = mia.Data.image[mia.Data.image_list[0]]
-    >>> poi = image.pois['Isocenter']
+    >>> image = mia.Data.image[mia.Data.image_list()[0]]
+    >>> poi = image.poi['Isocenter']
     """
 
     def __init__(self, image, position=None, name=None, color=None, visible=None, filepaths=None):

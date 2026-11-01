@@ -16,7 +16,7 @@ Examples
 --------
 >>> import medicalimageanalysis as mia
 >>> mia.read_mhd(file='C:/Data/scan.mhd', modality='CT')
->>> image = mia.Data.image[mia.Data.image_list[0]]
+>>> image = mia.Data.image[mia.Data.image_list()[0]]
 """
 
 import os
@@ -78,13 +78,13 @@ class Rigid(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
         >>> rigid.__init__(...)
         """
         self.reference_name = reference_name
         self.moving_name = moving_name
         self.combo_name = combo_name
-        self.rois = dict.fromkeys(Data.roi_list)
+        self.roi = dict.fromkeys(Data.roi_list())
         self.local_uid = generate_uid()
 
         self.reference_matrix = np.identity(4) if reference_matrix is None else np.asarray(reference_matrix, float)
@@ -136,7 +136,7 @@ class Rigid(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
         >>> rigid.add_rigid(...)
         """
         if rigid_name is None:
@@ -145,17 +145,16 @@ class Rigid(object):
             else:
                 rigid_name = self.reference_name + '_' + self.moving_name + '_combo'
 
-            if rigid_name in Data.rigid_list:
+            if rigid_name in Data.rigid_list():
                 n = 0
                 while n > -1:
                     n += 1
                     new_name = copy.deepcopy(rigid_name + '_' + str(n))
-                    if new_name not in Data.rigid_list:
+                    if new_name not in Data.rigid_list():
                         rigid_name = new_name
                         n = -100
 
         Data.rigid[rigid_name] = self
-        Data.rigid_list += [rigid_name]
 
         return rigid_name
 
@@ -166,7 +165,7 @@ class Rigid(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
         >>> rigid.compute_array(...)
         """
         base = Data.image[self.current_ref].display    # image the view is built on
@@ -192,7 +191,7 @@ class Rigid(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
         >>> rigid.compute_aspect(...)
         """
         spacing = Data.image[self.current_mov].display.spacing
@@ -232,7 +231,7 @@ class Rigid(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
         >>> rigid.compute_icp_vtk(...)
         """
         self.inverse = inverse
@@ -306,7 +305,7 @@ class Rigid(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
         >>> rigid.compute_o3d(...)
         """
         target_mesh.transform(self.matrix @ self.combo_matrix, inplace=True)
@@ -348,10 +347,10 @@ class Rigid(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
         >>> rigid.compute_mesh_slice(...)
         """
-        roi = Data.image[self.current_mov].rois[roi_name]
+        roi = Data.image[self.current_mov].roi[roi_name]
 
         return roi.compute_mesh_slice(origin=position, slice_plane=plane, offset=offset,
                                       rigid_matrix=self.get_display_matrix(), return_pixel=return_pixel)
@@ -371,14 +370,14 @@ class Rigid(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
         >>> rigid.copy_roi(...)
         """
-        if roi_name in list(self.rois.keys()):
-            reference_roi = Data.image[self.reference_name].rois[roi_name]
-            moving_roi = Data.image[self.moving_name].rois[roi_name]
-            if self.inverse and self.rois[roi_name] is not None:
-                reference_roi.mesh = self.rois[roi_name].transform(np.linalg.inv(self.matrix @ self.combo_matrix),
+        if roi_name in list(self.roi.keys()):
+            reference_roi = Data.image[self.reference_name].roi[roi_name]
+            moving_roi = Data.image[self.moving_name].roi[roi_name]
+            if self.inverse and self.roi[roi_name] is not None:
+                reference_roi.mesh = self.roi[roi_name].transform(np.linalg.inv(self.matrix @ self.combo_matrix),
                                                                    inplace=False)
             elif reference_roi.mesh is not None:
                 moving_roi.mesh = reference_roi.mesh.transform(self.matrix @ self.combo_matrix, inplace=False)
@@ -389,7 +388,7 @@ class Rigid(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
         >>> rigid.create_image(...)
         """
         mov = Data.image[self.current_mov]
@@ -436,7 +435,7 @@ class Rigid(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
         >>> rigid.export_image(...)
         """
         if self.moving_name is not None and path is not None:
@@ -453,7 +452,7 @@ class Rigid(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
         >>> rigid.get_center(...)
         """
         A = self.get_display_matrix()
@@ -473,7 +472,7 @@ class Rigid(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
         >>> rigid.get_combined_matrix(...)
         """
 
@@ -485,7 +484,7 @@ class Rigid(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
         >>> rigid.get_display_matrix(...)
         """
         combined = self.get_combined_matrix()
@@ -498,7 +497,7 @@ class Rigid(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
         >>> rigid.get_view_center(...)
         """
         grid = Data.image[self.current_ref].display.get_grid(plane, position)
@@ -512,7 +511,7 @@ class Rigid(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
         >>> rigid.get_vtk_matrix(...)
         """
         A = self.get_display_matrix()
@@ -542,7 +541,7 @@ class Rigid(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
         >>> rigid.pre_alignment(...)
         """
         if superior:
@@ -568,7 +567,7 @@ class Rigid(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
         >>> rigid.retrieve_angles(...)
         """
         rotation = Rotation.from_matrix(self.matrix[:3, :3])
@@ -589,7 +588,7 @@ class Rigid(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
         >>> rigid.retrieve_translation(...)
         """
         return self.matrix[:3, 3]
@@ -609,11 +608,11 @@ class Rigid(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
         >>> rigid.save_rigid(...)
         """
         variable_names = self.__dict__.keys()
-        column_names = [name for name in variable_names if name not in ['rois', 'pois', 'display']]
+        column_names = [name for name in variable_names if name not in ['roi', 'poi', 'display']]
 
         df = pd.DataFrame(index=[0], columns=column_names)
         for name in column_names:
@@ -629,7 +628,7 @@ class Rigid(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
         >>> rigid.set_current_order(...)
         """
         self.inverse = bool(inverse)
@@ -644,7 +643,7 @@ class Rigid(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
         >>> rigid.update_rois(...)
         """
         pass
@@ -657,7 +656,7 @@ class Rigid(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
         >>> rigid.update_rotation(...)
         """
         if center is None:
@@ -684,7 +683,7 @@ class Rigid(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list[0]]
+        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
         >>> rigid.update_translation(...)
         """
         T = np.identity(4)

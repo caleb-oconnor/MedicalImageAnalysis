@@ -16,7 +16,7 @@ Examples
 --------
 >>> import medicalimageanalysis as mia
 >>> mia.read_mhd(file='C:/Data/scan.mhd', modality='CT')
->>> image = mia.Data.image[mia.Data.image_list[0]]
+>>> image = mia.Data.image[mia.Data.image_list()[0]]
 """
 
 import random
@@ -73,8 +73,8 @@ class Roi(object):
     Examples
     --------
     >>> import medicalimageanalysis as mia
-    >>> image = mia.Data.image[mia.Data.image_list[0]]
-    >>> roi = image.rois['PTV']
+    >>> image = mia.Data.image[mia.Data.image_list()[0]]
+    >>> roi = image.roi['PTV']
     """
     def __init__(self, image, position=None, name=None, color=None, visible=False, filepaths=None, plane=None):
         """Initialize the Roi object.
@@ -99,8 +99,8 @@ class Roi(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
-        >>> roi = image.rois['PTV']
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
+        >>> roi = image.roi['PTV']
         >>> roi.__init__(...)
         """
         self.image = image
@@ -151,8 +151,8 @@ class Roi(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
-        >>> roi = image.rois['PTV']
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
+        >>> roi = image.roi['PTV']
         >>> roi.add_mesh(...)
         """
         self.mesh = mesh
@@ -175,8 +175,8 @@ class Roi(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
-        >>> roi = image.rois['PTV']
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
+        >>> roi = image.roi['PTV']
         >>> roi.clear(...)
         """
         self.contour_position = None
@@ -198,8 +198,8 @@ class Roi(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
-        >>> roi = image.rois['PTV']
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
+        >>> roi = image.roi['PTV']
         >>> roi.convert_position_to_pixel(...)
         """
         if base:
@@ -245,8 +245,8 @@ class Roi(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
-        >>> roi = image.rois['PTV']
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
+        >>> roi = image.roi['PTV']
         >>> roi.convert_pixel_to_position(...)
         """
         pixel_to_position_matrix = self.image.compute_matrix_pixel_to_position()
@@ -268,8 +268,8 @@ class Roi(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
-        >>> roi = image.rois['PTV']
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
+        >>> roi = image.roi['PTV']
         >>> roi.create_mesh(...)
         """
         self.mesh = contours_to_mesh(self.contour_position,
@@ -297,8 +297,8 @@ class Roi(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
-        >>> roi = image.rois['PTV']
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
+        >>> roi = image.roi['PTV']
         >>> roi.create_discrete_mesh(...)
         """
         meshing = ContourToDiscreteMesh(contour_pixel=self.contour_pixel,
@@ -332,8 +332,8 @@ class Roi(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
-        >>> roi = image.rois['PTV']
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
+        >>> roi = image.roi['PTV']
         >>> roi.create_display_mesh(...)
         """
         refine = Refinement(self.mesh)
@@ -357,8 +357,8 @@ class Roi(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
-        >>> roi = image.rois['PTV']
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
+        >>> roi = image.roi['PTV']
         >>> roi.create_decimate_mesh(...)
         """
         if percent is None:
@@ -389,8 +389,8 @@ class Roi(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
-        >>> roi = image.rois['PTV']
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
+        >>> roi = image.roi['PTV']
         >>> roi.create_cluster_mesh(...)
         """
         refine = Refinement(self.mesh)
@@ -417,8 +417,8 @@ class Roi(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
-        >>> roi = image.rois['PTV']
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
+        >>> roi = image.roi['PTV']
         >>> roi.compute_bounding_box(...)
         """
         if position:
@@ -437,8 +437,8 @@ class Roi(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
-        >>> roi = image.rois['PTV']
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
+        >>> roi = image.roi['PTV']
         >>> roi.compute_components(...)
         """
         if self.mesh is not None:
@@ -465,8 +465,8 @@ class Roi(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
-        >>> roi = image.rois['PTV']
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
+        >>> roi = image.roi['PTV']
         >>> roi.compute_contour(...)
         """
         contour_list = []
@@ -516,8 +516,8 @@ class Roi(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
-        >>> roi = image.rois['PTV']
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
+        >>> roi = image.roi['PTV']
         >>> roi.compute_mask(...)
         """
         mask = contours_to_mask(self.contour_position,
@@ -558,8 +558,8 @@ class Roi(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
-        >>> roi = image.rois['PTV']
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
+        >>> roi = image.roi['PTV']
         >>> roi.compute_mesh_slice(...)
         """
 
@@ -613,8 +613,8 @@ class Roi(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
-        >>> roi = image.rois['PTV']
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
+        >>> roi = image.roi['PTV']
         >>> roi.create_sitk_mask(...)
         """
         mask = self.compute_mask()
@@ -642,8 +642,8 @@ class Roi(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
-        >>> roi = image.rois['PTV']
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
+        >>> roi = image.roi['PTV']
         >>> roi.convert_mask(...)
         """
         mask_to_contour = MaskToContour(mask, spacing=self.image.spacing, origin=self.image.origin,
@@ -675,8 +675,8 @@ class Roi(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
-        >>> roi = image.rois['PTV']
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
+        >>> roi = image.roi['PTV']
         >>> roi.update_pixel(...)
         """
         self.plane = plane
@@ -705,8 +705,8 @@ class Roi(object):
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list[0]]
-        >>> roi = image.rois['PTV']
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
+        >>> roi = image.roi['PTV']
         >>> roi.update_mesh(...)
         """
         self.mesh = mesh
