@@ -60,6 +60,7 @@ import time
 import hashlib
 import threading
 import itertools
+from datetime import datetime
 
 import numpy as np
 import pydicom as dicom
@@ -331,28 +332,121 @@ def get_modality(series_sop_class):
     return _SOP_CLASS_LOOKUP.get(series_sop_class, (None, None))
 
 
+def _parse_dicom_date(value):
+    """Return a ``datetime.date`` parsed from a DICOM DA-like value."""
+    if value is None:
+        return None
+
+    digits = ''.join(ch for ch in str(value).strip() if ch.isdigit())
+    if len(digits) < 8:
+        return None
+
+    try:
+        return datetime.strptime(digits[:8], '%Y%m%d').date()
+    except ValueError:
+        return None
+
+
+def _parse_dicom_time(value):
+    """Return ``(hour, minute, second, microsecond)`` from a DICOM TM-like value."""
+    if value is None:
+        return None
+
+    raw = str(value).strip()
+    if not raw:
+        return None
+
+    main, _, frac = raw.partition('.')
+    main = ''.join(ch for ch in main if ch.isdigit())
+    frac = ''.join(ch for ch in frac if ch.isdigit())[:6]
+
+    if len(main) < 2:
+        return None
+
+    hour = int(main[:2])
+    minute = int(main[2:4]) if len(main) >= 4 else 0
+    second = int(main[4:6]) if len(main) >= 6 else 0
+    microsecond = int(frac.ljust(6, '0')) if frac else 0
+
+    if hour > 23 or minute > 59 or second > 59:
+        return None
+
+    return hour, minute, second, microsecond
+
+
+def _parse_dicom_datetime(date_value=None, time_value=None, datetime_value=None):
+    """Return a Python ``datetime`` parsed from DICOM date/time metadata."""
+    if datetime_value is not None:
+        raw = ''.join(ch for ch in str(datetime_value).strip() if ch.isdigit() or ch == '.')
+        if len(raw) >= 8:
+            date_value = raw[:8]
+            time_value = raw[8:]
+
+    date_part = _parse_dicom_date(date_value)
+    if date_part is None:
+        return None
+
+    time_part = _parse_dicom_time(time_value)
+    if time_part is None:
+        return datetime.combine(date_part, datetime.min.time())
+
+    return datetime(
+        date_part.year,
+        date_part.month,
+        date_part.day,
+        time_part[0],
+        time_part[1],
+        time_part[2],
+        time_part[3],
+    )
+
+
+def _image_datetime(image):
+    """Best-available image timestamp for chronological ordering."""
+    tags = image.tags[0] if getattr(image, 'tags', None) else None
+    if tags is None:
+        return None
+
+    candidates = [
+        (None, None, tags.get('AcquisitionDateTime')),
+        (tags.get('AcquisitionDate'), tags.get('AcquisitionTime'), None),
+        (tags.get('SeriesDate'), tags.get('SeriesTime'), None),
+        (tags.get('ContentDate'), tags.get('ContentTime'), None),
+        (tags.get('StudyDate'), tags.get('StudyTime'), None),
+        (tags.get('InstanceCreationDate'), tags.get('InstanceCreationTime'), None),
+    ]
+
+    for date_value, time_value, datetime_value in candidates:
+        parsed = _parse_dicom_datetime(date_value, time_value, datetime_value)
+        if parsed is not None:
+            return parsed
+
+    return None
+
+
 def sort_images_by_datetime():
-    """Reorder the global `Data.image` dictionary and `Data.image_list()`
-    based on DICOM acquisition date and time.
-    
-    Sorting is performed lexicographically on:
-    `str(date) + str(time)`
-    
+    """Reorder loaded images chronologically by DICOM date/time metadata.
+
+    All loaded images are reordered strictly by their best available DICOM
+    timestamp, regardless of the order in which they were imported. Sorting
+    uses this priority: ``AcquisitionDateTime`` -> acquisition -> series ->
+    content -> study -> instance creation. Missing or invalid timestamps are
+    placed last.
+
     Examples
     --------
     >>> from medicalimageanalysis.read.dicom import sort_images_by_datetime
     >>> sort_images_by_datetime()
     """
-    date_time = [
-        str(Data.image[name].date) + str(Data.image[name].time)
-        for name in Data.image_list()
-    ]
+    ordered_names = sorted(
+        Data.image_list(),
+        key=lambda name: (
+            _image_datetime(Data.image[name]) is None,
+            _image_datetime(Data.image[name]) or datetime.min,
+        ),
+    )
 
-    new_key_order = [
-        Data.image_list()[idx] for idx in np.argsort(date_time)
-    ]
-
-    Data.image = {key: Data.image[key] for key in new_key_order}
+    Data.image = {key: Data.image[key] for key in ordered_names}
 
 
 def thread_process_dicom(path, stop_before_pixels=False):
