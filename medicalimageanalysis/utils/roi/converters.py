@@ -101,10 +101,7 @@ class MeshToContour:
         if output is None or output.GetNumberOfCells() == 0:
             return pv.PolyData()
 
-        contour = pv.wrap(output)
-        contour.transform(matrix, inplace=True)
-
-        return contour
+        return pv.wrap(output).transform(matrix, inplace=False)
 
     def update_mesh(self, new_mesh, surface_mesh=True):
         """Re-initializes the cutter only when mesh geometry actually changes.
@@ -116,10 +113,13 @@ class MeshToContour:
         >>> helper = MeshToContour(pv.Sphere())
         >>> helper.update_mesh(...)
         """
+
         if surface_mesh:
             mesh = new_mesh
         else:
             mesh = new_mesh.extract_surface() if hasattr(new_mesh, "extract_surface") else new_mesh
+
+        self.mesh = mesh
         self.cutter.SetInputData(mesh)
         self.cutter.Update()
 
