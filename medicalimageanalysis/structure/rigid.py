@@ -350,10 +350,13 @@ class Rigid(object):
         >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
         >>> rigid.compute_mesh_slice(...)
         """
-        roi = Data.image[self.current_mov].roi[roi_name]
 
-        return roi.compute_mesh_slice(origin=position, slice_plane=plane, offset=offset,
-                                      rigid_matrix=self.get_display_matrix(), return_pixel=return_pixel)
+        roi = Data.image[self.current_mov].roi[roi_name]
+        grid = Data.image[self.current_ref].display.get_grid(plane, position)
+
+        return roi.compute_mesh_slice(origin=position, plane=plane, offset=offset,
+                                      rigid_matrix=self.get_display_matrix(),
+                                      return_pixel=return_pixel, grid=grid)
 
     def copy_roi(self, roi_name=None):
         """Clones and projects an ROI structural mesh model alignment into different volume spaces.
