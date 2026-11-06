@@ -5,186 +5,549 @@ Author - Caleb O'Connor
 Email - csoconnor@mdanderson.org
 
 Description:
-    Tools for generating DICOM image datasets and converting internal masks/arrays
-    into standard DICOM image structures compatible with internal framework models.
+    Create DICOM image data from NumPy arrays, either as .dcm files written to disk or as an in-memory image
+    registered in ``Data``.
+
+    Methods
+    -------
+    * Files: :class:`CreateDicomImage` writes one .dcm file per slice of a 3D array.
+    * In memory: :class:`CreateImageFromMask` builds DICOM headers for an array (typically a mask) and registers it
+      as an :class:`Image` in ``Data.image``, so it behaves like an image read from DICOM.
+
+    Conventions
+    -----------
+    * Arrays are (z, y, x): slice, row, column.
+    * ``origin`` is the patient position (mm) of the first voxel of the first slice.
+    * ``spacing`` is given in (x, y[, z]) order. DICOM PixelSpacing is (row, column) = (y, x), so the order is
+      swapped when the tag is written.
+    * ``orientation`` is the six ImageOrientationPatient values (row direction, column direction). Slices are
+      stacked along their cross product, starting at ``origin``.
+    * New Study, Series, Frame of Reference and SOP Instance UIDs are generated unless given.
 
 Structure:
-    - CreateDicomImage: Class to generate and write physical .dcm slice files from an array.
-    - CreateImageFromMask: Class to instantiate frame-of-reference compliant dataset models.
+    _sop_class_uid               modality -> SOP Class UID
+    _ds                          numbers -> DICOM decimal strings (max 16 characters)
+    CreateDicomImage
+    ├── __init__                 store array and geometry
+    ├── set_*                    update UIDs / geometry before run
+    └── run                      write one .dcm file per slice
+    CreateImageFromMask
+    ├── __init__                 build the per-slice DICOM headers
+    ├── add_image                register as Image in Data.image
+    ├── add_mesh_roi             attach a mesh as an ROI of the registered image
+    └── compute_position         slice index -> patient position
 
 Examples
 --------
 >>> import numpy as np
 >>> import medicalimageanalysis as mia
+>>> from medicalimageanalysis.utils.creation import CreateImageFromMask
 >>> mask = np.zeros((8, 32, 32), dtype=np.uint8)
+>>> creator = CreateImageFromMask(mask, origin=[0, 0, 0], spacing=[1, 1, 2], image_name='Mask')
+>>> creator.add_image()
+>>> mia.Data.image['Mask'].array.shape
+(8, 32, 32)
 """
 
 import os
-import copy
 import datetime
 
 import numpy as np
 import pydicom as dicom
-from pydicom.uid import (generate_uid, UID, ExplicitVRLittleEndian, ImplicitVRLittleEndian, RTStructureSetStorage,
-                         CTImageStorage, MRImageStorage, PositronEmissionTomographyImageStorage)
+from pydicom.dataset import FileMetaDataset
+from pydicom.valuerep import DSfloat
+from pydicom.uid import (generate_uid, ExplicitVRLittleEndian, PYDICOM_IMPLEMENTATION_UID, CTImageStorage,
+                         MRImageStorage, PositronEmissionTomographyImageStorage)
 
 from ..data import Data
 from ..structure import Image
 
 
+def _ds(values):
+    """Converts numbers to DICOM decimal strings, rounded so each fits the 16-character DS limit.
+
+    Parameters
+    ----------
+    values : array_like
+        Numbers to convert.
+
+    Returns
+    -------
+    list of pydicom.valuerep.DSfloat
+        One decimal string per value.
+
+    Examples
+    --------
+    >>> [str(v) for v in _ds([1, 2.5, -249.51171875])]
+    ['1.0', '2.5', '-249.51171875']
+    """
+
+    return [DSfloat(float(v), auto_format=True) for v in np.ravel(values)]
+
+
+def _sop_class_uid(modality):
+    """Returns the image storage SOP Class UID for a modality.
+
+    Parameters
+    ----------
+    modality : {'CT', 'MR', 'PT'}
+        DICOM modality code. 'PET' is accepted as an alias for 'PT'.
+
+    Returns
+    -------
+    pydicom.uid.UID
+        The matching image storage SOP Class UID.
+
+    Raises
+    ------
+    ValueError
+        If the modality is not supported.
+
+    Examples
+    --------
+    >>> _sop_class_uid('CT') == CTImageStorage
+    True
+    """
+
+    if modality == 'CT':
+        return CTImageStorage
+
+    if modality == 'MR':
+        return MRImageStorage
+
+    if modality in ('PT', 'PET'):
+        return PositronEmissionTomographyImageStorage
+
+    raise ValueError(f"Unsupported modality: {modality}")
+
+
 class CreateDicomImage(object):
-    """Handles the generation and physical serialization of standard DICOM images from voxel data.
-    
+    """Writes a 3D array to disk as a DICOM series, one .dcm file per slice.
+
     Parameters
     ----------
     output_dir : str
-        The target directory path where generated DICOM (.dcm) files will be saved.
-    data : numpy.ndarray
-        A 3D numpy array representing image voxel intensities across slices.
+        Folder the .dcm files are written to. Created if it does not exist.
+    data : (Z, Y, X) ndarray
+        Voxel values. Written as signed 16-bit integers (floats are rounded), so values must fit in int16.
     study : str, optional
-        Unique identifier for the study UID. Generates automatically if None.
+        Study Instance UID. Generated in :meth:`run` if None.
     series : str, optional
-        Unique identifier for the series UID. Generates automatically if None.
+        Series Instance UID. Generated in :meth:`run` if None.
     frame : str, optional
-        Unique identifier for the frame of reference UID. Generates automatically if None.
-    origin : list of float, optional
-        The patient coordinates (X, Y, Z) of the first transmitted voxel. Defaults to [0, 0, 0].
-    spacing : list of float, optional
-        The physical distance (X, Y) between adjacent pixels. Defaults to [1, 1].
+        Frame of Reference UID. Generated in :meth:`run` if None.
+    origin : (3,) array_like, optional
+        Patient position (mm) of the first voxel. Defaults to [0, 0, 0].
+    spacing : (2,) array_like, optional
+        In-plane pixel spacing (x, y) in mm. Defaults to [1, 1].
     thickness : float, optional
-        The nominal thickness of the image slice along the Z-axis. Defaults to 1.
-    
+        Slice thickness in mm, also used as the distance between slices. Defaults to 1.
+    orientation : (6,) array_like, optional
+        ImageOrientationPatient (row direction, column direction). Defaults to [1, 0, 0, 0, 1, 0].
+
     Examples
     --------
-    >>> from medicalimageanalysis.utils.creation import CreateDicomImage
-    >>> obj = CreateDicomImage(...)
+    >>> import tempfile
+    >>> import numpy as np
+    >>> creator = CreateDicomImage(tempfile.mkdtemp(), np.zeros((4, 16, 16), dtype=np.int16), thickness=2)
+    >>> len(creator.run())
+    4
     """
+
     def __init__(self, output_dir, data, study=None, series=None, frame=None, origin=None, spacing=None,
-                 thickness=None):
-        """Store voxel data and metadata needed to emit a synthetic DICOM series.
-        
+                 thickness=None, orientation=None):
+        """Stores the array, UIDs and geometry used by :meth:`run`.
+
         Examples
         --------
-        >>> obj = CreateDicomImage(...)
-        >>> obj.__init__(...)
+        >>> import numpy as np
+        >>> creator = CreateDicomImage('C:/Data/output', np.zeros((4, 16, 16), dtype=np.int16))
+        >>> creator.orientation
+        [1, 0, 0, 0, 1, 0]
         """
+
         self.output_dir = output_dir
         self.data = data
+
         self.study = study
         self.series = series
         self.frame = frame
+
         self.origin = origin
         self.spacing = spacing
         self.thickness = thickness
-
-        self.orientation = [1, 0, 0, 0, 1, 0]
+        self.orientation = orientation if orientation is not None else [1, 0, 0, 0, 1, 0]
 
     def set_study(self, study):
         """Sets the Study Instance UID.
-        
+
         Parameters
         ----------
         study : str
-            The new Study Instance UID.
-        
+            Study Instance UID.
+
         Examples
         --------
-        >>> obj = CreateDicomImage(...)
-        >>> obj.set_study(...)
+        >>> import numpy as np
+        >>> creator = CreateDicomImage('C:/Data/output', np.zeros((4, 16, 16), dtype=np.int16))
+        >>> creator.set_study('1.2.3')
         """
+
         self.study = study
 
     def set_series(self, series):
         """Sets the Series Instance UID.
-        
+
         Parameters
         ----------
         series : str
-            The new Series Instance UID.
-        
+            Series Instance UID.
+
         Examples
         --------
-        >>> obj = CreateDicomImage(...)
-        >>> obj.set_series(...)
+        >>> import numpy as np
+        >>> creator = CreateDicomImage('C:/Data/output', np.zeros((4, 16, 16), dtype=np.int16))
+        >>> creator.set_series('1.2.3.4')
         """
+
         self.series = series
 
     def set_frame(self, frame):
         """Sets the Frame of Reference UID.
-        
+
         Parameters
         ----------
         frame : str
-            The new Frame of Reference UID.
-        
+            Frame of Reference UID.
+
         Examples
         --------
-        >>> obj = CreateDicomImage(...)
-        >>> obj.set_frame(...)
+        >>> import numpy as np
+        >>> creator = CreateDicomImage('C:/Data/output', np.zeros((4, 16, 16), dtype=np.int16))
+        >>> creator.set_frame('1.2.3.4.5')
         """
+
         self.frame = frame
 
     def set_origin(self, origin):
-        """Sets the physical image origin coordinates.
-        
+        """Sets the patient position (mm) of the first voxel.
+
         Parameters
         ----------
-        origin : list of float
-            The [X, Y, Z] components of the new origin.
-        
+        origin : (3,) array_like
+            Origin (x, y, z).
+
         Examples
         --------
-        >>> obj = CreateDicomImage(...)
-        >>> obj.set_origin(...)
+        >>> import numpy as np
+        >>> creator = CreateDicomImage('C:/Data/output', np.zeros((4, 16, 16), dtype=np.int16))
+        >>> creator.set_origin([-250, -250, 100])
         """
+
         self.origin = origin
 
     def set_spacing(self, spacing):
-        """Sets the internal pixel grid resolution spacing.
-        
+        """Sets the in-plane pixel spacing (mm).
+
         Parameters
         ----------
-        spacing : list of float
-            The [X, Y] spacing components.
-        
+        spacing : (2,) array_like
+            Spacing (x, y).
+
         Examples
         --------
-        >>> obj = CreateDicomImage(...)
-        >>> obj.set_spacing(...)
+        >>> import numpy as np
+        >>> creator = CreateDicomImage('C:/Data/output', np.zeros((4, 16, 16), dtype=np.int16))
+        >>> creator.set_spacing([0.98, 0.98])
         """
+
         self.spacing = spacing
 
     def set_thickness(self, thickness):
-        """Sets the thickness configuration for each slice.
-        
+        """Sets the slice thickness (mm), also used as the distance between slices.
+
         Parameters
         ----------
         thickness : float
-            The thickness value.
-        
+            Slice thickness.
+
         Examples
         --------
-        >>> obj = CreateDicomImage(...)
-        >>> obj.set_thickness(...)
+        >>> import numpy as np
+        >>> creator = CreateDicomImage('C:/Data/output', np.zeros((4, 16, 16), dtype=np.int16))
+        >>> creator.set_thickness(2.5)
         """
+
         self.thickness = thickness
 
     def run(self, patient_name='Test', patient_id='Test', modality='CT', description='', sex='M'):
-        """
-        Executes the DICOM generation routine, writing each slice as an individual file to disk.
+        """Writes one .dcm file per slice to ``output_dir``.
+
+        Missing UIDs and geometry are filled with their defaults and stored on the instance, so the generated UIDs
+        can be read back afterwards.
 
         Parameters
         ----------
-        patient_name : str, optional
-            The Patient Name attribute value. Defaults to 'Test'.
-        patient_id : str, optional
-            The Patient ID identifier string. Defaults to 'Test'.
-        modality : str, optional
-            The target modality code (e.g., 'CT', 'MR'). Defaults to 'CT'.
-        description : str, optional
-            A descriptive label for the generated series. Defaults to ''.
-        sex : str, optional
-            The Patient Sex demographic value ('M', 'F', 'O'). Defaults to 'M'.
+        patient_name : str
+            Patient Name.
+        patient_id : str
+            Patient ID.
+        modality : {'CT', 'MR', 'PT'}
+            Modality, which also sets the SOP Class UID.
+        description : str
+            Series Description.
+        sex : {'M', 'F', 'O'}
+            Patient Sex.
+
+        Returns
+        -------
+        list of str
+            Paths of the written files, in slice order.
+
+        Raises
+        ------
+        ValueError
+            If the modality is not supported.
+
+        Examples
+        --------
+        >>> import tempfile
+        >>> import numpy as np
+        >>> import pydicom
+        >>> voxels = np.zeros((10, 64, 32), dtype=np.int16)
+        >>> creator = CreateDicomImage(tempfile.mkdtemp(), voxels, spacing=[0.5, 0.8], thickness=2)
+        >>> paths = creator.run(patient_name='Doe^John', modality='MR')
+        >>> ds = pydicom.dcmread(paths[-1])
+        >>> ds.Rows, ds.Columns, [float(v) for v in ds.PixelSpacing], float(ds.ImagePositionPatient[2])
+        (64, 32, [0.8, 0.5], 18.0)
+        """
+
+        sop_class = _sop_class_uid(modality)
+
+        if self.study is None:
+            self.study = generate_uid()
+
+        if self.series is None:
+            self.series = generate_uid()
+
+        if self.frame is None:
+            self.frame = generate_uid()
+
+        if self.origin is None:
+            self.origin = [0, 0, 0]
+
+        if self.spacing is None:
+            self.spacing = [1, 1]
+
+        if self.thickness is None:
+            self.thickness = 1
+
+        data = np.asarray(self.data)
+        if data.dtype != np.int16:
+            data = np.rint(data).astype(np.int16)
+
+        origin = np.asarray(self.origin, dtype=float)
+        normal = np.cross(self.orientation[:3], self.orientation[3:6])
+
+        now = datetime.datetime.now()
+        date = now.strftime('%Y%m%d')
+        time = now.strftime('%H%M%S')
+
+        os.makedirs(self.output_dir, exist_ok=True)
+
+        paths = []
+        for ii in range(data.shape[0]):
+            array = np.ascontiguousarray(data[ii])
+            sop = generate_uid()
+
+            ds = dicom.Dataset()
+            ds.file_meta = FileMetaDataset()
+            ds.file_meta.MediaStorageSOPClassUID = sop_class
+            ds.file_meta.MediaStorageSOPInstanceUID = sop
+            ds.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+            ds.file_meta.ImplementationClassUID = PYDICOM_IMPLEMENTATION_UID
+            ds.is_little_endian = True
+            ds.is_implicit_VR = False
+
+            ds.PatientName = patient_name
+            ds.PatientID = patient_id
+            ds.PatientSex = sex
+            ds.Modality = modality
+            ds.SeriesDescription = description
+            ds.StudyDate = date
+            ds.ContentDate = date
+            ds.StudyTime = time
+            ds.ContentTime = time
+
+            ds.SOPClassUID = sop_class
+            ds.SOPInstanceUID = sop
+            ds.StudyInstanceUID = self.study
+            ds.SeriesInstanceUID = self.series
+            ds.FrameOfReferenceUID = self.frame
+            ds.StudyID = '100'
+            ds.SeriesNumber = '2'
+            ds.AcquisitionNumber = '1'
+            ds.InstanceNumber = str(ii + 1)
+
+            ds.ImageOrientationPatient = _ds(self.orientation[:6])
+            ds.ImagePositionPatient = _ds(origin + ii * self.thickness * normal)
+            ds.PixelSpacing = _ds([self.spacing[1], self.spacing[0]])
+            ds.SliceThickness = _ds([self.thickness])[0]
+
+            ds.SamplesPerPixel = 1
+            ds.PhotometricInterpretation = 'MONOCHROME2'
+            ds.Rows = array.shape[0]
+            ds.Columns = array.shape[1]
+            ds.BitsAllocated = 16
+            ds.BitsStored = 16
+            ds.HighBit = 15
+            ds.PixelRepresentation = 1
+            ds.RescaleIntercept = 0
+            ds.RescaleSlope = 1
+            ds.PixelData = array.tobytes()
+
+            path = os.path.join(self.output_dir, str(ii) + '.dcm')
+            ds.save_as(path, write_like_original=False)
+            paths.append(path)
+
+        return paths
+
+
+class CreateImageFromMask(object):
+    """Builds DICOM headers for an array and registers it in ``Data.image`` as an :class:`Image`.
+
+    The instance exposes the same attributes a DICOM reader does (``image_set``, ``array``, ``image_matrix``, ...),
+    so :class:`Image` can be constructed from it directly. Nothing is written to disk.
+
+    Parameters
+    ----------
+    array : (Z, Y, X) ndarray
+        Image or mask array.
+    origin : (3,) array_like
+        Patient position (mm) of the first voxel.
+    spacing : (3,) array_like
+        Voxel spacing (x, y, z) in mm.
+    image_name : str
+        Key used in ``Data.image``.
+    dimensions : tuple of int, optional
+        Array dimensions (z, y, x). Defaults to ``array.shape``.
+    orientation : (6,) array_like, optional
+        ImageOrientationPatient (row direction, column direction). Defaults to [1, 0, 0, 0, 1, 0].
+    plane : str
+        Acquisition plane.
+    description : str
+        Series Description.
+    modality : {'CT', 'MR', 'PT'}
+        Modality, which also sets the SOP Class UID.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> creator = CreateImageFromMask(np.zeros((8, 32, 16), dtype=np.uint8), [0, 0, 0], [1, 1, 2], 'Mask')
+    >>> len(creator.image_set), creator.image_set[0].Rows, creator.image_set[0].Columns
+    (8, 32, 16)
+    """
+
+    def __init__(self, array, origin, spacing, image_name, dimensions=None, orientation=None, plane='Axial',
+                 description='Mask to Image', modality='CT'):
+        """Stores the array and geometry and builds one DICOM header per slice in ``self.image_set``.
+
+        Raises
+        ------
+        ValueError
+            If the modality is not supported.
+
+        Examples
+        --------
+        >>> import numpy as np
+        >>> creator = CreateImageFromMask(np.zeros((8, 32, 32), dtype=np.uint8), [0, 0, 0], [1, 1, 2], 'Mask')
+        >>> creator.image_matrix.tolist()
+        [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+        """
+
+        sop_class = _sop_class_uid(modality)
+
+        self.array = array
+        self.image_name = image_name
+        self.modality = modality
+
+        self.origin = np.asarray(origin, dtype=float)
+        self.spacing = np.asarray(spacing, dtype=float)
+        self.dimensions = tuple(dimensions) if dimensions is not None else array.shape
+        self.orientation = list(orientation) if orientation is not None else [1, 0, 0, 0, 1, 0]
+        self.plane = plane
+
+        # Rows are the row, column and slice directions, matching the reader classes.
+        row_direction = np.asarray(self.orientation[:3], dtype=float)
+        column_direction = np.asarray(self.orientation[3:6], dtype=float)
+        self.image_matrix = np.vstack((row_direction, column_direction, np.cross(row_direction, column_direction)))
+
+        # Reader attributes that Image expects but do not apply to a created image.
+        self.filepaths = None
+        self.skipped_slice = None
+        self.rgb = False
+
+        self.sops = [generate_uid() for _ in range(self.dimensions[0])]
+
+        study = generate_uid()
+        series = generate_uid()
+        frame = generate_uid()
+
+        now = datetime.datetime.now()
+        date = now.strftime('%Y%m%d')
+        time = now.strftime('%H%M%S')
+
+        self.image_set = []
+        for ii in range(self.dimensions[0]):
+            ds = dicom.Dataset()
+            ds.file_meta = FileMetaDataset()
+            ds.file_meta.MediaStorageSOPClassUID = sop_class
+            ds.file_meta.MediaStorageSOPInstanceUID = self.sops[ii]
+            ds.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+            ds.file_meta.ImplementationClassUID = PYDICOM_IMPLEMENTATION_UID
+            ds.is_little_endian = True
+            ds.is_implicit_VR = False
+
+            ds.PatientName = 'User^Created^ ^'
+            ds.PatientID = 'User^Created^ ^'
+            ds.PatientSex = 'M'
+            ds.Modality = modality
+            ds.SeriesDescription = description
+            ds.StudyDate = date
+            ds.ContentDate = date
+            ds.StudyTime = time
+            ds.ContentTime = time
+
+            ds.SOPClassUID = sop_class
+            ds.SOPInstanceUID = self.sops[ii]
+            ds.StudyInstanceUID = study
+            ds.SeriesInstanceUID = series
+            ds.FrameOfReferenceUID = frame
+            ds.StudyID = '1'
+            ds.SeriesNumber = '1'
+            ds.AcquisitionNumber = '1'
+            ds.InstanceNumber = str(ii + 1)
+
+            ds.ImageOrientationPatient = _ds(self.orientation[:6])
+            ds.ImagePositionPatient = _ds(self.compute_position(ii))
+            ds.PixelSpacing = _ds([self.spacing[1], self.spacing[0]])
+            ds.SliceThickness = _ds([self.spacing[2]])[0]
+
+            ds.SamplesPerPixel = 1
+            ds.PhotometricInterpretation = 'MONOCHROME2'
+            ds.Rows = self.dimensions[1]
+            ds.Columns = self.dimensions[2]
+            ds.BitsAllocated = 16
+            ds.BitsStored = 16
+            ds.HighBit = 15
+            ds.PixelRepresentation = 1
+            ds.RescaleIntercept = 0
+            ds.RescaleSlope = 1
+
+            self.image_set.append(ds)
+
+    def add_image(self):
+        """Creates an :class:`Image` from this instance and stores it as ``Data.image[image_name]``.
 
         Returns
         -------
@@ -193,294 +556,78 @@ class CreateDicomImage(object):
         Examples
         --------
         >>> import numpy as np
-        >>> voxels = np.zeros((10, 512, 512), dtype=np.int16)
-        >>> generator = CreateDicomImage('/path/to/output', voxels)
-        >>> generator.run(patient_name='Doe^John', modality='MR')
+        >>> import medicalimageanalysis as mia
+        >>> creator = CreateImageFromMask(np.zeros((8, 32, 32), dtype=np.uint8), [0, 0, 0], [1, 1, 2], 'Mask')
+        >>> creator.add_image()
+        >>> 'Mask' in mia.Data.image
+        True
         """
-        if self.study is None:
-            self.study = generate_uid()
-        if self.series is None:
-            self.series = generate_uid()
-        if self.frame is None:
-            self.frame = generate_uid()
-        if self.origin is None:
-            self.origin = [0, 0, 0]
-        if self.spacing is None:
-            self.spacing = [1, 1]
-        if self.thickness is None:
-            self.thickness = 1
 
-        for ii in range(self.data.shape[0]):
-            array = self.data[ii, :, :]
-
-            ds = dicom.Dataset()
-            ds.file_meta = dicom.Dataset()
-            ds.file_meta.ImplementationClassUID = generate_uid()
-            if modality == 'CT':
-                ds.file_meta.MediaStorageSOPClassUID = CTImageStorage
-            elif modality == 'MR':
-                ds.file_meta.MediaStorageSOPClassUID = MRImageStorage
-            else:
-                ds.file_meta.MediaStorageSOPClassUID = PositronEmissionTomographyImageStorage
-
-            ds.file_meta.MediaStorageSOPInstanceUID = str(10000 + ii)
-            ds.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
-
-            ds.is_little_endian = True
-            ds.is_implicit_VR = False
-
-            ds.PatientName = patient_name
-            ds.PatientSex = sex
-            ds.SeriesDescription = description
-            ds.PatientID = patient_id
-            ds.Modality = modality
-            ds.StudyDate = str(datetime.date.today()).replace('-', '')
-            ds.ContentDate = str(datetime.date.today()).replace('-', '')
-            ds.StudyTime = str(10)
-            ds.ContentTime = str(10)
-            ds.StudyInstanceUID = self.study
-            ds.SeriesInstanceUID = self.series
-            ds.SOPInstanceUID = UID(str(10000 + ii))
-            ds.SOPClassUID = ds.file_meta.MediaStorageSOPClassUID
-            ds.StudyID = '100'
-
-            ds.FrameOfReferenceUID = self.frame
-            ds.AcquisitionNumber = '1'
-            ds.SeriesNumber = '2'
-            ds.InstanceNumber = str(ii + 1)
-            ds.ImageOrientationPatient = self.orientation
-            ds.PixelSpacing = self.spacing
-            ds.SliceThickness = self.thickness
-            ds.ImagePositionPatient = [self.origin[0], self.origin[1], (self.origin[2] + (ii * self.thickness))]
-
-            ds.SamplesPerPixel = 1
-            ds.PhotometricInterpretation = "MONOCHROME2"
-            ds.PixelRepresentation = 1
-            ds.HighBit = 15
-            ds.BitsStored = 16
-            ds.BitsAllocated = 16
-            ds.Columns = array.shape[1]
-            ds.Rows = array.shape[0]
-            ds.RescaleIntercept = 0
-            ds.RescaleSlope = 1
-            ds.PixelData = array.tobytes()
-
-            export_file = os.path.join(self.output_dir, str(ii) + '.dcm')
-            ds.save_as(export_file, write_like_original=False)
-
-
-class CreateImageFromMask(object):
-    """Constructs an internal image coordinate frame context from segmentation masks.
-    
-    Parameters
-    ----------
-    array : numpy.ndarray
-        The input matrix data containing volume or binary masks.
-    origin : list or numpy.ndarray
-        The spatial starting point (X, Y, Z) coordinates of the matrix field.
-    spacing : list or numpy.ndarray
-        Voxel resolution spacing components [X_spacing, Y_spacing, Z_thickness].
-    image_name : str
-        The dictionary identifier key to assign this volume state inside `Data`.
-    dimensions : tuple of int, optional
-        Explicit spatial dimensions. Defaults to the shape layout of `array` if None.
-    orientation : list of float, optional
-        Six floating value components for orientation vectors. Defaults to identity mapping.
-    plane : str, optional
-        Anatomical viewing plane classification description string. Defaults to 'Axial'.
-    description : str, optional
-        Textual details stored in the Series Description metadata field. Defaults to 'Mask to Image'.
-    modality : str, optional
-        Target medical system scan string abbreviation. Defaults to 'CT'.
-    
-    Examples
-    --------
-    >>> from medicalimageanalysis.utils.creation import CreateImageFromMask
-    >>> obj = CreateImageFromMask(...)
-    """
-    def __init__(self, array, origin, spacing, image_name, dimensions=None, orientation=None, plane='Axial',
-                 description='Mask to Image', modality='CT'):
-        """Build an in-memory image object from array data and geometric metadata.
-        
-        Examples
-        --------
-        >>> obj = CreateImageFromMask(...)
-        >>> obj.__init__(...)
-        """
-        self.roi = {}
-        self.poi = {}
-
-        self.array = array
-        self.spacing = spacing
-        self.origin = origin
-
-        self.image_name = image_name
-
-        now = datetime.datetime.now()
-        self.date = str(now.year) + str(now.month) + str(now.day)
-        if len(str(now.second)) == 1:
-            self.time = str(now.hour) + '0' + str(now.second) + '00'
-        else:
-            self.time = str(now.hour) + str(now.second) + '00'
-        self.birthdate = self.date
-
-        self.filepaths = None
-
-        self.plane = plane
-        if dimensions is None:
-            self.dimensions = array.shape
-        else:
-            self.dimensions = dimensions
-
-        if orientation is None:
-            self.orientation = [1, 0, 0, 0, 1, 0]
-        else:
-            self.orientation = orientation
-
-        row_direction = self.orientation[:3]
-        column_direction = self.orientation[3:6]
-        slice_direction = np.cross(row_direction, column_direction)
-        self.image_matrix = np.identity(3, dtype=np.float32)
-        self.image_matrix[0, :3] = row_direction
-        self.image_matrix[1, :3] = column_direction
-        self.image_matrix[2, :3] = slice_direction
-
-        self.camera_position = None
-        self.unverified = None
-        self.skipped_slice = None
-        self.sections = None
-        self.rgb = False
-
-        self.sops = [generate_uid() for ii in range(self.dimensions[0])]
-        self.slice_location = [int(self.dimensions[0] / 2), int(self.dimensions[1] / 2), int(self.dimensions[2] / 2)]
-
-        self.study_uid = generate_uid()
-        self.series_uid = generate_uid()
-        self.frame_ref = generate_uid()
-        self.acq_number = '1'
-        self.window = [0, 1]
-        self.modality = modality
-        sop_class = generate_uid()
-
-        dicoms = []
-        for ii in range(self.dimensions[0]):
-            ds = dicom.Dataset()
-            ds.file_meta = dicom.Dataset()
-            ds.file_meta.ImplementationClassUID = "1.2.3.4"
-            ds.file_meta.MediaStorageSOPClassUID = UID(sop_class)
-            ds.file_meta.MediaStorageSOPInstanceUID = UID(str(self.sops[ii]))
-            ds.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
-
-            ds.is_little_endian = True
-            ds.is_implicit_VR = False
-
-            ds.PatientName = 'User^Created^ ^'
-            ds.PatientSex = 'M'
-            ds.SeriesDescription = description
-            ds.PatientID = 'User^Created^ ^'
-            ds.Modality = modality
-            ds.StudyDate = self.date
-            ds.ContentDate = self.date
-            ds.StudyTime = self.time
-            ds.ContentTime = self.time
-            ds.StudyInstanceUID = self.study_uid
-            ds.SeriesInstanceUID = self.series_uid
-            ds.SOPInstanceUID = UID(str(self.sops[ii]))
-            ds.SOPClassUID = UID(str(sop_class))
-            ds.StudyID = '1'
-
-            ds.FrameOfReferenceUID = self.frame_ref
-            ds.AcquisitionNumber = self.acq_number
-            ds.SeriesNumber = '1'
-            ds.InstanceNumber = str(ii)
-            ds.ImageOrientationPatient = list(self.orientation[:6])
-            ds.PixelSpacing = list(spacing[:2])
-            ds.SliceThickness = spacing[2]
-
-            position = self.compute_position(ii)
-            ds.ImagePositionPatient = [position[0], position[1], position[2]]
-
-            ds.SamplesPerPixel = 1
-            ds.PhotometricInterpretation = "MONOCHROME2"
-            ds.PixelRepresentation = 1
-            ds.HighBit = 15
-            ds.BitsStored = 16
-            ds.BitsAllocated = 16
-            ds.Columns = array.shape[1]
-            ds.Rows = array.shape[2]
-            ds.RescaleIntercept = 0
-            ds.RescaleSlope = 1
-
-            dicoms += [ds]
-
-        self.image_set = dicoms
-
-    def add_image(self):
-        """Registers the configured mask instance directly to global tracking states.
-        
-        Returns
-        -------
-        None
-        
-        Examples
-        --------
-        >>> obj = CreateImageFromMask(...)
-        >>> obj.add_image(...)
-        """
         Data.image[self.image_name] = Image(self)
 
-    def add_mesh_roi(self, mesh, roi_name):
-        """Appends complex physical 3D mesh elements inside sub-region tracking fields.
-        
+    def add_mesh_roi(self, mesh, roi_name, color=None, visible=False):
+        """Adds a mesh as an ROI of the registered image, calling :meth:`add_image` first if needed.
+
         Parameters
         ----------
-        mesh : object
-            A mesh structure instance exposing metric fields (.volume, .center, .bounds).
+        mesh : pyvista.PolyData
+            Closed surface mesh in patient coordinates.
         roi_name : str
-            The lookup dictionary sub-key label name assigned to this ROI.
-        
+            ROI name.
+        color : list of int, optional
+            RGB color. Defaults to blue [0, 0, 255].
+        visible : bool
+            Initial ROI visibility.
+
         Returns
         -------
         None
-        
+            Sets the ROI's mesh, volume, com and bounds.
+
         Examples
         --------
-        >>> obj = CreateImageFromMask(...)
-        >>> obj.add_mesh_roi(...)
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> import medicalimageanalysis as mia
+        >>> creator = CreateImageFromMask(np.zeros((8, 32, 32), dtype=np.uint8), [0, 0, 0], [1, 1, 2], 'Mask')
+        >>> creator.add_mesh_roi(pv.Sphere(radius=5, center=(16, 16, 8)), 'Sphere')
+        >>> 'Sphere' in mia.Data.image['Mask'].roi
+        True
         """
-        Data.image[self.image_name].create_roi(self, name=roi_name, color=[0, 0, 255], visible=False, filepath=None)
-        self.roi[roi_name].mesh = mesh
 
-        self.roi[roi_name].volume = mesh.volume
-        self.roi[roi_name].com = mesh.center
-        self.roi[roi_name].bounds = mesh.bounds
+        if self.image_name not in Data.image:
+            self.add_image()
+
+        image = Data.image[self.image_name]
+        image.create_roi(name=roi_name, color=color if color is not None else [0, 0, 255], visible=visible)
+
+        roi = image.roi[roi_name]
+        roi.mesh = mesh
+        roi.volume = mesh.volume
+        roi.com = mesh.center
+        roi.bounds = mesh.bounds
+
+        Data.match_rois()
 
     def compute_position(self, z):
-        """Calculates the real-world spatial position context of a slice index.
-        
+        """Returns the patient position (mm) of the first voxel of a slice.
+
         Parameters
         ----------
         z : int or float
-            The slice layer index stepping component along the direction axis.
-        
+            Slice index.
+
         Returns
         -------
-        numpy.ndarray
-            A 3-element vector array denoting coordinates [X, Y, Z].
-        
+        (3,) ndarray
+            Position (x, y, z).
+
         Examples
         --------
-        >>> obj = CreateImageFromMask(...)
-        >>> obj.compute_position(...)
+        >>> import numpy as np
+        >>> creator = CreateImageFromMask(np.zeros((8, 32, 32), dtype=np.uint8), [0, 0, 0], [1, 1, 2], 'Mask')
+        >>> creator.compute_position(3).tolist()
+        [0.0, 0.0, 6.0]
         """
-        matrix = copy.deepcopy(self.image_matrix)
 
-        pixel_to_position_matrix = np.identity(4, dtype=np.float32)
-        pixel_to_position_matrix[:3, 0] = matrix[0, :] * self.spacing[0]
-        pixel_to_position_matrix[:3, 1] = matrix[1, :] * self.spacing[1]
-        pixel_to_position_matrix[:3, 2] = matrix[2, :] * self.spacing[2]
-        pixel_to_position_matrix[:3, 3] = self.origin
-
-        location = np.asarray([0, 0, z, 1])
-
-        return location.dot(pixel_to_position_matrix.T)[:3]
+        return self.origin + z * self.spacing[2] * self.image_matrix[2]
