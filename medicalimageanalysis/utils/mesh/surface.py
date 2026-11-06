@@ -5,60 +5,545 @@ Author - Caleb O'Connor
 Email - csoconnor@mdanderson.org
 
 Description:
-    Under construction
+    Surface mesh refinement (smoothing, clustering, decimation, fin pruning), mesh quality checks, and connected
+    component utilities.
+
+    Methods
+    -------
+    * Smoothing: :meth:`Refinement.smooth` (``vtkWindowedSincPolyDataFilter``)
+    * Point reduction: :meth:`Refinement.cluster` (pyacvd with retries, fin pruning and a ``decimate_pro``
+      fallback until the surface is closed and manifold), :meth:`Refinement.decimate`
+    * Target point counts: :meth:`Refinement.compute_points` (10 * sqrt(n)), :meth:`Refinement.compute_volume_points`
+      (points per mL, optionally scaled by surface complexity)
+    * Repair: :meth:`Refinement.prune_fins`
+    * Metrics: :meth:`Refinement.surface_defects`, :meth:`Refinement.complexity_score`,
+      :meth:`Refinement.mean_edge_length`
+    * Components: :func:`only_main_component`, :func:`compute_components`, :func:`component_overlap`
+
+    Conventions
+    -----------
+    * Input meshes are assumed to be closed (watertight) surfaces, e.g. ROI meshes. Open boundaries are treated as
+      defects by :meth:`Refinement.cluster` and eroded by :meth:`Refinement.prune_fins`.
+    * Mesh units are assumed to be millimeters, so volumes are converted to mL with ``mm^3 / 1000``.
+    * ``Refinement.mesh`` holds the current mesh. Each refinement method replaces it with a new mesh and returns it,
+      so calls can be chained (``refine.smooth(); refine.cluster()``). The mesh passed to the constructor
+      is never modified.
+    * A "clean" surface is closed, edge-manifold and all triangles; :meth:`Refinement.surface_defects` returns 0 for
+      it, a positive count of boundary + non-manifold edges otherwise, and -1 if the mesh is empty or not all
+      triangles.
+    * Inputs may be ``pyvista.PolyData`` or any pyvista dataset (e.g. ``UnstructuredGrid``), which is converted with
+      ``extract_surface``.
 
 Structure:
+    Refinement
+    ├── __init__                     store a surface copy of the mesh
+    ├── smooth                       windowed sinc smoothing
+    ├── cluster                      pyacvd retries -> prune fins -> decimate_pro fallback
+    ├── decimate                     quadric decimation
+    ├── prune_fins                   strip faces with a free edge
+    ├── compute_points / compute_point_percentage / compute_volume_points
+    ├── surface_defects / complexity_score / mean_edge_length
+    └── _tidy / _defect_rank         static helpers
+    only_main_component              largest connected component
+    component_overlap                match components by overlap or distance
+    compute_components               split into connected components
 
 Examples
 --------
->>> import numpy as np
->>> import medicalimageanalysis as mia
->>> mask = np.zeros((8, 32, 32), dtype=np.uint8)
+>>> import pyvista as pv
+>>> from medicalimageanalysis.utils.mesh.surface import Refinement
+>>> refine = Refinement(pv.Sphere(radius=30, theta_resolution=100, phi_resolution=100))
+>>> _ = refine.smooth()
+>>> mesh = refine.cluster(points=2000)
+>>> refine.method, refine.surface_defects()
+('pyacvd', 0)
 """
 
-import cv2
+import math
+import warnings
+
 import vtk
 import pyacvd
-import pymeshfix
 import numpy as np
 import pyvista as pv
 
-from scipy.spatial import distance
+
+def _ensure_polydata(mesh):
+    """Returns the mesh as a pyvista.PolyData surface.
+
+    Parameters
+    ----------
+    mesh : pyvista.DataSet or vtk.vtkDataSet
+        Input mesh. PolyData is returned as-is; other datasets are converted with ``extract_surface``.
+
+    Returns
+    -------
+    pyvista.PolyData
+        Surface mesh.
+
+    Raises
+    ------
+    TypeError
+        If mesh cannot be wrapped as a pyvista dataset.
+
+    Examples
+    --------
+    >>> import pyvista as pv
+    >>> grid = pv.Sphere().cast_to_unstructured_grid()
+    >>> type(_ensure_polydata(grid)).__name__
+    'PolyData'
+    """
+
+    if isinstance(mesh, pv.PolyData):
+        return mesh
+
+    if not isinstance(mesh, pv.DataSet):
+        try:
+            mesh = pv.wrap(mesh)
+
+        except Exception:
+            raise TypeError(f"mesh must be a pyvista dataset, got {type(mesh).__name__}") from None
+
+    return mesh if isinstance(mesh, pv.PolyData) else mesh.extract_surface()
 
 
 class Refinement(object):
-    """Provides tools for refining and processing surface meshes, including smoothing, clustering, decimation, and advanced
-    face splitting for mesh quality improvement.
-    
+    """Provides tools for refining surface meshes: smoothing, clustering, decimation and fin pruning, plus quality
+    metrics used to check the result.
+
+    Parameters
+    ----------
+    mesh : pyvista.PolyData or pyvista.DataSet
+        Input surface. Non-PolyData datasets are converted with ``extract_surface``. A copy is stored, so the input is
+        never modified.
+
     Examples
     --------
     >>> import pyvista as pv
     >>> from medicalimageanalysis.utils.mesh.surface import Refinement
     >>> refine = Refinement(pv.Sphere(theta_resolution=32, phi_resolution=32))
     >>> smooth_mesh = refine.smooth()
+    >>> smooth_mesh.n_points
+    962
     """
+
     def __init__(self, mesh):
-        """Cache face, edge, and center information for repeated refinement operations.
-        
+        """Stores a copy of the mesh as the current surface.
+
+        Parameters
+        ----------
+        mesh : pyvista.PolyData or pyvista.DataSet
+            Input surface.
+
+        Examples
+        --------
+        >>> import pyvista as pv
+        >>> sphere = pv.Sphere(theta_resolution=32, phi_resolution=32)
+        >>> refine = Refinement(sphere)
+        >>> refine.mesh.n_points, refine.mesh is sphere
+        (962, False)
+        """
+
+        self.mesh = _ensure_polydata(mesh).copy(deep=True)
+
+        # Which path cluster took ('native', 'pyacvd', 'pyacvd(retry k)', 'pyacvd+prune_fins(...)',
+        # 'decimate_pro_fallback'). None until cluster is called.
+        self.method = None
+
+    @staticmethod
+    def _count_defects(mesh):
+        """Static version of :meth:`surface_defects`."""
+
+        if mesh.n_cells == 0 or mesh.n_lines or mesh.n_verts or not mesh.is_all_triangles:
+            return -1
+
+        fe = mesh.extract_feature_edges(boundary_edges=True, non_manifold_edges=True, feature_edges=False,
+                                        manifold_edges=False)
+
+        # A closed triangle mesh always has an even face count.
+        return int(fe.n_cells) + int(mesh.n_cells % 2)
+
+    @staticmethod
+    def _defect_rank(n_bad):
+        """Sort key for defect counts: invalid meshes (-1) rank last."""
+        return np.iinfo(np.int32).max if n_bad < 0 else n_bad
+
+    @staticmethod
+    def _prune_fins(mesh, max_iter=20):
+        """Static version of :meth:`prune_fins`; returns a new mesh."""
+
+        faces = mesh.regular_faces
+        for _ in range(max_iter):
+            nf = len(faces)
+            edges = np.sort(np.concatenate([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]]), axis=1)
+            _, inv, cnt = np.unique(edges, axis=0, return_inverse=True, return_counts=True)
+
+            # Faces-per-edge for each face's 3 edges; any edge used by a single face is free.
+            edge_cnt = cnt[inv.ravel()].reshape(3, nf).T
+            dangling = (edge_cnt == 1).any(axis=1)
+            if not dangling.any():
+                break
+
+            faces = faces[~dangling]
+
+        return pv.PolyData.from_regular_faces(mesh.points, faces).clean()
+
+    @staticmethod
+    def _tidy(mesh):
+        """Triangulates and merges duplicate points, then drops any cells clean() turned into lines/vertices.
+
+        Examples
+        --------
+        >>> import pyvista as pv
+        >>> Refinement._tidy(pv.Cube()).n_cells
+        12
+        """
+
+        mesh = mesh.triangulate().clean()
+        if mesh.n_lines or mesh.n_verts:
+            # mesh.faces only holds polygons; lines/vertices are stored separately.
+            tris = mesh.faces.reshape(-1, 4)[:, 1:]
+            mesh = pv.PolyData.from_regular_faces(mesh.points, tris).clean()
+
+        return mesh
+
+    def cluster(self, points=None, points_per_ml=None, min_points=2000, max_points=7000, complexity_weight=0.0,
+                complexity_metric='compactness', min_multiplier=0.9, max_multiplier=1.1, max_tries=5):
+        """Clusters the mesh with pyacvd and makes sure the result is a closed, edge-manifold triangle surface.
+
+        Workflow
+        --------
+        0. Target point count: ``points`` if given; otherwise :meth:`compute_volume_points` if ``points_per_ml`` is
+           given (scaled by complexity when ``complexity_weight > 0``); otherwise :meth:`compute_points`.
+        1. If the target is >= the current point count, the mesh is kept as-is ('native').
+        2. pyacvd is run up to ``max_tries`` times with target counts of 0, -1%, +2%, -3%, +4%, ... around the target
+           (a different count gives a different partition). The first clean result is returned.
+        3. Otherwise every failed candidate is passed through :meth:`prune_fins`, fewest defects first, and the first
+           one that comes out clean is returned.
+        4. Last resort: ``decimate_pro`` with topology preservation, pruned if needed. A warning is raised if it is
+           still not clean.
+
+        Parameters
+        ----------
+        points : int, optional
+            Fixed target number of points. Cannot be combined with ``points_per_ml``.
+        points_per_ml : float, optional
+            Volume-based target, see :meth:`compute_volume_points`. Only used when ``points`` is None.
+        min_points, max_points : int
+            Bounds on the volume-based target.
+        complexity_weight : float
+            Complexity scaling of the volume-based target. 0 (default) disables it.
+        complexity_metric : str
+            Metric passed to :meth:`complexity_score`.
+        min_multiplier, max_multiplier : float
+            Bounds on the complexity multiplier.
+        max_tries : int
+            Number of pyacvd attempts before fin pruning.
+
+        Returns
+        -------
+        mesh : pyvista.PolyData
+            Clustered mesh (also stored in self.mesh). The path that produced it is stored in self.method.
+
+        Raises
+        ------
+        ValueError
+            If both ``points`` and ``points_per_ml`` are given.
+
+        Examples
+        --------
+        >>> import pyvista as pv
+        >>> refine = Refinement(pv.Sphere(radius=30, theta_resolution=100, phi_resolution=100))
+        >>> mesh = refine.cluster(points_per_ml=8.0, min_points=1500, max_points=2500)
+        >>> refine.method, refine.surface_defects(), mesh.n_points
+        ('pyacvd', 0, 1500)
+        >>> _ = refine.cluster(points=50000)
+        >>> refine.method
+        'native'
+        >>> refine.cluster(points=1000, points_per_ml=8.0)
+        Traceback (most recent call last):
+        ...
+        ValueError: Give either points or points_per_ml, not both
+        """
+
+        if points is not None and points_per_ml is not None:
+            raise ValueError('Give either points or points_per_ml, not both')
+
+        if points is not None:
+            target_points = int(points)
+
+        elif points_per_ml is not None:
+            target_points = self.compute_volume_points(points_per_ml=points_per_ml, min_points=min_points,
+                                                       max_points=max_points, complexity_weight=complexity_weight,
+                                                       complexity_metric=complexity_metric,
+                                                       min_multiplier=min_multiplier, max_multiplier=max_multiplier)
+        else:
+            target_points = self.compute_points()
+
+        mesh = self.mesh
+
+        if target_points >= mesh.n_points:
+            self.method = 'native'
+            return self.mesh
+
+        # 1) Clustering attempts: keep the first clean result, otherwise keep every candidate as (n_bad, k, mesh).
+        candidates = []
+        last_err = None
+        for k in range(max_tries):
+            tp = int(round(target_points * (1.0 + 0.01 * k * (-1) ** k)))
+            try:
+                clusterer = pyacvd.Clustering(mesh)
+                clusterer.cluster(tp)
+                clustered = self._tidy(clusterer.create_mesh())
+
+            except Exception as e:
+                last_err = e
+                continue
+
+            n_bad = self._count_defects(clustered)
+            if n_bad == 0:
+                self.mesh = clustered
+                self.method = 'pyacvd' if k == 0 else f'pyacvd(retry {k})'
+                return self.mesh
+
+            candidates.append((n_bad, k, clustered))
+            last_err = f'{n_bad} defects at target {tp}'
+
+        # 2) No clean partition: prune fins, fewest defects first.
+        for n_bad, k, clustered in sorted(candidates, key=lambda c: self._defect_rank(c[0])):
+            pruned = self._prune_fins(clustered)
+            if self._count_defects(pruned) == 0:
+                self.mesh = pruned
+                self.method = f'pyacvd+prune_fins(try {k}, {n_bad} defects)'
+                return self.mesh
+
+        # 3) Last resort: decimate_pro, pruned if needed.
+        reduction = float(np.clip(1.0 - target_points / mesh.n_points, 0.0, 0.99))
+        clustered = self._tidy(mesh.decimate_pro(reduction, preserve_topology=True))
+        if self._count_defects(clustered) != 0:
+            clustered = self._prune_fins(clustered)
+
+        n_bad = self._count_defects(clustered)
+        if n_bad != 0:
+            warnings.warn(f'cluster: decimate_pro fallback still has {n_bad} defects '
+                          f'(last pyacvd error: {last_err})')
+
+        self.mesh = clustered
+        self.method = 'decimate_pro_fallback'
+
+        return self.mesh
+
+    def complexity_score(self, metric='compactness'):
+        """Measures how far the shape is from a sphere.
+
+        ``'compactness'`` is ``(area / volume^(2/3)) / (36 pi)^(1/3) - 1``: 0 for a sphere and larger for elongated
+        or folded shapes. Requires a closed surface for the volume to be meaningful.
+
+        Parameters
+        ----------
+        metric : {'compactness'}
+            Complexity metric.
+
+        Returns
+        -------
+        float
+            Complexity score (>= 0).
+
+        Raises
+        ------
+        ValueError
+            If metric is not supported.
+
+        Examples
+        --------
+        >>> import pyvista as pv
+        >>> round(Refinement(pv.Sphere(theta_resolution=100, phi_resolution=100)).complexity_score(), 3)
+        0.0
+        >>> round(Refinement(pv.Cube()).complexity_score(), 3)
+        0.241
+        """
+
+        if metric != 'compactness':
+            raise ValueError(f'Unsupported complexity metric: {metric}')
+
+        mesh = self.mesh.triangulate().clean()
+        area = max(float(abs(mesh.area)), 1e-8)
+        volume = max(float(abs(mesh.volume)), 1e-8)
+
+        sphere_compactness = (36.0 * math.pi) ** (1.0 / 3.0)
+        compactness = area / (volume ** (2.0 / 3.0))
+
+        return float(max(0.0, (compactness / sphere_compactness) - 1.0))
+
+    def compute_points(self):
+        """Computes a target number of points as 10 * sqrt(current point count).
+
+        Returns
+        -------
+        int
+            Target number of points for clustering/decimation.
+
         Examples
         --------
         >>> import pyvista as pv
         >>> refine = Refinement(pv.Sphere(theta_resolution=32, phi_resolution=32))
-        >>> refine.__init__()
+        >>> refine.compute_points()
+        310
         """
-        self.mesh = mesh
 
-        self.correct_faces = None
+        return int(np.round(10 * np.sqrt(self.mesh.n_points)))
 
-        self.points = np.asarray(self.mesh.points)
-        self.face = mesh.faces.reshape(int(len(mesh.faces) / 4), 4)[:, 1:]
-        self.face_centers = np.asarray(mesh.cell_centers().points)
-        self.face_lines_sort = np.sort(np.vstack([[[ff[0], ff[1]], [ff[0], ff[2]], [ff[1], ff[2]]] for ff in self.face]), axis=1)
-        self.face_lines = np.unique(self.face_lines_sort, axis=0)
+    def compute_point_percentage(self):
+        """Computes the fraction of points to remove so that :meth:`compute_points` points remain.
+
+        Returns
+        -------
+        float
+            Fraction to remove (0-1).
+
+        Examples
+        --------
+        >>> import pyvista as pv
+        >>> refine = Refinement(pv.Sphere(theta_resolution=32, phi_resolution=32))
+        >>> round(refine.compute_point_percentage(), 3)
+        0.678
+        """
+
+        return float(1 - (self.compute_points() / self.mesh.n_points))
+
+    def compute_volume_points(self, points_per_ml=8.0, min_points=2000, max_points=7000, complexity_weight=0.0,
+                              complexity_metric='compactness', min_multiplier=0.9, max_multiplier=1.1):
+        """Computes a target point count from the enclosed volume, optionally scaled up for complex shapes.
+
+        ``base = clip(points_per_ml * volume_ml, min_points, max_points)``, then
+        ``points = clip(base * clip(1 + complexity_weight * complexity_score, min_multiplier, max_multiplier),
+        min_points, max_points)``. With ``complexity_weight=0`` (default) the result is just the volume estimate.
+
+        Parameters
+        ----------
+        points_per_ml : float
+            Points per mL of enclosed volume (mesh volume in mm^3 / 1000).
+        min_points, max_points : int
+            Bounds on the returned count, applied before and after the complexity scaling.
+        complexity_weight : float
+            Weight on :meth:`complexity_score`. 0 disables the scaling.
+        complexity_metric : str
+            Metric passed to :meth:`complexity_score`.
+        min_multiplier, max_multiplier : float
+            Bounds on the complexity multiplier. The score is >= 0, so the multiplier never drops below 1 and
+            ``min_multiplier`` only matters if it is set above 1.
+
+        Returns
+        -------
+        int
+            Target number of points.
+
+        Examples
+        --------
+        >>> import pyvista as pv
+        >>> refine = Refinement(pv.ParametricEllipsoid(60, 30, 20))
+        >>> refine.compute_volume_points(points_per_ml=30)
+        4520
+        >>> refine.compute_volume_points(points_per_ml=30, complexity_weight=0.12)
+        4605
+        """
+
+        volume_ml = float(abs(self.mesh.volume)) / 1000.0
+        base = int(np.clip(int(round(points_per_ml * volume_ml)), min_points, max_points))
+
+        if not complexity_weight:
+            return base
+
+        multiplier = 1.0 + float(complexity_weight) * self.complexity_score(complexity_metric)
+        multiplier = float(np.clip(multiplier, min_multiplier, max_multiplier))
+
+        return int(np.clip(int(round(base * multiplier)), min_points, max_points))
+
+    def decimate(self, percent=None):
+        """Decimates (reduces) mesh complexity by removing points and faces.
+
+        Parameters
+        ----------
+        percent : float, optional
+            Fraction of the faces to remove (0-1). If None, :meth:`compute_point_percentage` is used.
+
+        Returns
+        -------
+        mesh : pyvista.PolyData
+            Decimated mesh (also stored in self.mesh).
+
+        Examples
+        --------
+        >>> import pyvista as pv
+        >>> refine = Refinement(pv.Sphere(theta_resolution=32, phi_resolution=32))
+        >>> refine.decimate(0.5).n_cells
+        960
+        """
+
+        if percent is None:
+            percent = self.compute_point_percentage()
+
+        self.mesh = self.mesh.decimate(float(percent))
+
+        return self.mesh
+
+    def mean_edge_length(self):
+        """Computes the mean length of the unique edges of the mesh.
+
+        Returns
+        -------
+        float
+            Mean edge length (mesh units).
+
+        Examples
+        --------
+        >>> import pyvista as pv
+        >>> round(Refinement(pv.Cube()).mean_edge_length(), 3)
+        1.138
+        """
+
+        mesh = self.mesh.triangulate().clean()
+        edges = mesh.extract_all_edges()
+
+        return float(np.mean(edges.compute_cell_sizes(length=True)['Length']))
+
+    def prune_fins(self, max_iter=20):
+        """Iteratively strips faces that have a free edge (zero-thickness flaps), then drops unused points.
+
+        Faces are only removed, never added, so holes are not filled; a surface with real holes is eroded until it is
+        closed or ``max_iter`` is reached.
+
+        Parameters
+        ----------
+        max_iter : int
+            Maximum number of strip passes.
+
+        Returns
+        -------
+        mesh : pyvista.PolyData
+            Pruned mesh (also stored in self.mesh).
+
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import pyvista as pv
+        >>> sphere = pv.Sphere()
+        >>> fin = np.vstack([sphere.points, [[2.0, 0.0, 0.0]]])
+        >>> faces = np.vstack([sphere.regular_faces, [[0, 1, len(fin) - 1]]])
+        >>> refine = Refinement(pv.PolyData.from_regular_faces(fin, faces))
+        >>> refine.surface_defects()
+        4
+        >>> refine.prune_fins().n_cells == sphere.n_cells, refine.surface_defects()
+        (True, 0)
+        """
+
+        self.mesh = self._prune_fins(self.mesh, max_iter)
+
+        return self.mesh
 
     def smooth(self, iterations=20, angle=60, passband=0.001):
         """Smooths the mesh geometry using a windowed sinc filter.
-        
+
         Parameters
         ----------
         iterations : int
@@ -66,19 +551,21 @@ class Refinement(object):
         angle : float
             Feature angle in degrees for smoothing sharp edges.
         passband : float
-            Passband for the filter (controls smoothness).
-        
+            Passband for the filter (lower is smoother).
+
         Returns
         -------
         mesh : pyvista.PolyData
-            Smoothed mesh.
-        
+            Smoothed mesh (also stored in self.mesh). Point count and connectivity are unchanged.
+
         Examples
         --------
         >>> import pyvista as pv
         >>> refine = Refinement(pv.Sphere(theta_resolution=32, phi_resolution=32))
-        >>> refine.smooth()
+        >>> refine.smooth(iterations=10).n_cells
+        1920
         """
+
         smoother = vtk.vtkWindowedSincPolyDataFilter()
         smoother.SetInputData(self.mesh)
         smoother.SetNumberOfIterations(iterations)
@@ -88,399 +575,70 @@ class Refinement(object):
         smoother.SetPassBand(passband)
         smoother.NonManifoldSmoothingOn()
         smoother.NormalizeCoordinatesOff()
-        # smoother.SetRelaxationFactor(0.1)
         smoother.Update()
         self.mesh = pv.PolyData(smoother.GetOutput())
 
         return self.mesh
 
-    def cluster(self, points=None):
-        """Reduces the number of points on the mesh using clustering.
-        
-        Parameters
-        ----------
-        points : int, optional
-            Number of target points. If None, computed automatically.
-        
-        Returns
-        -------
-        mesh : pyvista.PolyData
-            Mesh after clustering.
-        
-        Examples
-        --------
-        >>> import pyvista as pv
-        >>> refine = Refinement(pv.Sphere(theta_resolution=32, phi_resolution=32))
-        >>> refine.cluster()
-        """
-        if points is None:
-            points = self.compute_points()
-        clus = pyacvd.Clustering(self.mesh)
-        clus.cluster(points)
-        self.mesh = clus.create_mesh()
+    def surface_defects(self):
+        """Counts surface defects of the current mesh, for QA and failure detection.
 
-        return self.mesh
-
-    def decimate(self, percent=None):
-        """Decimates (reduces) mesh complexity by removing points and faces.
-        
-        Parameters
-        ----------
-        percent : float, optional
-            Fraction of the mesh to remove. If None, computed automatically.
-        
-        Returns
-        -------
-        mesh : pyvista.PolyData
-            Decimated mesh.
-        
-        Examples
-        --------
-        >>> import pyvista as pv
-        >>> refine = Refinement(pv.Sphere(theta_resolution=32, phi_resolution=32))
-        >>> refine.decimate()
-        """
-        if percent is None:
-            percent = self.compute_point_percentage()
-
-        self.mesh.decimate(percent)
-
-        return self.mesh
-
-    def compute_points(self):
-        """Computes a target number of points based on the mesh size.
-        
         Returns
         -------
         int
-            Approximate number of points for clustering/decimation.
-        
+            0 for a closed, edge-manifold, all-triangle surface; otherwise the number of boundary + non-manifold
+            edges (+1 if the face count is odd). -1 if the mesh is empty, has lines/vertices, or is not all
+            triangles.
+
         Examples
         --------
         >>> import pyvista as pv
-        >>> refine = Refinement(pv.Sphere(theta_resolution=32, phi_resolution=32))
-        >>> refine.compute_points()
+        >>> Refinement(pv.Sphere()).surface_defects()
+        0
+        >>> Refinement(pv.Plane()).surface_defects()
+        -1
+        >>> Refinement(pv.Plane().triangulate()).surface_defects()
+        40
         """
-        return np.round(10 * np.sqrt(self.mesh.number_of_points))
 
-    def compute_point_percentage(self):
-        """Computes the fraction of points to remove for decimation.
-        
-        Returns
-        -------
-        float
-            Percentage of points to remove.
-        
-        Examples
-        --------
-        >>> import pyvista as pv
-        >>> refine = Refinement(pv.Sphere(theta_resolution=32, phi_resolution=32))
-        >>> refine.compute_point_percentage()
-        """
-        points = self.compute_points()
+        return self._count_defects(self.mesh)
 
-        return 1 - (points / self.mesh.number_of_points)
-
-    def tri_split(self):
-        """Splits selected faces into smaller triangles by adding face centroids.
-        
-        Returns
-        -------
-        pyvista.PolyData
-            Mesh with refined triangular faces.
-        
-        Examples
-        --------
-        >>> import pyvista as pv
-        >>> refine = Refinement(pv.Sphere(theta_resolution=32, phi_resolution=32))
-        >>> refine.tri_split()
-        """
-        self.find_face_correction()
-
-        base_faces = [f for ii, f in enumerate(self.face) if ii not in self.correct_faces]
-        base_length = len(self.points)
-        new_points = [self.face_centers[ii] for ii in self.correct_faces]
-        total_points = np.concatenate((self.points, new_points))
-
-        new_faces = []
-        for ii, f in enumerate(self.correct_faces):
-            hold_face = self.face[f]
-            new_faces += [[hold_face[0], hold_face[1], base_length + ii]]
-            new_faces += [[hold_face[1], hold_face[2], base_length + ii]]
-            new_faces += [[hold_face[0], hold_face[2], base_length + ii]]
-
-        total_faces = np.concatenate((base_faces, np.asarray(new_faces)))
-        face_syntax = [[3, t[0], t[1], t[2]] for t in total_faces]
-
-        return pv.PolyData(total_points, face_syntax)
-
-    def advanced_split(self):
-        """Advanced face splitting using midpoints of edges and face corrections. Intended for complex mesh refinement
-        where tri_split is insufficient.
-        
-        Examples
-        --------
-        >>> import pyvista as pv
-        >>> refine = Refinement(pv.Sphere(theta_resolution=32, phi_resolution=32))
-        >>> refine.advanced_split()
-        """
-        self.find_face_correction()
-
-        midpoint, midline = self.compute_midpoints()
-        all_points = np.concatenate(self.points, midpoint)
-
-        face_line_help = np.asarray(
-            [np.where((self.face_lines_sort[:, 0] == m[0]) & (self.face_lines_sort[:, 1] == m[1]))[0] for m in midline])
-        face_help = [[np.sort(self.face[int(f[0] / 3)]), np.sort(self.face[int(f[1] / 3)])] for f in face_line_help]
-        face_help_stack = np.vstack(face_help)
-        face_unique = np.unique(face_help_stack, axis=0)
-
-        for f in face_unique:
-            mid_1 = np.where((midline[:, 0] == f[0]) & (midline[:, 1] == f[1]))[0]
-            mid_2 = np.where((midline[:, 0] == f[1]) & (midline[:, 1] == f[2]))[0]
-            mid_3 = np.where((midline[:, 0] == f[0]) & (midline[:, 1] == f[2]))[0]
-
-            point_1 = self.points[f[0]]
-            point_2 = self.points[f[1]]
-            point_3 = self.points[f[2]]
-            center = np.mean(np.asarray([point_1, point_2, point_3]), axis=0)
-            if len(mid_1) + len(mid_2) + len(mid_3) == 3:
-                print(1)
-
-    def find_face_correction(self):
-        """Identifies faces that require splitting based on distance between face centers.
-        
-        Examples
-        --------
-        >>> import pyvista as pv
-        >>> refine = Refinement(pv.Sphere(theta_resolution=32, phi_resolution=32))
-        >>> refine.find_face_correction()
-        """
-        dist = distance.cdist(self.face_centers, self.face_centers, metric='euclidean')
-        dist_sort = np.sort(dist, axis=1)
-        dist_sum = np.sum(dist_sort[:, :6], axis=1)
-        dist_sum_sort = np.argsort(dist_sum)
-        self.correct_faces = dist_sum_sort[:int(len(self.points) / 4)]
-
-    def compute_midpoints(self):
-        """Computes midpoints of mesh edges for advanced splitting.
-        
-        Returns
-        -------
-        midpoint_unique : np.ndarray
-            Unique midpoint coordinates.
-        midline_unique : np.ndarray
-            Corresponding edge indices for midpoints.
-        
-        Examples
-        --------
-        >>> import pyvista as pv
-        >>> refine = Refinement(pv.Sphere(theta_resolution=32, phi_resolution=32))
-        >>> refine.compute_midpoints()
-        """
-        line_midpoints = np.vstack([[(self.points[line[0]] + self.points[line[1]]) / 2] for line in self.face_lines])
-
-        midpoint_list = []
-        midline_list = []
-        for ii, c in enumerate(correct_faces):
-            f = face[c]
-            midpoint_1 = (self.points[f[0]] + self.points[f[1]]) / 2
-            midpoint_2 = (self.points[f[1]] + self.points[f[2]]) / 2
-            midpoint_3 = (self.points[f[2]] + self.points[f[0]]) / 2
-
-            dist_1 = np.linalg.norm(midpoint_1 - self.points[f[2]])
-            dist_2 = np.linalg.norm(midpoint_2 - self.points[f[0]])
-            dist_3 = np.linalg.norm(midpoint_3 - self.points[f[1]])
-
-            if dist_1 < dist_2 and dist_1 < dist_3:
-                f_sort = np.sort([f[0], f[1]])
-                midpoint_list += [
-                    line_midpoints[np.where((face_lines[:, 0] == f_sort[0]) & (face_lines[:, 1] == f_sort[1]))[0][0]]]
-                midline_list += [f_sort]
-            elif dist_2 < dist_1 and dist_2 < dist_3:
-                f_sort = np.sort([f[1], f[2]])
-                midpoint_list += [
-                    line_midpoints[np.where((face_lines[:, 0] == f_sort[0]) & (face_lines[:, 1] == f_sort[1]))[0][0]]]
-                midline_list += [f_sort]
-            else:
-                f_sort = np.sort([f[2], f[0]])
-                midpoint_list += [
-                    line_midpoints[np.where((face_lines[:, 0] == f_sort[0]) & (face_lines[:, 1] == f_sort[1]))[0][0]]]
-                midline_list += [f_sort]
-
-        midpoint_unique, indices = np.unique(midpoint_list, axis=0, return_index=True)
-        midline_unique = np.asarray(midline_list)[indices]
-
-        return midpoint_unique, midline_unique
-
-
-def clean_mesh(mesh):
-    """Cleans a mesh by removing holes, duplicate vertices, and other inconsistencies.
-    
-    Parameters
-    ----------
-    mesh : pyvista.PolyData
-        Input mesh to be cleaned.
-    
-    Returns
-    -------
-    corrected_mesh : pyvista.PolyData
-        Cleaned mesh.
-    
-    Examples
-    --------
-    >>> from medicalimageanalysis.utils.mesh.surface import clean_mesh
-    >>> clean_mesh(...)
-    """
-    mesh = mesh.copy()
-
-    meshfix = pymeshfix.PyTMesh()
-    meshfix.load_array(mesh.points, mesh.faces.reshape((-1, 4))[:, 1:])
-    meshfix.clean()
-
-    verts, faces = meshfix.return_arrays()
-    new_faces = np.insert(faces, 0, 3, axis=1)
-    corrected_mesh = pv.PolyData(verts, new_faces)
-
-    return corrected_mesh
-
-
-def expansion(mesh, dist):
-    """Expands a mesh along its vertex normals by a given distance and cleans the resulting mesh.
-    
-    Parameters
-    ----------
-    mesh : pyvista.PolyData
-        Input mesh to be expanded.
-    dist : float
-        Distance to expand along vertex normals.
-    
-    Returns
-    -------
-    corrected_mesh : pyvista.PolyData
-        Expanded and cleaned mesh.
-    
-    Examples
-    --------
-    >>> from medicalimageanalysis.utils.mesh.surface import expansion
-    >>> expansion(...)
-    """
-    mesh = mesh.copy()
-    mesh.points += mesh.point_normals * dist
-
-    meshfix = pymeshfix.PyTMesh()
-    meshfix.load_array(mesh.points, mesh.faces.reshape((-1, 4))[:, 1:])
-    meshfix.clean()
-
-    verts, faces = meshfix.return_arrays()
-    new_faces = np.insert(faces, 0, 3, axis=1)
-    corrected_mesh = pv.PolyData(verts, new_faces)
-
-    return corrected_mesh
-
-
-def surface_boundary(source_meshes, target_meshes, points, matrix=None):
-    """Aligns source and target meshes using point clustering to ensure that both meshes
-    have the same number of points along corresponding boundaries.
-    
-    Parameters
-    ----------
-    source_meshes : list of pyvista.PolyData
-        List of source meshes.
-    target_meshes : list of pyvista.PolyData
-        List of target meshes.
-    points : list of arrays
-        Reference points for clustering each mesh.
-    matrix : np.array, optional
-        Transformation matrix to apply to target meshes.
-    
-    Returns
-    -------
-    new_sources, new_targets : lists of pyvista.PolyData
-        Lists of aligned and transformed meshes.
-    
-    Examples
-    --------
-    >>> from medicalimageanalysis.utils.mesh.surface import surface_boundary
-    >>> surface_boundary(...)
-    """
-    if matrix is None:
-        matrix = np.identity(4)
-
-    new_sources = []
-    new_targets = []
-    for ii, s in enumerate(source_meshes):
-        n = -1
-        while n >= -1:
-            n += 1
-
-            refine = Refinement(s)
-            hold_s = refine.cluster(points=points[ii] + n)
-
-            refine = Refinement(target_meshes[ii])
-            hold_t = refine.cluster(points=points[ii] + n)
-
-            if len(hold_s.points) == len(hold_t.points):
-                n = -100
-
-                new_sources += [hold_s]
-                new_targets += [hold_t.transform(matrix, inplace=True)]
-
-    return new_sources, new_targets
-
-
-def only_main_component(mesh):
-    """Extracts only the largest connected component of a mesh.
-    
-    Parameters
-    ----------
-    mesh : pyvista.PolyData
-        Input mesh which may contain multiple disconnected components.
-    
-    Returns
-    -------
-    new_mesh : pyvista.PolyData
-        The largest connected component, returned as a surface mesh.
-    
-    Examples
-    --------
-    >>> from medicalimageanalysis.utils.mesh.surface import only_main_component
-    >>> only_main_component(...)
-    """
-    multi_block = mesh.split_bodies()
-
-    if len(multi_block) == 1:
-        return mesh
-
-    else:
-        total_points = [len(m.points) for m in multi_block]
-        idx = np.argmax(total_points)
-        new_mesh = multi_block[int(idx)]
-
-        return new_mesh.extract_surface()
 
 
 def component_overlap(components_1, components_2, min_distance=0):
-    """Match connected components from two meshes by overlap or proximity.
-    
+    """Matches connected components from two meshes by overlap or proximity.
+
+    Workflow
+    --------
+    1. Pairs whose bounding boxes intersect are tested for overlap: surface intersection, or any point of one
+       component enclosed by the other. Overlapping pairs are matched with distance 0.
+    2. Components left unmatched on both sides are paired if their nearest surface distance is <= ``min_distance``.
+
     Parameters
     ----------
-    components_1, components_2 : list[pyvista.PolyData]
-        Connected mesh components to compare.
+    components_1, components_2 : list[pyvista.DataSet]
+        Connected mesh components to compare (e.g. from :func:`compute_components`). Surfaces are expected to be
+        closed for the enclosed-point test.
     min_distance : float, optional
-        Maximum nearest-surface distance, in millimeters, allowed when no
-        direct overlap is found.
-    
+        Maximum nearest-surface distance (mm) allowed when no direct overlap is found.
+
     Returns
     -------
     list[dict]
-        Match records containing component indices and the measured distance.
-    
+        Match records ``{'Components_1': i, 'Components_2': j, 'distance_mm': d}``.
+
     Examples
     --------
+    >>> import pyvista as pv
     >>> from medicalimageanalysis.utils.mesh.surface import component_overlap
-    >>> component_overlap(...)
+    >>> a = [pv.Sphere(radius=1), pv.Sphere(radius=1, center=(10, 0, 0))]
+    >>> b = [pv.Sphere(radius=1, center=(0.5, 0, 0)), pv.Sphere(radius=1, center=(12.5, 0, 0))]
+    >>> [(m['Components_1'], m['Components_2']) for m in component_overlap(a, b)]
+    [(0, 0)]
+    >>> [(m['Components_1'], m['Components_2']) for m in component_overlap(a, b, min_distance=1)]
+    [(0, 0), (1, 1)]
     """
+
     matches = []
     for ii, c1 in enumerate(components_1):
         for jj, c2 in enumerate(components_2):
@@ -490,29 +648,22 @@ def component_overlap(components_1, components_2, min_distance=0):
             if not (ax0 <= bx1 and ax1 >= bx0 and ay0 <= by1 and ay1 >= by0 and az0 <= bz1 and az1 >= bz0):
                 continue
 
-            surf1 = c1.extract_surface()
-            surf2 = c2.extract_surface()
+            surf1 = _ensure_polydata(c1)
+            surf2 = _ensure_polydata(c2)
 
-            result = surf1.intersection(surf2)
-            intersection_mesh = result[0]
-            surface_intersection = (intersection_mesh.n_cells > 0)
+            surface_intersection = surf1.intersection(surf2)[0].n_cells > 0
 
-            pts1 = pv.PolyData(c1.points)
-            inside2 = surf2.select_enclosed_points(pts1, tolerance=1e-5,check_surface=False)
-            pts_inside_2 = ( inside2["SelectedPoints"] > 0 )
-            frac1_in_2 = pts_inside_2.mean()
-            pts2 = pv.PolyData(c2.points)
+            inside2 = surf2.select_enclosed_points(pv.PolyData(c1.points), tolerance=1e-5, check_surface=False)
+            frac1_in_2 = (inside2['SelectedPoints'] > 0).mean()
 
-            inside1 = surf1.select_enclosed_points( pts2, tolerance=1e-5, check_surface=False)
-            pts_inside_1 = (inside1["SelectedPoints"] > 0)
-            frac2_in_1 = pts_inside_1.mean()
+            inside1 = surf1.select_enclosed_points(pv.PolyData(c2.points), tolerance=1e-5, check_surface=False)
+            frac2_in_1 = (inside1['SelectedPoints'] > 0).mean()
 
-            overlap = (surface_intersection or frac1_in_2 > 0 or frac2_in_1 > 0)
-            if overlap:
-                matches += [{"Components_1": ii, "Components_2": jj, 'distance_mm': 0}]
+            if surface_intersection or frac1_in_2 > 0 or frac2_in_1 > 0:
+                matches += [{'Components_1': ii, 'Components_2': jj, 'distance_mm': 0}]
 
-    matched1 = {m["Components_1"] for m in matches}
-    matched2 = {m["Components_2"] for m in matches}
+    matched1 = {m['Components_1'] for m in matches}
+    matched2 = {m['Components_2'] for m in matches}
 
     unmatched1 = [ii for ii in range(len(components_1)) if ii not in matched1]
     unmatched2 = [jj for jj in range(len(components_2)) if jj not in matched2]
@@ -520,28 +671,76 @@ def component_overlap(components_1, components_2, min_distance=0):
     for ii in unmatched1:
         for jj in unmatched2:
 
-            surf1 = components_1[ii].extract_surface()
-            surf2 = components_2[jj].extract_surface()
+            surf1 = _ensure_polydata(components_1[ii])
+            surf2 = _ensure_polydata(components_2[jj])
 
-            # Distance from every point on surf1 to surf2
+            # Distance from every point on surf1 to the surf2 surface.
             dist = surf1.compute_implicit_distance(surf2)
-            d = np.abs(dist["implicit_distance"]).min()
+            d = float(np.abs(dist['implicit_distance']).min())
 
-            if d <= min_distance:  # mm
-                matches += [{"Components_1": ii, "Components_2": jj, 'distance_mm': d}]
+            if d <= min_distance:
+                matches += [{'Components_1': ii, 'Components_2': jj, 'distance_mm': d}]
 
     return matches
 
 
 def compute_components(mesh):
-    """Split a mesh into connected components and return them as separate meshes.
-    
+    """Splits a mesh into connected components.
+
+    Parameters
+    ----------
+    mesh : pyvista.DataSet
+        Input mesh.
+
+    Returns
+    -------
+    list[pyvista.UnstructuredGrid]
+        One mesh per connected region, ordered by region id (largest first).
+
     Examples
     --------
+    >>> import pyvista as pv
     >>> from medicalimageanalysis.utils.mesh.surface import compute_components
-    >>> compute_components(...)
+    >>> mesh = pv.Sphere().merge(pv.Sphere(center=(5, 0, 0)))
+    >>> len(compute_components(mesh))
+    2
     """
-    conn = mesh.connectivity(label_regions=True)
-    region_ids = np.unique(conn["RegionId"])
 
-    return [conn.threshold((rid, rid), scalars="RegionId") for rid in region_ids]
+    conn = mesh.connectivity(label_regions=True)
+    region_ids = np.unique(conn['RegionId'])
+
+    return [conn.threshold((rid, rid), scalars='RegionId') for rid in region_ids]
+
+
+def only_main_component(mesh):
+    """Extracts the largest connected component (by point count) of a mesh.
+
+    Parameters
+    ----------
+    mesh : pyvista.PolyData
+        Input mesh which may contain multiple disconnected components.
+
+    Returns
+    -------
+    pyvista.PolyData
+        The largest connected component as a surface, or the input mesh if it has a single component.
+
+    Examples
+    --------
+    >>> import pyvista as pv
+    >>> from medicalimageanalysis.utils.mesh.surface import only_main_component
+    >>> big = pv.Sphere(radius=2, theta_resolution=40, phi_resolution=40)
+    >>> small = pv.Sphere(radius=0.5, center=(5, 0, 0))
+    >>> only_main_component(big.merge(small)).n_points == big.n_points
+    True
+    """
+
+    multi_block = mesh.split_bodies()
+
+    if len(multi_block) == 1:
+        return mesh
+
+    idx = int(np.argmax([m.n_points for m in multi_block]))
+
+    return multi_block[idx].extract_surface()
+
