@@ -20,6 +20,7 @@ Examples
 """
 
 import random
+from collections import OrderedDict
 
 import numpy as np
 import SimpleITK as sitk
@@ -28,7 +29,7 @@ import SimpleITK as sitk
 from ..utils.mesh.surface import Refinement, compute_components
 from ..utils.roi.to_mask import contours_to_mask
 from ..utils.roi.to_mesh import contours_to_mesh
-from ..utils.roi.converters import ContourToDiscreteMesh, ContourToMask, MaskToContour, MeshToContour
+from ..utils.roi.discrete_converters import ContourToDiscreteMesh, ContourToMask, MaskToContour, MeshToContour
 
 
 def random_color(rgb_255=True):
@@ -68,6 +69,8 @@ def random_color(rgb_255=True):
 
 
 class Roi(object):
+    slice_cache_size = 2500  # all planes/views together; least-recently-used dropped first
+
     """Region of Interest (ROI) manager for internal image contours and 3D meshes.
     
     Examples
@@ -110,6 +113,8 @@ class Roi(object):
         self.color = color
         self.filepaths = filepaths
 
+        self._slice_cache = OrderedDict()
+
         if plane is not None:
             self.plane = plane
         else:
@@ -135,6 +140,31 @@ class Roi(object):
         self.rotation_center = None
         self.visual = {'2d': None, '3d': None, 'opacity': None, 'multicolor': None}
         self.misc = {}
+
+    @property
+    def mesh(self):
+        return self._mesh
+
+    @mesh.setter
+    def mesh(self, value):
+        """Any mesh replacement re-points the cached cutter and drops cached slices, so slices never use a stale
+        mesh."""
+        self._mesh = value
+
+        cache = getattr(self, '_slice_cache', None)
+        if cache is not None:
+            cache.clear()
+
+        if getattr(self, 'cutter', None) is not None:
+            if value is None:
+                self.cutter = None
+            else:
+                self.cutter.update_mesh(value)
+
+    @staticmethod
+    def _key_bytes(values, decimals):
+        """Rounded bytes for cache keys. + 0.0 folds -0.0 into 0.0 so tiny sign flips don't cause misses."""
+        return (np.round(np.asarray(values, dtype=float), decimals) + 0.0).tobytes()
 
     def add_mesh(self, mesh):
         """Bind an existing mesh to the ROI and extract its spatial attributes.
@@ -191,6 +221,11 @@ class Roi(object):
         self.fixed_name = False
         self.visual = {'2d': None, '3d': None, 'opacity': None, 'multicolor': None}
         self.misc = {}
+
+    def clear_slice_cache(self):
+        """Drop cached mesh slices. Only needed if the mesh is edited in place (mesh.points = ..., transform with
+        inplace=True); replacing the mesh through the setter or update_mesh clears it automatically."""
+        self._slice_cache.clear()
 
     def convert_position_to_pixel(self, points, base=True, plane=None, origin=None):
         """Convert world-space contour points into image or display pixel coordinates.
@@ -534,8 +569,16 @@ class Roi(object):
 
         return mask
 
-    def compute_mesh_slice(self, origin=None, plane=None, offset=0, rigid_matrix=None, return_pixel=False):
-        """Slice the internal 3D mesh volume along an orthogonal viewing section.
+    def compute_mesh_slice(self, origin=None, plane=None, offset=0, rigid_matrix=None, return_pixel=False, grid=None,
+                           use_cache=True):
+        """Slice the internal 3D mesh along a viewing plane.
+
+        Results are cached in one LRU per ROI, keyed by the view geometry (axes, in-plane spacing), the rigid matrix,
+        the slice origin (rounded to 1 um), offset and return_pixel. Scrolling back over a slice reuses the cached
+        result. Rotating, flipping order or rigid dragging only creates new keys; old ones age out. Any mesh
+        replacement clears the cache via the mesh setter.
+
+        The returned tuple/list is the cached object; copy it before modifying it in place.
         
         Parameters
         ----------
@@ -549,6 +592,8 @@ class Roi(object):
             Lets you slice based on a rigid registration
         return_pixel : bool, default False
             If True, calculates and formats structural data outputs as pixel indexes.
+        grid: image.display.get_grid(plane, origin)
+            Grid defines the plane in DISPLAYED world. Default: this image's own view.
         
         Returns
         -------
@@ -568,35 +613,50 @@ class Roi(object):
         elif self.cutter is None:
             self.cutter = MeshToContour(self.mesh)
 
-        axes = {'Axial': (0, 1, 2), 'Sagittal': (1, 2, 0), 'Coronal': (0, 2, 1)}
-        xi, yi, ni = axes[plane]
-
         rigid_matrix = rigid_matrix if rigid_matrix is not None else np.eye(4)
-        m = self.image.matrix @ rigid_matrix[:3, :3].T @ self.image.display.matrix.T
-        x_axis, y_axis, normal = m[xi], m[yi], m[ni]
 
-        # Execute fast inverse-plane slicing using cached cutter
-        roi_slice = self.cutter.slice_transformed(normal=normal, origin=origin, matrix=rigid_matrix)
+        # Grid defines the plane in DISPLAYED world. Default: this image's own view.
+        if grid is None:
+            grid = self.image.display.get_grid(plane, origin)
+
+        x_axis, y_axis, normal = grid['x_axis'], grid['y_axis'], grid['normal']
+        grid_origin = np.asarray(grid['origin'], dtype=float)
+        sx, sy = grid['sx'], grid['sy']
+
+        if use_cache:
+            key = (self._key_bytes(x_axis, 9), self._key_bytes(y_axis, 9), self._key_bytes(normal, 9),
+                   float(sx), float(sy),
+                   self._key_bytes(rigid_matrix, 9),
+                   self._key_bytes(grid_origin, 3),
+                   float(offset), bool(return_pixel))
+            hit = self._slice_cache.get(key)
+            if hit is not None:
+                self._slice_cache.move_to_end(key)
+                return hit
+
+        roi_slice = self.cutter.slice_transformed(normal=normal, origin=grid_origin, matrix=rigid_matrix)
 
         colors = None
-        if return_pixel:
-            if roi_slice.number_of_points > 0:
-                roi_strip = roi_slice.strip(max_length=10000000)
-                position = [np.asarray(c.points) for c in roi_strip.cell]
+        if not return_pixel:
+            result = (roi_slice, colors)
 
-                sx, sy = self.image.display.spacing[xi], self.image.display.spacing[yi]
-                pixel_corrected = []
-                for pts in position:
-                    v = pts - np.asarray(origin)
-                    col = v.dot(x_axis) / sx + offset
-                    row = v.dot(y_axis) / sy + offset
-                    pixel_corrected += [np.stack([col, row], axis=-1)]
+        elif roi_slice.number_of_points == 0:
+            result = ([], colors)
 
-                return pixel_corrected, colors
-            else:
-                return [], colors
         else:
-            return roi_slice, colors
+            roi_strip = roi_slice.strip(max_length=10000000)
+            pixel_corrected = []
+            for pts in (np.asarray(c.points) for c in roi_strip.cell):
+                v = pts - grid_origin
+                pixel_corrected += [np.stack([v.dot(x_axis) / sx + offset, v.dot(y_axis) / sy + offset], axis=-1)]
+            result = (pixel_corrected, colors)
+
+        if use_cache:
+            self._slice_cache[key] = result
+            while len(self._slice_cache) > self.slice_cache_size:
+                self._slice_cache.popitem(last=False)
+
+        return result[0], result[1]
 
     def create_sitk_mask(self):
         """Build an object instance conforming to a dedicated SimpleITK Image representation format.
