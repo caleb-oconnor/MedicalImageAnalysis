@@ -750,6 +750,38 @@ class Roi(object):
             self.contour_position = None
             self.mesh = None
 
+    def update_position(self, position, plane='Axial', ):
+        """Manually assign a new configuration of position layers and regenerate corresponding meshes.
+
+        Parameters
+        ----------
+        position : list of numpy.ndarray
+            The target dataset coordinates to update the contours with.
+        plane : str, default 'Axial'
+            The new structural evaluation orientation workspace.
+
+        Returns
+        -------
+        None
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> image = mia.Data.image[mia.Data.image_list()[0]]
+        >>> roi = image.roi['PTV']
+        >>> roi.update_position(...)
+        """
+        self.plane = plane
+        self.contour_position = position
+
+        if position is not None and len(position) > 0:
+            self.contour_pixel = self.convert_position_to_pixel(points=position)
+            self.create_mesh()
+        else:
+            self.contour_pixel = None
+            self.contour_position = None
+            self.mesh = None
+
     def update_mesh(self, mesh):
         """Manually substitute an external tracking mesh structure and update metadata attributes.
         
