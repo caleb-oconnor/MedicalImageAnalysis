@@ -38,7 +38,7 @@ import vtk
 from vtkmodules.util import numpy_support
 
 from ..utils.image.threshold import external
-from ..utils.roi.contour import contours_from_mask
+from ..utils.roi.to_contours import mask_to_contours
 
 from .poi import Poi
 from .roi import Roi
@@ -1438,8 +1438,11 @@ class Image(object):
             self.roi[name] = Roi(self, name=name, color=color, visible=visible, filepaths=filepaths)
 
         mask = external(self.array, threshold=threshold, only_mask=True)
-        contours = contours_from_mask(mask.astype(np.uint8))
-        positions = self.roi[name].convert_pixel_to_position(pixel=contours)
+        positions = mask_to_contours(mask,
+                                    Data.image[self.image_name].origin,
+                                    Data.image[self.image_name].spacing,
+                                    Data.image[self.image_name].matrix)
+        contours = self.roi[name].convert_position_to_pixel(points=positions)
 
         self.roi[name].contour_pixel = contours
         self.roi[name].contour_position = positions
