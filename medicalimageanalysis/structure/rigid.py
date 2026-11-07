@@ -1,31 +1,72 @@
-"""Morfeus lab
-The University of Texas
+"""The University of Texas
 MD Anderson Cancer Center
 Author - Caleb O'Connor
 Email - csoconnor@mdanderson.org
 
 Description:
-    Provides display transformations, image reslicing, and rigid registration
-    management (including VTK and Open3D ICP alignments) for multi-modal medical imaging.
+    Rigid registration between two frames of reference, computed from two images of any modality (CT, MR, PT, US,
+    X-ray, tomo): display reslicing, manual rotate/translate, automatic registration (ICP or SimpleITK), registrations
+    built on a parent registration, and a small JSON state for saving. Logging and when to save are left to the
+    application.
+
+    Conventions
+    -----------
+    * Every image array is (z, y, x), including 2D X-ray (z = 1) and ultrasound frames. Color data is (z, y, x, c).
+    * Origin, spacing and world points are (x, y, z). ``image.matrix`` rows are the image axes.
+    * ``get_combined_matrix() = matrix @ base`` maps a reference-world point to the matching moving-world point.
+      ``matrix`` is this registration's own step; ``base`` is the parent's result (identity without a parent).
+    * The registration maps the reference image's frame of reference to the moving image's. Any image in either frame
+      can be displayed through it (e.g. an RTDose in the planning CT's frame shown on the MR).
+    * Display calls name their own images: ``base_name`` is the image whose view is shown, ``image_name`` the image
+      resliced onto it. Each view (and each overlay in a view) is its own call, so any number of views can share one
+      registration. Leaving both out shows the registered moving image on the registered reference image.
+    * An image with no usable Frame of Reference UID is its own frame. When both registered images share a frame, the
+      registration only applies to those two images.
+    * The JSON state holds only 4x4 matrices, names, frames, indices and ROI names. Image arrays, masks,
+      points and meshes are never saved.
 
 Structure:
-    - Display: Manages voxel-to-world coordination, spacing, slicing coordinates, and pixel metrics.
-    - Rigid: Coordinates rigid alignment transformations, ROI mapping, and registration parameters.
+    - RigidSide: image name, frame, z-slice selection and ROI names for one side. Built by Rigid.
+    - RigidVisual: display settings (opacity, multicolor, step animation fraction). Not saved.
+    - Rigid: matrices, parent link, display, registration backends and JSON state.
 
 Examples
 --------
 >>> import medicalimageanalysis as mia
->>> mia.read_mhd(file='C:/Data/scan.mhd', modality='CT')
->>> image = mia.Data.image[mia.Data.image_list()[0]]
+>>> rigid = mia.Rigid('CT 01', 'MR 01')
+>>> info = rigid.compute_registration('itk', metric='MI')
+>>> rigid.retrieve_angles(), rigid.retrieve_translation()
+
+One registration, several views (each its own call)
+
+>>> res = rigid.compute_array('Axial', ct_position)                                       # MR on the CT
+>>> res = rigid.compute_array('Axial', mr_position, base_name='MR 01', image_name='CT 01')  # CT on the MR
+>>> res = rigid.compute_array('Axial', mr_position, base_name='MR 01', image_name='Dose 01')  # dose in the CT frame
+>>> mia.Rigid.find_rigids('Dose 01', 'MR 01')
+['CT 01_MR 01']
+
+Second registration built on a first one (both exist, so they can be viewed side by side)
+
+>>> right = mia.Rigid('CT 01', 'CBCT 01', rigid_name='right hip')
+>>> right.compute_registration('icp_plane', reference_rois='Femur_R')
+>>> left = mia.Rigid('CT 01', 'CBCT 01', rigid_name='left hip', parent_name='right hip')
+>>> left.compute_registration('icp_plane', reference_rois=['Femur_L', 'Acetabulum_L'])
+>>> left.visual.display_fraction = 0.0     # left hip unaligned, slide to 1.0 to watch it align
+
+A few ultrasound frames registered to a CT
+
+>>> rigid = mia.Rigid('CT 01', 'US 01', moving_indices=[40, 41, 42])
 """
 
 import os
-import copy
+import json
+import hashlib
+
+from dataclasses import dataclass, asdict, field
 
 import numpy as np
-import pandas as pd
+import pyvista as pv
 import SimpleITK as sitk
-
 
 import vtk
 from vtkmodules.util import numpy_support
@@ -38,76 +79,137 @@ from ..utils.rigid.simpleitk import RigidITK
 from ..data import Data
 
 
+@dataclass
+class RigidSide:
+    """One side (reference or moving) of a registration. Built by :class:`Rigid`, not created directly.
+
+    Attributes
+    ----------
+    image_name : str
+        The image this side was registered with (key into ``Data.image``).
+    frame : str
+        Frame of Reference UID shared by every image on this side; the image name when the image has none.
+    indices : list of int or None
+        z-indices of ``image_name`` used for computation. None = all slices. The matching SOP Instance UIDs are
+        ``Data.image[image_name].sops[i]``.
+    rois : list of str
+        ROI names on ``image_name``, paired by position with the other side's ``rois``.
+    """
+    image_name: str
+    frame: str
+    indices: list | None = None
+    rois: list = field(default_factory=list)
+
+
+@dataclass
+class RigidVisual:
+    """Display settings for a registration. Application state: never saved.
+
+    Attributes
+    ----------
+    reference, moving : object
+        Per-image display settings (e.g. colormap names).
+    opacity : float
+        Blend opacity of the moved image.
+    multicolor : object
+        Multicolor overlay setting.
+    display_fraction : float
+        Step animation: 0 shows only the parent's result (structure unaligned), 1 the full registration.
+    """
+    reference: object = None
+    moving: object = None
+    opacity: float = 0.5
+    multicolor: object = None
+    display_fraction: float = 1.0
+
+
 class Rigid(object):
-    """Coordinates 3D matrix-based rigid registration operations between tracking volumes.
-    
+    """Rigid registration between the frames of reference of a reference and a moving image.
+
     Parameters
     ----------
-    reference_name : str
-        Look-up reference key identification string for reference images.
-    moving_name : str
-        Look-up reference key identification string for moving target images.
+    reference_name, moving_name : str
+        Images in ``Data.image`` used to compute the registration. Their frames define what it applies to.
     rigid_name : str, optional
-        Unique assigned identifier name tracking this specific registration setup instance.
-    roi_names : list of str, optional
-        Target structural tracking tags. Defaults to `['Unknown']`.
-    reference_sops : list, optional
-        DICOM SOP Class Tracking identifiers matching reference series layers.
-    moving_sops : list, optional
-        DICOM SOP Class Tracking identifiers matching moving target series layers.
-    reference_matrix : numpy.ndarray, optional
-        A baseline fixed structural alignment matrix. Defaults to Identity.
-    matrix : numpy.ndarray, optional
-        The core active registration modification 4x4 matrix tracker. Defaults to Identity.
-    combo_matrix : numpy.ndarray, optional
-        An additive combined secondary structural step matrix transformation tracker. Defaults to Identity.
-    combo_name : str, optional
-        Identification name label matching any multi-stage composite transformations.
-    
+        Lookup key in ``Data.rigid``. None builds one from the image names.
+    parent_name : str, optional
+        Registration this one is built on; it must connect the same two frames. Its result is the base of this one
+        and is followed live while it exists; the last known base is kept (and saved) so this registration survives
+        the parent being deleted.
+    reference_indices, moving_indices : list of int, optional
+        z-slices used on each side (e.g. ultrasound frames). None = all slices.
+    matrix : (4, 4) array_like, optional
+        This registration's own step (reference -> moving). Defaults to identity.
+    local_uid : str, optional
+        Existing uid when loading (:meth:`from_json`). None generates a new one.
+
     Examples
     --------
     >>> import medicalimageanalysis as mia
     >>> rigid = mia.Rigid('CT 01', 'MR 01')
-    >>> rigid.retrieve_translation()
+    >>> rigid = mia.Rigid('CT 01', 'US 01', moving_indices=[10, 11, 12])
+    >>> left = mia.Rigid('CT 01', 'CBCT 01', rigid_name='left hip', parent_name='right hip')
     """
-    def __init__(self, reference_name, moving_name, rigid_name=None, roi_names=None, reference_sops=None,
-                 moving_sops=None, reference_matrix=None, matrix=None, combo_matrix=None, combo_name=None,
-                 inverse=False):
-        """Create a rigid registration object and register it globally.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
-        >>> rigid.__init__(...)
-        """
-        self.reference_name = reference_name
-        self.moving_name = moving_name
-        self.combo_name = combo_name
-        self.roi = dict.fromkeys(Data.roi_list())
-        self.local_uid = generate_uid()
+    SCHEMA_VERSION = 1
 
-        self.reference_matrix = np.identity(4) if reference_matrix is None else np.asarray(reference_matrix, float)
-        self.matrix = np.identity(4) if matrix is None else np.asarray(matrix, float)
-        self.combo_matrix = np.identity(4) if combo_matrix is None else np.asarray(combo_matrix, float)
+    def __init__(self, reference_name, moving_name, rigid_name=None, parent_name=None, reference_indices=None,
+                 moving_indices=None, matrix=None, local_uid=None):
+        self.reference = self._make_side(reference_name, reference_indices)
+        self.moving = self._make_side(moving_name, moving_indices)
+        self.local_uid = generate_uid() if local_uid is None else local_uid
 
-        self.inverse = False
-        self.current_ref = None
-        self.current_mov = None
-        self.set_current_order(inverse)
+        self.matrix = np.identity(4) if matrix is None else np.asarray(matrix, dtype=float)
 
-        self.slices = {'reference': ['All'], 'moving': ['All'], 'reference_sops': reference_sops,
-                       'moving_sops': moving_sops}
-        self.visual = {'reference': None, 'moving': None, 'opacity': 0.5, 'multicolor': None}
-        self.misc = {}
+        self.parent_uid = None
+        self.base_matrix = np.identity(4)
+        if parent_name is not None:
+            parent = Data.rigid[parent_name]
+            if (parent.reference.frame, parent.moving.frame) != (self.reference.frame, self.moving.frame):
+                raise ValueError(f"Parent '{parent_name}' does not connect the same frames of reference.")
+            self.parent_uid = parent.local_uid
+            self.base_matrix = parent.get_combined_matrix().copy()
+
+        self.visual = RigidVisual()
+
         self.rigid_name = self.add_rigid(rigid_name)
+
+    # ------------------------------------------------------------------------------------------------------------
+    # Static methods
+    # ------------------------------------------------------------------------------------------------------------
+    @staticmethod
+    def _as_list(names):
+        """None stays None, a single name becomes a one-item list, anything else becomes a list."""
+        if names is None:
+            return None
+        return [names] if isinstance(names, str) else list(names)
+
+    @staticmethod
+    def _frame_of(image_name):
+        """Frame of Reference UID of an image, or its own name when the UID is missing or a placeholder.
+
+        A placeholder (e.g. '00000.00000' from Image.get_frame_ref) must never make unrelated images share a frame.
+        """
+        image = Data.image.get(image_name)
+        frame = None if image is None else getattr(image, 'frame_ref', None)
+        if frame is None or not str(frame).strip(' .0'):
+            return image_name
+
+        return str(frame)
+
+    @staticmethod
+    def _make_side(image_name, indices=None, frame=None):
+        """RigidSide with clean int indices; frame read from the image unless given."""
+        return RigidSide(image_name, Rigid._frame_of(image_name) if frame is None else frame,
+                         None if indices is None else [int(i) for i in indices])
+
+    @staticmethod
+    def _matrix_list(mat):
+        """4x4 matrix to a flat list of 16 floats for JSON."""
+        return np.asarray(mat, dtype=float).ravel().tolist()
 
     @staticmethod
     def _matrix_to_sitk(mat, center):
-        """4x4 reference -> moving matrix to a centered sitk Euler3DTransform with the same mapping.
-
-        Centering the rotation on the image (instead of the world origin) gives the optimizer well-scaled parameters.
-        """
+        """4x4 reference -> moving matrix to a centered sitk Euler3DTransform with the same mapping."""
         mat = np.asarray(mat, dtype=float)
         center = np.asarray(center, dtype=float)
 
@@ -132,6 +234,19 @@ class Rigid(object):
         return inv
 
     @staticmethod
+    def _scalar_array(array):
+        """(z, y, x) float32 array for registration; (z, y, x, c) color is converted to luminance."""
+        array = np.asarray(array)
+        if array.ndim == 4:
+            if array.shape[3] >= 3:
+                weights = np.array([0.299, 0.587, 0.114], dtype=np.float32)
+                array = array[..., :3].astype(np.float32) @ weights
+            else:
+                array = array.astype(np.float32).mean(axis=3)
+
+        return array.astype(np.float32, copy=False)
+
+    @staticmethod
     def _sitk_to_matrix(transform):
         """Centered sitk rigid transform (Euler / Versor) to a 4x4 reference -> moving matrix."""
         if type(transform) is sitk.Transform:
@@ -147,229 +262,422 @@ class Rigid(object):
 
         return mat
 
-    def _apply_display_transform(self, T):
-        """
-        Apply T (in displayed world) to the resliced image: A_new = T @ A, then solve back for self.matrix so
-        combo_matrix stays untouched.
-        """
-        A_new = T @ self.get_display_matrix()
-        combined_new = A_new if self.inverse else self._rigid_inv(A_new)
+    @staticmethod
+    def _slice_mask(side, shape):
+        """(z, y, x) uint8 mask of the side's selected z-slices, or None when the whole image is used."""
+        if side.indices is None:
+            return None
 
-        self.matrix = combined_new @ np.linalg.inv(self.combo_matrix)
+        indices = [i for i in side.indices if 0 <= i < shape[0]]
+        if not indices:
+            raise ValueError(f"None of the indices {side.indices} are inside '{side.image_name}' (z = {shape[0]}).")
 
-    def _build_itk(self, reference_mask=None, moving_mask=None, images=True):
-        """Create a RigidITK helper from the reference/moving images (and optional (z, y, x) mask arrays)."""
-        helper = RigidITK()
-        for name, is_reference, mask in ((self.reference_name, True, reference_mask),
-                                         (self.moving_name, False, moving_mask)):
-            image = Data.image[name]
-            # image.matrix rows are the axes; sitk wants the axes as columns.
-            direction = np.asarray(image.matrix, dtype=float).T
+        mask = np.zeros(shape, dtype=np.uint8)
+        mask[indices] = 1
 
-            if images:
-                helper.create_sitk_image(image.array, image.origin, image.spacing, direction,
-                                         reference=is_reference)
-            if mask is not None:
-                helper.create_sitk_image(mask, image.origin, image.spacing, direction,
-                                         reference=is_reference, mask=True)
+        return mask
 
-        return helper
+    @staticmethod
+    def _vtk_matrix(mat):
+        """4x4 numpy matrix to vtkMatrix4x4."""
+        vtk_matrix = vtk.vtkMatrix4x4()
+        vtk_matrix.DeepCopy(tuple(np.asarray(mat, dtype=float).ravel()))
+        return vtk_matrix
 
-    def add_rigid(self, rigid_name):
-        """Saves the active registration initialization instances into globally accessible data scopes.
-        
-        Parameters
-        ----------
-        rigid_name : str or None
-            A targeted name for tracker referencing. If None, automatically creates an informative name.
-        
-        Returns
-        -------
-        str
-            The actual uniquely verified lookup key assigned to this tracking operation.
-        
+    @staticmethod
+    def find_rigids(image_a, image_b):
+        """Names of every registration in ``Data.rigid`` that connects the frames of two images (either direction).
+
+        Several can match, e.g. 'right hip' and 'left hip' between the same CT and CBCT.
+
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
-        >>> rigid.add_rigid(...)
+        >>> mia.Rigid.find_rigids('Dose 01', 'MR 01')
+        ['CT 01_MR 01']
+        """
+        return [name for name, rigid in Data.rigid.items() if rigid.connects(image_a, image_b)]
+
+    @classmethod
+    def from_json(cls, text):
+        """Rebuild a registration from :meth:`to_json` output and register it in ``Data.rigid``.
+
+        The saved frames are kept, so it works before its images are loaded. The parent is found again by uid when it
+        is loaded too; otherwise the saved base matrix is used.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> with open('C:/Data/ct_mr.json') as f:
+        ...     rigid = mia.Rigid.from_json(f.read())
+        """
+        record = json.loads(text)
+        if record.get('schema', 1) > cls.SCHEMA_VERSION:
+            raise ValueError(f"Record schema {record['schema']} is newer than supported ({cls.SCHEMA_VERSION}).")
+
+        reference, moving = record['reference'], record['moving']
+        rigid = cls(reference['image_name'], moving['image_name'], rigid_name=record['name'],
+                    matrix=np.reshape(record['matrix'], (4, 4)), local_uid=record['uid'])
+
+        rigid.reference = cls._make_side(reference['image_name'], reference['indices'], reference.get('frame'))
+        rigid.moving = cls._make_side(moving['image_name'], moving['indices'], moving.get('frame'))
+        rigid.reference.rois = list(reference['rois'])
+        rigid.moving.rois = list(moving['rois'])
+        rigid.parent_uid = record['parent_uid']
+        rigid.base_matrix = np.reshape(np.asarray(record['base_matrix'], dtype=float), (4, 4))
+
+        return rigid
+
+    # ------------------------------------------------------------------------------------------------------------
+    # Private methods
+    # ------------------------------------------------------------------------------------------------------------
+    def _apply_display_transform(self, T, base_name, image_name):
+        """Apply T (in the base image's world) to the resliced image: A_new = T @ A, then solve back for self.matrix
+        so the parent's base stays untouched. Manual edits act on the full registration, so the animation snaps to 1."""
+        _, moved_side = self._sides(base_name, image_name, require_different=True)
+
+        self.visual.display_fraction = 1.0
+        A_new = T @ self.get_display_matrix(base_name, image_name)
+        combined_new = self._rigid_inv(A_new) if moved_side is self.moving else A_new
+
+        self.matrix = combined_new @ self._rigid_inv(self.get_base_matrix())
+
+    def _build_itk(self, reference_mask=None, moving_mask=None, images=True):
+        """RigidITK helper from both registered images, optional (z, y, x) masks and the sides' slice subsets.
+
+        A slice subset restricts the metric to those slices, intersected with a user mask when one is given.
+        """
+        helper = RigidITK()
+        for side, is_reference, mask in ((self.reference, True, reference_mask), (self.moving, False, moving_mask)):
+            image = Data.image[side.image_name]
+            direction = np.asarray(image.matrix, dtype=float).T     # rows = axes -> sitk columns = axes
+
+            if images:
+                helper.create_sitk_image(self._scalar_array(image.array), image.origin, image.spacing, direction,
+                                         reference=is_reference)
+
+            subset = self._slice_mask(side, np.shape(image.array)[:3])
+            if mask is not None and subset is not None:
+                mask = np.logical_and(np.asarray(mask) != 0, subset)
+            elif subset is not None and images:
+                mask = subset
+
+            if mask is not None:
+                helper.create_sitk_image(mask, image.origin, image.spacing, direction, reference=is_reference,
+                                         mask=True)
+
+        return helper
+
+    def _displayed_pivot(self, base_display, moved_side):
+        """Pivot where it appears in the base image's world before this step is applied."""
+        pivot = self._pivot(moved_side)
+        return base_display[:3, :3] @ pivot + base_display[:3, 3]
+
+    def _find_parent(self):
+        """Parent Rigid by uid, or None if there is no parent or it no longer exists."""
+        if self.parent_uid is None:
+            return None
+
+        for rigid in Data.rigid.values():
+            if rigid.local_uid == self.parent_uid and rigid is not self:
+                return rigid
+
+        return None
+
+    def _merge_roi_meshes(self, image_name, roi_names):
+        """One PolyData from several ROI meshes on the same image (world coordinates, never modified)."""
+        meshes = []
+        for name in roi_names:
+            roi = Data.image[image_name].roi.get(name)
+            if roi is None or roi.mesh is None:
+                raise ValueError(f"ROI '{name}' has no mesh on '{image_name}'.")
+            meshes.append(roi.mesh)
+
+        if len(meshes) == 1:
+            return meshes[0]
+
+        merged = pv.merge(meshes, merge_points=False)
+        # ICP requires PolyData; older pyvista versions return an UnstructuredGrid from merge.
+        return merged if isinstance(merged, pv.PolyData) else merged.extract_surface()
+
+    def _oriented(self, combined, moved_side):
+        """reference -> moving matrix to the matrix that carries moved_side's world onto the other side's world."""
+        return self._rigid_inv(combined) if moved_side is self.moving else combined
+
+    def _pivot(self, side):
+        """Center of the side's paired ROIs (on its registered image, native world), else that image's center.
+
+        Uses the registered image even when another image of the same frame is displayed, so every image moved
+        through this registration animates about the same point.
+        """
+        image = Data.image[side.image_name]
+
+        bounds = []
+        for name in side.rois:
+            roi = image.roi.get(name)
+            if roi is not None and roi.mesh is not None:
+                bounds.append(roi.mesh.bounds)
+
+        if bounds:
+            bounds = np.asarray(bounds, dtype=float)
+            return (bounds[:, 0::2].min(axis=0) + bounds[:, 1::2].max(axis=0)) / 2
+
+        return np.asarray(image.get_center(), dtype=float)
+
+    def _record(self):
+        """Registration state as plain JSON types (no arrays other than the 4x4 matrices as lists)."""
+        return {'schema': self.SCHEMA_VERSION, 'uid': self.local_uid, 'name': self.rigid_name,
+                'reference': asdict(self.reference), 'moving': asdict(self.moving),
+                'matrix': self._matrix_list(self.matrix), 'parent_uid': self.parent_uid,
+                'base_matrix': self._matrix_list(self.get_base_matrix())}
+
+    def _roi_on_image(self, roi_name, image_name, moved_side):
+        """Name of the ROI to slice on image_name: a paired name from the other side is mapped when image_name is
+        the moved side's registered image; otherwise roi_name is used as given."""
+        other = self.reference if moved_side is self.moving else self.moving
+        if image_name == moved_side.image_name and roi_name not in moved_side.rois and roi_name in other.rois:
+            return moved_side.rois[other.rois.index(roi_name)]
+
+        return roi_name
+
+    def _side_of(self, image_name):
+        """The side an image belongs to: by name for the registered images, otherwise by frame of reference.
+
+        None when the image is in neither frame, or when both registered images share one frame (then only those two
+        images can tell the sides apart).
+        """
+        if image_name == self.reference.image_name:
+            return self.reference
+        if image_name == self.moving.image_name:
+            return self.moving
+        if self.reference.frame == self.moving.frame:
+            return None
+
+        frame = self._frame_of(image_name)
+        if frame == self.reference.frame:
+            return self.reference
+        if frame == self.moving.frame:
+            return self.moving
+
+        return None
+
+    def _sides(self, base_name, image_name, require_different=False):
+        """(base side, moved side) for a display call; None names default to the registered reference / moving."""
+        base_name = self.reference.image_name if base_name is None else base_name
+        image_name = self.moving.image_name if image_name is None else image_name
+
+        base_side, moved_side = self._side_of(base_name), self._side_of(image_name)
+        if base_side is None or moved_side is None:
+            missing = base_name if base_side is None else image_name
+            raise ValueError(f"'{missing}' is not in a frame of reference connected by '{self.rigid_name}'.")
+        if require_different and base_side is moved_side:
+            raise ValueError(f"'{base_name}' and '{image_name}' are on the same side of '{self.rigid_name}'.")
+
+        return base_side, moved_side
+
+    def _view_grid(self, plane, position, base_name, image_name, spacing=None):
+        """(grid, base_grid): the grid to sample on and the base image's own grid for this view."""
+        base_grid = Data.image[base_name].display.get_grid(plane, position)
+        if spacing is None:
+            return base_grid, base_grid
+
+        sx, sy = self._view_spacing(plane, base_name, image_name, spacing)
+        return Data.image[image_name].display.grid_with_spacing(base_grid, sx, sy), base_grid
+
+    def _view_spacing(self, plane, base_name, image_name, spacing=None):
+        """In-plane (sx, sy): None = base image, 'native' = moved image, float or (sx, sy)."""
+        if spacing is None or isinstance(spacing, str):
+            if spacing not in (None, 'native'):
+                raise ValueError(f"spacing must be None, 'native', a number or (sx, sy); got {spacing!r}")
+            display = Data.image[base_name if spacing is None else image_name].display
+            xi, yi, _ = display.axes[plane]
+            return float(display.spacing[xi]), float(display.spacing[yi])
+
+        if np.isscalar(spacing):
+            return float(spacing), float(spacing)
+
+        return float(spacing[0]), float(spacing[1])
+
+    # ------------------------------------------------------------------------------------------------------------
+    # Public methods
+    # ------------------------------------------------------------------------------------------------------------
+    def add_rigid(self, rigid_name):
+        """Store this registration in ``Data.rigid``; None builds a unique name from the image names.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> mia.Rigid('CT 01', 'MR 01').rigid_name
+        'CT 01_MR 01'
         """
         if rigid_name is None:
-            if np.array_equal(self.combo_matrix, np.identity(4)):
-                rigid_name = self.reference_name + '_' + self.moving_name
-            else:
-                rigid_name = self.reference_name + '_' + self.moving_name + '_combo'
-
+            rigid_name = self.reference.image_name + '_' + self.moving.image_name
             if rigid_name in Data.rigid_list():
-                n = 0
-                while n > -1:
+                n = 1
+                while rigid_name + '_' + str(n) in Data.rigid_list():
                     n += 1
-                    new_name = copy.deepcopy(rigid_name + '_' + str(n))
-                    if new_name not in Data.rigid_list():
-                        rigid_name = new_name
-                        n = -100
+                rigid_name = rigid_name + '_' + str(n)
 
         Data.rigid[rigid_name] = self
 
         return rigid_name
 
-    def compute_array(self, plane, position, use_moving_spacing=False):
-        """Same call as Display.compute_array: plane + the widget's position (top-left corner of the
-        reference view). Returns the moved image sampled onto the reference view, plus 'scale'.
-        
+    def align_origins(self):
+        """Set this step so the two registered images' origins coincide (a rough start before compute_registration).
+
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
-        >>> rigid.compute_array(...)
+        >>> mia.Data.rigid['CT 01_MR 01'].align_origins()
         """
-        base = Data.image[self.current_ref].display    # image the view is built on
-        mover = Data.image[self.current_mov].display   # image being moved
+        combined = np.identity(4)
+        combined[:3, 3] = (np.asarray(Data.image[self.moving.image_name].origin, dtype=float) -
+                           np.asarray(Data.image[self.reference.image_name].origin, dtype=float))
 
-        ref_grid = base.get_grid(plane, position)
-        grid = ref_grid
-        if use_moving_spacing:
-            xi, yi, _ = mover.axes[plane]
-            grid = mover.grid_with_spacing(ref_grid, mover.spacing[xi], mover.spacing[yi])
+        self.matrix = combined @ self._rigid_inv(self.get_base_matrix())
 
-        res = mover.compute_array(plane, position, rigid_matrix=self.get_display_matrix(), grid=grid)
+    def compute_array(self, plane, position, base_name=None, image_name=None, spacing=None):
+        """image_name resliced onto base_name's view: Display.compute_array's result plus 'scale'.
+
+        Parameters
+        ----------
+        plane : str
+            View plane, e.g. 'Axial'.
+        position : array_like
+            The widget's position (base image's view).
+        base_name : str, optional
+            Image whose view is shown. Any image in either frame. None = the registered reference image.
+        image_name : str, optional
+            Image resliced onto the view. Any image in either frame. None = the registered moving image. An image on
+            the same side as the base is in the same world, so it is sampled with no registration applied.
+        spacing : None, 'native', float or (sx, sy), optional
+            None = base image grid, 'native' = moved image spacing, or any spacing. Use the same value in
+            :meth:`compute_mesh_slice` and :meth:`compute_aspect`.
+
+        Returns
+        -------
+        dict or None
+            Display.compute_array's result plus 'scale' (sample spacing / base spacing).
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> rigid = mia.Data.rigid['CT 01_MR 01']
+        >>> res = rigid.compute_array('Axial', position)
+        >>> res = rigid.compute_array('Axial', position, base_name='MR 01', image_name='Dose 01')
+        """
+        base_name = self.reference.image_name if base_name is None else base_name
+        image_name = self.moving.image_name if image_name is None else image_name
+
+        grid, base_grid = self._view_grid(plane, position, base_name, image_name, spacing)
+        res = Data.image[image_name].display.compute_array(plane, position,
+                                                           rigid_matrix=self.get_display_matrix(base_name, image_name),
+                                                           grid=grid)
         if res is None:
             return None
-        res['scale'] = (grid['sx'] / ref_grid['sx'], grid['sy'] / ref_grid['sy'])
-        res['pixel_offset'] = (0.0, 0.0)
+        res['scale'] = (grid['sx'] / base_grid['sx'], grid['sy'] / base_grid['sy'])
 
         return res
 
-    def compute_aspect(self, plane):
-        """Aspect for the resliced image, matching the (sx, sy) Display.compute_array samples with.
-        
+    def compute_aspect(self, plane, base_name=None, image_name=None, spacing=None):
+        """Pixel aspect (sx / sy) of the view, matching compute_array with the same images and spacing.
+
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
-        >>> rigid.compute_aspect(...)
+        >>> mia.Data.rigid['CT 01_MR 01'].compute_aspect('Sagittal')
         """
-        spacing = Data.image[self.current_mov].display.spacing
+        base_name = self.reference.image_name if base_name is None else base_name
+        image_name = self.moving.image_name if image_name is None else image_name
+        sx, sy = self._view_spacing(plane, base_name, image_name, spacing)
 
-        axes = {'Axial': (0, 1, 2), 'Sagittal': (1, 2, 0), 'Coronal': (0, 2, 1)}
-        xi, yi, _ = axes[plane]
+        return np.round(sx / sy, 2)
 
-        return np.round(spacing[xi] / spacing[yi], 2)
+    def compute_mesh_slice(self, roi_name, plane, position, base_name=None, image_name=None, offset=0,
+                           return_pixel=True, use_cache=True, spacing=None):
+        """Slice one of image_name's ROIs on the same grid compute_array samples, so image and contour line up.
 
-    def compute_registration(self, method='icp_point', roi_name=None, reference_mesh=None, moving_mesh=None,
-                             reference_mask=None, moving_mask=None, reference_points=None, moving_points=None,
-                             use_current=True, **kwargs):
-        """Runs a rigid registration and stores the result in ``self.matrix``.
+        On the registered images, roi_name can be the paired name from either image. Pass use_cache=False while
+        dragging or animating.
 
-        Every method solves for the full reference -> moving world transform. The ``combo_matrix`` is then factored
-        out, so ``self.matrix @ self.combo_matrix`` is always the answer. ``inverse`` / ``set_current_order`` only
-        decide which image is displayed resliced, so registration ignores them.
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> mia.Data.rigid['CT 01_MR 01'].compute_mesh_slice('Liver', 'Axial', position)
+        """
+        base_name = self.reference.image_name if base_name is None else base_name
+        image_name = self.moving.image_name if image_name is None else image_name
+        _, moved_side = self._sides(base_name, image_name)
+
+        roi = Data.image[image_name].roi[self._roi_on_image(roi_name, image_name, moved_side)]
+        grid, _ = self._view_grid(plane, position, base_name, image_name, spacing)
+
+        return roi.compute_mesh_slice(origin=position, plane=plane, offset=offset,
+                                      rigid_matrix=self.get_display_matrix(base_name, image_name),
+                                      return_pixel=return_pixel, grid=grid, use_cache=use_cache)
+
+    def compute_registration(self, method='icp_point', reference_rois=None, moving_rois=None, reference_mesh=None,
+                             moving_mesh=None, reference_mask=None, moving_mask=None, reference_points=None,
+                             moving_points=None, use_current=True, **kwargs):
+        """Run a rigid registration on the registered images and store the result in ``self.matrix`` (the parent's
+        base is factored out).
 
         Parameters
         ----------
         method : {'itk', 'itk_mask', 'landmark', 'icp_point', 'icp_plane', 'icp_vtk'}, default 'itk'
-            * 'itk'       : intensity registration, ``RigidITK.rigid`` (masks restrict the metric only).
-            * 'itk_mask'  : shape registration of binary masks via signed distance maps, ``RigidITK.rigid_mask``.
-            * 'landmark'  : closed-form paired-point fit, ``RigidITK.landmark``.
-            * 'icp_point' : Open3D point-to-point ICP, ``ICP.compute_o3d(method='point')``.
-            * 'icp_plane' : Open3D point-to-plane ICP, ``ICP.compute_o3d(method='plane')``.
+            * 'itk'       : intensity registration, ``RigidITK.rigid``. Masks and slice subsets restrict the metric.
+            * 'itk_mask'  : binary mask shape registration, ``RigidITK.rigid_mask``.
+            * 'landmark'  : paired-point fit, ``RigidITK.landmark``.
+            * 'icp_point' / 'icp_plane' : Open3D ICP, ``ICP.compute_o3d``.
             * 'icp_vtk'   : VTK ICP, ``ICP.compute_vtk``.
-        roi_name : str, optional
-            ICP only. Uses this ROI's mesh on both images when the meshes are not passed explicitly.
+        reference_rois, moving_rois : str or list of str, optional
+            ROI names paired by position (moving None = same names). Merged into one surface for ICP. They become
+            this registration's ROI pairs and pivot (see :meth:`pair_rois`).
         reference_mesh, moving_mesh : pyvista.PolyData, optional
-            ICP only. Meshes in their own image's world coordinates. These override ``roi_name``. They are not
-            modified.
+            ICP only; override the ROIs.
         reference_mask, moving_mask : numpy.ndarray, optional
-            ITK only. Binary (z, y, x) arrays on the reference / moving image grids. Required for 'itk_mask'.
-            Optional for 'itk', where they restrict where the metric is evaluated.
+            ITK only; binary (z, y, x). Required for 'itk_mask'.
         reference_points, moving_points : (N, 3) array_like, optional
-            'landmark' only. Paired world points in (x, y, z) order, matched row by row.
+            'landmark' only; paired world points.
         use_current : bool, default True
-            Start from the current ``self.matrix @ self.combo_matrix`` when it is not identity, so you can do a
-            manual rough alignment or chain methods. Otherwise each backend uses its own initializer (COM matching
-            for ICP, the Geometry/Moments initializer for ITK).
+            Start from the current combined matrix when it is not identity.
         **kwargs
-            Passed straight to the backend function. Anything not given uses that function's default.
-            * 'icp_point' / 'icp_plane' : distance, iterations, rmse, fitness, com_matching, src_frac, tgt_frac,
-              min_pts, max_pts, seed
-            * 'icp_vtk' : distance, iterations, src_frac, min_pts, max_pts, com_matching
-            * 'itk' : transform, initializer, metric, bins, radius, sampling, iterations, learning_rate, min_step,
-              relaxation, shrink_factors, smoothing_sigmas, cross_modality, normalize, histogram_match
-            * 'itk_mask' : transform, initializer, band, sampling, iterations, learning_rate, min_step, relaxation,
-              shrink_factors, smoothing_sigmas
-            * 'landmark' : transform, weights
+            Passed straight to the backend.
 
         Returns
         -------
         dict
-            Diagnostics from the backend.
-            * ICP (Open3D): fitness, inlier_rmse, correspondences.
-            * ICP (VTK): mean_distance, iterations.
-            * itk / itk_mask: metric_value, stop_condition, iterations.
-            * landmark: fre_rms, fre_max, residuals.
-
-        Raises
-        ------
-        ValueError
-            If the method is unknown or its required inputs are missing.
-        TypeError
-            If ``inverse`` is passed, or a kwarg does not belong to the chosen backend.
+            Backend diagnostics.
 
         Examples
         --------
         >>> import medicalimageanalysis as mia
         >>> rigid = mia.Rigid('CT 01', 'MR 01')
-
-        Default: intensity registration with all RigidITK defaults (multimodal, so use mutual information)
-
-        >>> info = rigid.compute_registration(metric='MI')
-        >>> info['stop_condition']
-
-        Intensity registration focused on the liver
-
-        >>> liver_ct = mia.Data.image['CT 01'].roi['Liver'].create_mask()    # (z, y, x) binary arrays (your ROI mask source)
-        >>> rigid.compute_registration('itk', reference_mask=liver_ct, metric='MI', sampling=0.25)
-
-        ICP on an ROI surface, overriding only a few defaults
-
-        >>> info = rigid.compute_registration('icp_plane', roi_name='Liver', distance=5, iterations=100)
-        >>> info['fitness'], info['inlier_rmse']
-        >>> rigid.compute_registration('icp_vtk', roi_name='Pelvis', src_frac=0.2, iterations=200)
-
-        Explicit meshes instead of an ROI name
-
-        >>> ref_mesh = mia.Data.image['CT 01'].roi['Femur'].mesh
-        >>> mov_mesh = mia.Data.image['MR 01'].roi['Femur'].mesh
-        >>> rigid.compute_registration('icp_point', reference_mesh=ref_mesh, moving_mesh=mov_mesh, distance=10)
-
-        Coarse-to-fine chain (each step seeds the next through use_current)
-
-        >>> ref_pts = [[12.1, -40.3, 101.0], [55.0, -38.2, 98.4], [30.2, 10.7, 140.9]]
-        >>> mov_pts = [[10.4, -35.9, 96.2], [53.1, -34.0, 94.8], [28.9, 15.2, 136.1]]
-        >>> rigid.compute_registration('landmark', reference_points=ref_pts, moving_points=mov_pts)
-        >>> rigid.compute_registration('itk_mask', reference_mask=liver_ct, moving_mask=liver_mr, band=30)
-        >>> rigid.compute_registration('itk', reference_mask=liver_ct, metric='MI')
-
-        Ignore the current alignment and let the backend initialize itself
-
-        >>> rigid.compute_registration('icp_point', roi_name='Liver', use_current=False)
+        >>> rigid.compute_registration(metric='MI')
+        >>> rigid.compute_registration('icp_plane', reference_rois='Liver', distance=5)
+        >>> rigid.compute_registration('icp_point', reference_rois=['Liver', 'Kidney_R'],
+        ...                            moving_rois=['Liver_2', 'R Kidney'])
         """
-        if 'inverse' in kwargs:
-            raise TypeError("inverse is not a registration option; use set_current_order to change the display.")
+        reference_rois = self._as_list(reference_rois)
+        moving_rois = self._as_list(moving_rois)
+        if moving_rois is not None and reference_rois is None:
+            raise ValueError("moving_rois needs reference_rois to pair with.")
+        if reference_rois:
+            self.pair_rois(reference_rois, moving_rois)
+            moving_rois = list(self.moving.rois)
 
         start = self.get_combined_matrix()
         seed = use_current and not np.allclose(start, np.identity(4))
 
         if method in ('icp_point', 'icp_plane', 'icp_vtk'):
-            if roi_name is not None:
-                if reference_mesh is None:
-                    reference_mesh = Data.image[self.reference_name].roi[roi_name].mesh
-                if moving_mesh is None:
-                    moving_mesh = Data.image[self.moving_name].roi[roi_name].mesh
+            if reference_mesh is None and reference_rois:
+                reference_mesh = self._merge_roi_meshes(self.reference.image_name, reference_rois)
+            if moving_mesh is None and moving_rois:
+                moving_mesh = self._merge_roi_meshes(self.moving.image_name, moving_rois)
             if reference_mesh is None or moving_mesh is None:
-                raise ValueError(f"'{method}' needs roi_name or both reference_mesh and moving_mesh.")
+                raise ValueError(f"'{method}' needs reference_rois or both reference_mesh and moving_mesh.")
 
-            # source = reference, target = moving  ->  ICP matrix is reference -> moving.
+            # source = reference, target = moving  ->  the ICP matrix is reference -> moving.
             icp = ICP(reference_mesh, moving_mesh, matrix=start if seed else None)
             if method == 'icp_vtk':
                 icp.compute_vtk(**kwargs)
@@ -383,10 +691,10 @@ class Rigid(object):
             helper = self._build_itk(reference_mask, moving_mask, images=(method == 'itk'))
             initial = None
             if seed:
-                initial = self._matrix_to_sitk(start, Data.image[self.reference_name].get_center())
+                initial = self._matrix_to_sitk(start, Data.image[self.reference.image_name].get_center())
 
             run = helper.rigid if method == 'itk' else helper.rigid_mask
-            # sitk convention is pull-back (reference point -> moving point), the same as self.matrix.
+            # sitk is pull-back (reference point -> moving point), the same convention as self.matrix.
             transform, info = run(initial_transform=initial, return_info=True, **kwargs)
             combined = self._sitk_to_matrix(transform)
 
@@ -400,336 +708,262 @@ class Rigid(object):
         else:
             raise ValueError(f"Unknown method: {method}")
 
-        # Factor out the earlier stage so that self.matrix @ self.combo_matrix == combined.
-        self.matrix = np.asarray(combined, dtype=float) @ self._rigid_inv(self.combo_matrix)
+        self.matrix = np.asarray(combined, dtype=float) @ self._rigid_inv(self.get_base_matrix())
 
         return info
 
-    def compute_mesh_slice(self, roi_name, plane, position, offset=0, return_pixel=True, use_cache=True):
-        """Slice one of current_mov's ROIs in the same pixel space as compute_array. Cached per
-        ROI (see Roi.compute_mesh_slice); pass use_cache=False while the user is actively dragging
-        rotate/translate, since everyframe has a new matrix and would only push useful scroll
-        entries out of the LRU.
+    def connects(self, image_a, image_b):
+        """True when the two images are on opposite sides of this registration (by name or frame of reference).
+
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
-        >>> rigid.compute_mesh_slice(...)
+        >>> mia.Data.rigid['CT 01_MR 01'].connects('Dose 01', 'MR 01')
+        True
         """
+        side_a, side_b = self._side_of(image_a), self._side_of(image_b)
 
-        roi = Data.image[self.current_mov].roi[roi_name]
-        grid = Data.image[self.current_ref].display.get_grid(plane, position)
+        return side_a is not None and side_b is not None and side_a is not side_b
 
-        return roi.compute_mesh_slice(origin=position, plane=plane, offset=offset,
-                                      rigid_matrix=self.get_display_matrix(),
-                                      return_pixel=return_pixel, grid=grid, use_cache=use_cache)
+    def create_image(self, base_name=None, image_name=None):
+        """Resample image_name onto base_name's world (same convention as the display). Color keeps channels.
 
-    def copy_roi(self, roi_name=None):
-        """Clones and projects an ROI structural mesh model alignment into different volume spaces.
-        
-        Parameters
-        ----------
-        roi_name : str, optional
-            The targeted structure lookup key label mapping to the active tracking item.
-        
-        Returns
-        -------
-        None
-        
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
-        >>> rigid.copy_roi(...)
+        >>> vtk_image = mia.Data.rigid['CT 01_MR 01'].create_image()
         """
-        if roi_name in list(self.roi.keys()):
-            reference_roi = Data.image[self.reference_name].roi[roi_name]
-            moving_roi = Data.image[self.moving_name].roi[roi_name]
-            if self.inverse and self.roi[roi_name] is not None:
-                reference_roi.mesh = self.roi[roi_name].transform(np.linalg.inv(self.matrix @ self.combo_matrix),
-                                                                   inplace=False)
-            elif reference_roi.mesh is not None:
-                moving_roi.mesh = reference_roi.mesh.transform(self.matrix @ self.combo_matrix, inplace=False)
+        base_name = self.reference.image_name if base_name is None else base_name
+        image_name = self.moving.image_name if image_name is None else image_name
 
-    def create_image(self):
-        """Resample current_mov onto current_ref's world (same convention as the display).
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
-        >>> rigid.create_image(...)
-        """
-        mov = Data.image[self.current_mov]
+        mov = Data.image[image_name]
+        array = np.ascontiguousarray(mov.array)
+        components = array.shape[3] if array.ndim == 4 else 1
+
         vtk_image = vtk.vtkImageData()
         vtk_image.SetSpacing(mov.spacing)
-        vtk_image.SetDirectionMatrix(mov.matrix.T.ravel())   # rows = axes in your convention; VTK wants columns
-        vtk_image.SetDimensions(np.flip(mov.array.shape))
+        vtk_image.SetDirectionMatrix(mov.matrix.T.ravel())   # rows = axes in this convention; VTK wants columns
+        vtk_image.SetDimensions([int(v) for v in array.shape[2::-1]])
         vtk_image.SetOrigin(mov.origin)
-        vtk_image.GetPointData().SetScalars(numpy_support.numpy_to_vtk(mov.array.ravel(order="C"), deep=False))
+
+        flat = array.reshape(-1, components) if components > 1 else array.ravel()
+        # deep copy only when ascontiguousarray had to make a temporary copy
+        scalars = numpy_support.numpy_to_vtk(flat, deep=array is not mov.array)
+        vtk_image.GetPointData().SetScalars(scalars)
 
         # ResliceTransform maps OUTPUT (displayed) coords -> INPUT (native) coords = inverse of display matrix
-        out_to_in = self._rigid_inv(self.get_display_matrix())
-        vtk_matrix = vtk.vtkMatrix4x4()
-        for i in range(4):
-            for j in range(4):
-                vtk_matrix.SetElement(i, j, out_to_in[i, j])
         transform = vtk.vtkTransform()
-        transform.SetMatrix(vtk_matrix)
+        transform.SetMatrix(self._vtk_matrix(self._rigid_inv(self.get_display_matrix(base_name, image_name))))
 
         reslice = vtk.vtkImageReslice()
         reslice.SetInputData(vtk_image)
         reslice.SetResliceTransform(transform)
         reslice.SetInterpolationModeToLinear()
-        reslice.SetOutputSpacing(Data.image[self.current_ref].spacing)
+        reslice.SetOutputSpacing(Data.image[base_name].spacing)
         reslice.SetOutputDirection(1, 0, 0, 0, 1, 0, 0, 0, 1)
         reslice.AutoCropOutputOn()
-        reslice.SetBackgroundLevel(-3001)
+        reslice.SetBackgroundLevel(0 if components > 1 else -3001)
         reslice.Update()
 
         return reslice.GetOutput()
 
-    def export_image(self, path=None):
-        """Writes the current aligned 3D dataset out to disk as an mhd/raw MetaImage format pair.
-        
-        Parameters
-        ----------
-        path : str, optional
-            The targeted filename destination write path string.
-        
-        Returns
-        -------
-        None
-        
+    def export_image(self, path, base_name=None, image_name=None):
+        """Write the resampled image (create_image) as an mhd/raw MetaImage pair.
+
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
-        >>> rigid.export_image(...)
+        >>> mia.Data.rigid['CT 01_MR 01'].export_image('C:/Data/aligned.mhd')
         """
-        if self.moving_name is not None and path is not None:
-            image = self.create_image()
+        writer = vtk.vtkMetaImageWriter()
+        writer.SetInputData(self.create_image(base_name, image_name))
+        writer.SetFileName(path)
+        writer.Write()
 
-            writer = vtk.vtkMetaImageWriter()
-            writer.SetInputData(image)
-            writer.SetFileName(path)
-            writer.Write()
+    def get_base_matrix(self):
+        """reference -> moving result of the parent (identity without a parent).
 
-    def get_center(self, plane=None, position=None):
-        """Pivot: current_mov's center as displayed, projected onto the active slice plane (when given).
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
-        >>> rigid.get_center(...)
+        Follows the parent live while it exists and keeps the last result, so this registration survives the parent
+        being deleted. The steps don't have to be run back to back.
         """
-        A = self.get_display_matrix()
-        native_center = np.asarray(Data.image[self.current_mov].get_center(), dtype=float)
+        parent = self._find_parent()
+        if parent is not None:
+            self.base_matrix = parent.get_combined_matrix().copy()
+
+        return self.base_matrix
+
+    def get_center(self, base_name=None, image_name=None, plane=None, position=None):
+        """image_name's center as displayed on base_name, projected onto the active slice plane when given."""
+        base_name = self.reference.image_name if base_name is None else base_name
+        image_name = self.moving.image_name if image_name is None else image_name
+
+        A = self.get_display_matrix(base_name, image_name)
+        native_center = np.asarray(Data.image[image_name].get_center(), dtype=float)
         center = A[:3, :3] @ native_center + A[:3, 3]
 
         if plane is None or position is None:
             return center
 
-        normal = Data.image[self.current_ref].display.compute_plane_geometry(plane, position)['normal']
+        normal = Data.image[base_name].display.compute_plane_geometry(plane, position)['normal']
         n_hat = normal / np.linalg.norm(normal)
         return center - np.dot(center - np.asarray(position, dtype=float), n_hat) * n_hat
 
     def get_combined_matrix(self):
-        """reference world -> moving world.
-        
+        """reference world -> moving world, including the parent's result."""
+        return self.matrix @ self.get_base_matrix()
+
+    def get_display_key(self, base_name=None, image_name=None):
+        """Short hash of the display matrix for cache keys. Also changes when the parent changes."""
+        matrix = np.round(self.get_display_matrix(base_name, image_name), 9) + 0.0     # + 0.0 turns -0.0 into 0.0
+        return hashlib.blake2b(matrix.tobytes(), digest_size=8).hexdigest()
+
+    def get_display_matrix(self, base_name=None, image_name=None):
+        """image_name native world -> base_name world, including the step animation. Pass this as rigid_matrix.
+
+        Identity when both images are on the same side (same frame of reference).
+        """
+        base_side, moved_side = self._sides(base_name, image_name)
+        if base_side is moved_side:
+            return np.identity(4)
+
+        if self.visual.display_fraction >= 1.0:
+            return self._oriented(self.get_combined_matrix(), moved_side)
+
+        base_display = self._oriented(self.get_base_matrix(), moved_side)
+        return self.get_motion_matrix(base_name, image_name, self.visual.display_fraction) @ base_display
+
+    def get_indices(self, image_name):
+        """z-indices registered for this image (e.g. ultrasound frames), or None for all slices / other images.
+
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
-        >>> rigid.get_combined_matrix(...)
+        >>> mia.Rigid('CT 01', 'US 01', moving_indices=[40, 41, 42]).get_indices('US 01')
+        [40, 41, 42]
         """
+        for side in (self.reference, self.moving):
+            if image_name == side.image_name:
+                return side.indices
 
-        return self.matrix @ self.combo_matrix
+        return None
 
-    def get_display_matrix(self):
-        """current_mov native world -> current_ref (displayed) world. Pass this as rigid_matrix.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
-        >>> rigid.get_display_matrix(...)
+    def get_motion_matrix(self, base_name=None, image_name=None, fraction=1.0):
+        """This step's motion M in base_name's world (full display = M @ base display), interpolated by fraction.
+
+        The pivot moves in a straight line while the rotation angle scales linearly, so the structure slides and
+        turns in place instead of swinging around the world origin.
         """
-        combined = self.get_combined_matrix()
+        _, moved_side = self._sides(base_name, image_name, require_different=True)
 
-        return combined if self.inverse else self._rigid_inv(combined)
+        base_display = self._oriented(self.get_base_matrix(), moved_side)
+        full_display = self._oriented(self.get_combined_matrix(), moved_side)
+        motion = full_display @ self._rigid_inv(base_display)
+        if fraction >= 1.0:
+            return motion
 
-    def get_view_center(self, plane, position):
-        """Pivot in the widget's view coords (pixel centers at integers, matching the -0.5 placement).
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
-        >>> rigid.get_view_center(...)
-        """
-        grid = Data.image[self.current_ref].display.get_grid(plane, position)
-        d = self.get_center(plane, position) - grid['origin']
+        fraction = max(float(fraction), 0.0)
+        c = self._displayed_pivot(base_display, moved_side)
+        d = motion[:3, :3] @ c + motion[:3, 3] - c          # how far the pivot travels
+
+        partial = np.identity(4)
+        partial[:3, :3] = Rotation.from_rotvec(fraction * Rotation.from_matrix(motion[:3, :3]).as_rotvec()).as_matrix()
+        partial[:3, 3] = c + fraction * d - partial[:3, :3] @ c
+
+        return partial
+
+    def get_view_center(self, plane, position, base_name=None, image_name=None):
+        """Center in the base widget's view coords (pixel centers at integers, matching the -0.5 placement)."""
+        base_name = self.reference.image_name if base_name is None else base_name
+
+        grid = Data.image[base_name].display.get_grid(plane, position)
+        d = self.get_center(base_name, image_name, plane, position) - grid['origin']
 
         return float(d @ grid['x_axis']) / grid['sx'], float(d @ grid['y_axis']) / grid['sy']
 
-    def get_vtk_matrix(self):
-        """For actor.SetUserMatrix on current_mov's ROI actors (or pyvista: actor.user_matrix = ...).
-        
+    def get_vtk_matrix(self, base_name=None, image_name=None):
+        """For actor.SetUserMatrix on image_name's ROI actors in base_name's 3D view."""
+        return self._vtk_matrix(self.get_display_matrix(base_name, image_name))
+
+    def pair_rois(self, reference_rois, moving_rois=None):
+        """Set which reference ROI corresponds to which moving ROI (paired by position, replaces earlier pairs).
+
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
-        >>> rigid.get_vtk_matrix(...)
+        >>> rigid = mia.Rigid('CT 01', 'MR 01')
+        >>> rigid.pair_rois(['Liver', 'Kidney_R'], ['Liver_2', 'R Kidney'])
+        >>> rigid.compute_mesh_slice('Liver', 'Axial', position)      # slices 'Liver_2' on the MR
         """
-        A = self.get_display_matrix()
-        vtk_matrix = vtk.vtkMatrix4x4()
-        for i in range(4):
-            for j in range(4):
-                vtk_matrix.SetElement(i, j, A[i, j])
+        reference_rois = self._as_list(reference_rois)
+        moving_rois = list(reference_rois) if moving_rois is None else self._as_list(moving_rois)
+        if len(reference_rois) != len(moving_rois):
+            raise ValueError(f"reference_rois ({len(reference_rois)}) and moving_rois ({len(moving_rois)}) must "
+                             f"pair one-to-one.")
 
-        return vtk_matrix
-
-    def pre_alignment(self, superior=False, center=False, origin=False):
-        """Applies rapid programmatic initializations to roughly align spatial orientation metrics.
-        
-        Parameters
-        ----------
-        superior : bool, default False
-            Executes matching alignment targeting cranial top bounding parameters.
-        center : bool, default False
-            Executes concentric 3D center matching steps.
-        origin : bool, default False
-            Forces coordinate matching origins via translation offsets directly.
-        
-        Returns
-        -------
-        None
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
-        >>> rigid.pre_alignment(...)
-        """
-        if superior:
-            pass
-        elif center:
-            pass
-        elif origin:
-            self.matrix[:3, 3] = Data.image[self.moving_name].origin - Data.image[self.reference_name].origin
+        self.reference.rois = list(reference_rois)
+        self.moving.rois = list(moving_rois)
 
     def retrieve_angles(self, order='ZXY'):
-        """Extracts Euler orientation values from the active registration transformation components.
-        
-        Parameters
-        ----------
-        order : str, default 'ZXY'
-            The specific axes rotation order tracking matrix factorization.
-        
+        """Euler angles (degrees) of this registration's own step."""
+        return Rotation.from_matrix(self.matrix[:3, :3]).as_euler(order, degrees=True)
+
+    def retrieve_motion(self, base_name=None, image_name=None, order='ZXY'):
+        """This step's rotation (degrees) and the displacement of the pivot, in base_name's world.
+
         Returns
         -------
-        numpy.ndarray
-            A 3D spatial rotation angle vector formatted in degrees.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
-        >>> rigid.retrieve_angles(...)
+        angles : (3,) ndarray
+        translation : (3,) ndarray
         """
-        rotation = Rotation.from_matrix(self.matrix[:3, :3])
-        return rotation.as_euler(order, degrees=True)
+        _, moved_side = self._sides(base_name, image_name, require_different=True)
+
+        base_display = self._oriented(self.get_base_matrix(), moved_side)
+        motion = self.get_motion_matrix(base_name, image_name)
+        c = self._displayed_pivot(base_display, moved_side)
+
+        angles = Rotation.from_matrix(motion[:3, :3]).as_euler(order, degrees=True)
+        translation = motion[:3, :3] @ c + motion[:3, 3] - c
+
+        return angles, translation
 
     def retrieve_translation(self):
-        """Exposes current alignment spatial position offsets.
-        
-        Parameters
-        ----------
-        None
-        
-        Returns
-        -------
-        numpy.ndarray
-            A 3D vector coordinates array tracking translation distance variables.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
-        >>> rigid.retrieve_translation(...)
-        """
+        """Translation of this registration's own step."""
         return self.matrix[:3, 3]
 
-    def save_rigid(self, path):
-        """Serializes active internal class settings directly out into picked DataFrame file formats.
-        
-        Parameters
-        ----------
-        path : str
-            The system directory output target location to export towards.
-        
-        Returns
-        -------
-        None
-        
+    def save(self, path):
+        """Write the JSON state to a file. Written to a temporary name and swapped in, so a crash never leaves a
+        half-written file.
+
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
-        >>> rigid.save_rigid(...)
+        >>> mia.Data.rigid['CT 01_MR 01'].save('C:/Data/ct_mr.json')
         """
-        variable_names = self.__dict__.keys()
-        column_names = [name for name in variable_names if name not in ['roi', 'poi', 'display']]
+        temp = path + '.tmp'
+        with open(temp, 'w') as f:
+            f.write(self.to_json())
+        os.replace(temp, path)
 
-        df = pd.DataFrame(index=[0], columns=column_names)
-        for name in column_names:
-            df.at[0, name] = getattr(self, name)
+    def to_json(self):
+        """Compact JSON of the registration state (no images, meshes or display settings), typically under 1 KB."""
+        return json.dumps(self._record(), separators=(',', ':'))
 
-        df.to_pickle(os.path.join(path, 'info.p'))
+    def update_rotation(self, base_name=None, image_name=None, center=None, r_x=0, r_y=0, r_z=0, plane=None,
+                        position=None, axis=None, angle=None):
+        """Rotate image_name as seen on base_name, about center (default: its center on the current slice), by Euler
+        r_x/r_y/r_z (world axes, degrees) or axis + angle (degrees).
 
-    def set_current_order(self, inverse):
-        """Flips which image gets resliced. Does NOT change the registration itself, so the user can
-        toggle at any time. Callers must re-request arrays/slices and move the actor matrix to the
-        other image's ROI actors afterwards.
-        
+        The registration itself changes, so every view using it follows.
+
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
-        >>> rigid.set_current_order(...)
-        """
-        self.inverse = bool(inverse)
-        if self.inverse:
-            self.current_ref, self.current_mov = self.moving_name, self.reference_name
-        else:
-            self.current_ref, self.current_mov = self.reference_name, self.moving_name
-
-    def update_rois(self):
-        """Placeholder for future synchronized ROI updates under rigid transforms.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
-        >>> rigid.update_rois(...)
-        """
-        pass
-
-    def update_rotation(self, center=None, r_x=0, r_y=0, r_z=0, plane=None, position=None,
-                        axis=None, angle=None):
-        """Rotate about center (default: pivot on the current slice). Either Euler r_x/r_y/r_z (world axes, degrees),
-        or axis + angle (degrees) to rotate about an arbitrary world axis, e.g. an oblique view's normal.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
-        >>> rigid.update_rotation(...)
+        >>> rigid = mia.Data.rigid['CT 01_MR 01']
+        >>> rigid.update_rotation(r_z=2, plane='Axial', position=position)
+        >>> rigid.update_rotation('MR 01', 'CT 01', axis=[0, 0.7, 0.7], angle=1.5, plane='Axial', position=position)
         """
         if center is None:
-            center = self.get_center(plane=plane, position=position)
+            center = self.get_center(base_name, image_name, plane=plane, position=position)
         center = np.asarray(center, dtype=float)
 
         R = np.identity(4)
@@ -744,18 +978,19 @@ class Rigid(object):
         T_pos = np.identity(4)
         T_pos[:3, 3] = center
 
-        self._apply_display_transform(T_pos @ R @ T_neg)
+        self._apply_display_transform(T_pos @ R @ T_neg, base_name, image_name)
 
-    def update_translation(self, t_x=0, t_y=0, t_z=0):
-        """Apply a pure translation in displayed world coordinates.
-        
+    def update_translation(self, base_name=None, image_name=None, t_x=0, t_y=0, t_z=0):
+        """Translate image_name as seen on base_name, in base_name's world coordinates.
+
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
-        >>> rigid.update_translation(...)
+        >>> rigid = mia.Data.rigid['CT 01_MR 01']
+        >>> rigid.update_translation(t_x=1.5)
+        >>> rigid.update_translation('MR 01', 'CT 01', t_x=1.5)
         """
         T = np.identity(4)
         T[:3, 3] = [t_x, t_y, t_z]
 
-        self._apply_display_transform(T)
+        self._apply_display_transform(T, base_name, image_name)
