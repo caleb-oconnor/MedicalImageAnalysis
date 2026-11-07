@@ -24,7 +24,7 @@ import copy
 
 import numpy as np
 import pandas as pd
-import pyvista as pv
+import SimpleITK as sitk
 
 
 import vtk
@@ -34,7 +34,7 @@ from pydicom.uid import generate_uid
 from scipy.spatial.transform import Rotation
 
 from ..utils.rigid.icp import ICP
-from ..utils.convert.contour import MeshToContour
+from ..utils.rigid.simpleitk import RigidITK
 from ..data import Data
 
 
@@ -102,6 +102,51 @@ class Rigid(object):
         self.misc = {}
         self.rigid_name = self.add_rigid(rigid_name)
 
+    @staticmethod
+    def _matrix_to_sitk(mat, center):
+        """4x4 reference -> moving matrix to a centered sitk Euler3DTransform with the same mapping.
+
+        Centering the rotation on the image (instead of the world origin) gives the optimizer well-scaled parameters.
+        """
+        mat = np.asarray(mat, dtype=float)
+        center = np.asarray(center, dtype=float)
+
+        # Re-orthonormalize so sitk's orthogonality check never trips on accumulated float drift.
+        u, _, vt = np.linalg.svd(mat[:3, :3])
+        rotation = u @ vt
+
+        transform = sitk.Euler3DTransform()
+        transform.SetCenter(center.tolist())
+        transform.SetMatrix(rotation.ravel().tolist())
+        # sitk: T(p) = R (p - c) + c + t'. Matching R p + t gives t' = t - c + R c.
+        transform.SetTranslation((mat[:3, 3] - center + rotation @ center).tolist())
+
+        return transform
+
+    @staticmethod
+    def _rigid_inv(mat):
+        """Exact inverse of a rigid 4x4 (avoids drift from repeated np.linalg.inv)."""
+        inv = np.identity(4)
+        inv[:3, :3] = mat[:3, :3].T
+        inv[:3, 3] = -mat[:3, :3].T @ mat[:3, 3]
+        return inv
+
+    @staticmethod
+    def _sitk_to_matrix(transform):
+        """Centered sitk rigid transform (Euler / Versor) to a 4x4 reference -> moving matrix."""
+        if type(transform) is sitk.Transform:
+            transform = transform.Downcast()
+
+        rotation = np.asarray(transform.GetMatrix(), dtype=float).reshape(3, 3)
+        center = np.asarray(transform.GetCenter(), dtype=float)
+        translation = np.asarray(transform.GetTranslation(), dtype=float)
+
+        mat = np.identity(4)
+        mat[:3, :3] = rotation
+        mat[:3, 3] = translation + center - rotation @ center
+
+        return mat
+
     def _apply_display_transform(self, T):
         """
         Apply T (in displayed world) to the resliced image: A_new = T @ A, then solve back for self.matrix so
@@ -112,13 +157,23 @@ class Rigid(object):
 
         self.matrix = combined_new @ np.linalg.inv(self.combo_matrix)
 
-    @staticmethod
-    def _rigid_inv(mat):
-        """Exact inverse of a rigid 4x4 (avoids drift from repeated np.linalg.inv)."""
-        inv = np.identity(4)
-        inv[:3, :3] = mat[:3, :3].T
-        inv[:3, 3] = -mat[:3, :3].T @ mat[:3, 3]
-        return inv
+    def _build_itk(self, reference_mask=None, moving_mask=None, images=True):
+        """Create a RigidITK helper from the reference/moving images (and optional (z, y, x) mask arrays)."""
+        helper = RigidITK()
+        for name, is_reference, mask in ((self.reference_name, True, reference_mask),
+                                         (self.moving_name, False, moving_mask)):
+            image = Data.image[name]
+            # image.matrix rows are the axes; sitk wants the axes as columns.
+            direction = np.asarray(image.matrix, dtype=float).T
+
+            if images:
+                helper.create_sitk_image(image.array, image.origin, image.spacing, direction,
+                                         reference=is_reference)
+            if mask is not None:
+                helper.create_sitk_image(mask, image.origin, image.spacing, direction,
+                                         reference=is_reference, mask=True)
+
+        return helper
 
     def add_rigid(self, rigid_name):
         """Saves the active registration initialization instances into globally accessible data scopes.
@@ -201,149 +256,160 @@ class Rigid(object):
 
         return np.round(spacing[xi] / spacing[yi], 2)
 
-    def compute_icp_vtk(self, source_mesh, target_mesh, distance=1e-3, iterations=100, src_frac=0.1, min_pts=1000,
-                        max_pts=20000, com_matching=True, inverse=False, center=None):
-        """Runs an Iterative Closest Point algorithm on mesh pairings via standard VTK backends.
-        
+    def compute_registration(self, method='icp_point', roi_name=None, reference_mesh=None, moving_mesh=None,
+                             reference_mask=None, moving_mask=None, reference_points=None, moving_points=None,
+                             use_current=True, **kwargs):
+        """Runs a rigid registration and stores the result in ``self.matrix``.
+
+        Every method solves for the full reference -> moving world transform. The ``combo_matrix`` is then factored
+        out, so ``self.matrix @ self.combo_matrix`` is always the answer. ``inverse`` / ``set_current_order`` only
+        decide which image is displayed resliced, so registration ignores them.
+
         Parameters
         ----------
-        source_mesh : pyvista.PolyData
-            The stable source tracking spatial point cloud dataset mesh.
-        target_mesh : pyvista.PolyData
-            The floating destination alignment point cloud mesh tracking updates.
-        distance : float, default 1e-5
-            The threshold constraint tracking target minimum variance steps.
-        iterations : int, default 1000
-            The maximal computational cycle threshold iterations to try.
-        landmarks : array_like, optional
-            Explicit point tracking paired values ensuring localized regional priorities.
-        com_matching : bool, default True
-            Enables alignment matching starting values using Center of Mass matching parameters first.
-        inverse : bool, default False
-            If True, flips matrix operations inside target registration workflows.
-        center : str, optional
-            Sets specific origin balancing locations. If set to 'image', recalibrates around centers.
-        
+        method : {'itk', 'itk_mask', 'landmark', 'icp_point', 'icp_plane', 'icp_vtk'}, default 'itk'
+            * 'itk'       : intensity registration, ``RigidITK.rigid`` (masks restrict the metric only).
+            * 'itk_mask'  : shape registration of binary masks via signed distance maps, ``RigidITK.rigid_mask``.
+            * 'landmark'  : closed-form paired-point fit, ``RigidITK.landmark``.
+            * 'icp_point' : Open3D point-to-point ICP, ``ICP.compute_o3d(method='point')``.
+            * 'icp_plane' : Open3D point-to-plane ICP, ``ICP.compute_o3d(method='plane')``.
+            * 'icp_vtk'   : VTK ICP, ``ICP.compute_vtk``.
+        roi_name : str, optional
+            ICP only. Uses this ROI's mesh on both images when the meshes are not passed explicitly.
+        reference_mesh, moving_mesh : pyvista.PolyData, optional
+            ICP only. Meshes in their own image's world coordinates. These override ``roi_name``. They are not
+            modified.
+        reference_mask, moving_mask : numpy.ndarray, optional
+            ITK only. Binary (z, y, x) arrays on the reference / moving image grids. Required for 'itk_mask'.
+            Optional for 'itk', where they restrict where the metric is evaluated.
+        reference_points, moving_points : (N, 3) array_like, optional
+            'landmark' only. Paired world points in (x, y, z) order, matched row by row.
+        use_current : bool, default True
+            Start from the current ``self.matrix @ self.combo_matrix`` when it is not identity, so you can do a
+            manual rough alignment or chain methods. Otherwise each backend uses its own initializer (COM matching
+            for ICP, the Geometry/Moments initializer for ITK).
+        **kwargs
+            Passed straight to the backend function. Anything not given uses that function's default.
+            * 'icp_point' / 'icp_plane' : distance, iterations, rmse, fitness, com_matching, src_frac, tgt_frac,
+              min_pts, max_pts, seed
+            * 'icp_vtk' : distance, iterations, src_frac, min_pts, max_pts, com_matching
+            * 'itk' : transform, initializer, metric, bins, radius, sampling, iterations, learning_rate, min_step,
+              relaxation, shrink_factors, smoothing_sigmas, cross_modality, normalize, histogram_match
+            * 'itk_mask' : transform, initializer, band, sampling, iterations, learning_rate, min_step, relaxation,
+              shrink_factors, smoothing_sigmas
+            * 'landmark' : transform, weights
+
         Returns
         -------
-        None
-        
+        dict
+            Diagnostics from the backend.
+            * ICP (Open3D): fitness, inlier_rmse, correspondences.
+            * ICP (VTK): mean_distance, iterations.
+            * itk / itk_mask: metric_value, stop_condition, iterations.
+            * landmark: fre_rms, fre_max, residuals.
+
+        Raises
+        ------
+        ValueError
+            If the method is unknown or its required inputs are missing.
+        TypeError
+            If ``inverse`` is passed, or a kwarg does not belong to the chosen backend.
+
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
-        >>> rigid.compute_icp_vtk(...)
+        >>> rigid = mia.Rigid('CT 01', 'MR 01')
+
+        Default: intensity registration with all RigidITK defaults (multimodal, so use mutual information)
+
+        >>> info = rigid.compute_registration(metric='MI')
+        >>> info['stop_condition']
+
+        Intensity registration focused on the liver
+
+        >>> liver_ct = mia.Data.image['CT 01'].roi['Liver'].create_mask()    # (z, y, x) binary arrays (your ROI mask source)
+        >>> rigid.compute_registration('itk', reference_mask=liver_ct, metric='MI', sampling=0.25)
+
+        ICP on an ROI surface, overriding only a few defaults
+
+        >>> info = rigid.compute_registration('icp_plane', roi_name='Liver', distance=5, iterations=100)
+        >>> info['fitness'], info['inlier_rmse']
+        >>> rigid.compute_registration('icp_vtk', roi_name='Pelvis', src_frac=0.2, iterations=200)
+
+        Explicit meshes instead of an ROI name
+
+        >>> ref_mesh = mia.Data.image['CT 01'].roi['Femur'].mesh
+        >>> mov_mesh = mia.Data.image['MR 01'].roi['Femur'].mesh
+        >>> rigid.compute_registration('icp_point', reference_mesh=ref_mesh, moving_mesh=mov_mesh, distance=10)
+
+        Coarse-to-fine chain (each step seeds the next through use_current)
+
+        >>> ref_pts = [[12.1, -40.3, 101.0], [55.0, -38.2, 98.4], [30.2, 10.7, 140.9]]
+        >>> mov_pts = [[10.4, -35.9, 96.2], [53.1, -34.0, 94.8], [28.9, 15.2, 136.1]]
+        >>> rigid.compute_registration('landmark', reference_points=ref_pts, moving_points=mov_pts)
+        >>> rigid.compute_registration('itk_mask', reference_mask=liver_ct, moving_mask=liver_mr, band=30)
+        >>> rigid.compute_registration('itk', reference_mask=liver_ct, metric='MI')
+
+        Ignore the current alignment and let the backend initialize itself
+
+        >>> rigid.compute_registration('icp_point', roi_name='Liver', use_current=False)
         """
-        self.inverse = inverse
-        if self.inverse:
-            target_mesh.transform(self.matrix @ self.combo_matrix, inplace=True)
-        else:
-            target_mesh.transform(np.linalg.inv(self.matrix @ self.combo_matrix), inplace=True)
+        if 'inverse' in kwargs:
+            raise TypeError("inverse is not a registration option; use set_current_order to change the display.")
 
-        icp = ICP(source_mesh, target_mesh)
-        icp.compute_vtk(distance=distance, iterations=iterations, src_frac=src_frac, min_pts=min_pts,
-                        max_pts=max_pts, com_matching=com_matching, inverse=inverse)
+        start = self.get_combined_matrix()
+        seed = use_current and not np.allclose(start, np.identity(4))
 
-        if center == 'image':
-            R_icp = np.asarray(icp.get_matrix(), dtype=float)
-            old_center = np.array([0, 0, 0], dtype=float)
-            new_center = np.array(Data.image[self.moving_name].get_center(), dtype=float)
+        if method in ('icp_point', 'icp_plane', 'icp_vtk'):
+            if roi_name is not None:
+                if reference_mesh is None:
+                    reference_mesh = Data.image[self.reference_name].roi[roi_name].mesh
+                if moving_mesh is None:
+                    moving_mesh = Data.image[self.moving_name].roi[roi_name].mesh
+            if reference_mesh is None or moving_mesh is None:
+                raise ValueError(f"'{method}' needs roi_name or both reference_mesh and moving_mesh.")
 
-            T_neg = np.eye(4)
-            T_neg[:3, 3] = -new_center
-            T_pos = np.eye(4)
-            T_pos[:3, 3] = new_center
+            # source = reference, target = moving  ->  ICP matrix is reference -> moving.
+            icp = ICP(reference_mesh, moving_mesh, matrix=start if seed else None)
+            if method == 'icp_vtk':
+                icp.compute_vtk(**kwargs)
+            else:
+                icp.compute_o3d(method='point' if method == 'icp_point' else 'plane', **kwargs)
 
-            extra_rotation = np.eye(4)
-            old_center_h = np.hstack([old_center, 1])
-            new_center_h = np.hstack([new_center, 1])
+            combined = icp.get_matrix()
+            info = icp.get_metrics()
 
-            R_total = extra_rotation @ R_icp
-            transformed_old_center = R_total @ old_center_h
-            transformed_new_center = R_total @ new_center_h
+        elif method in ('itk', 'itk_mask'):
+            helper = self._build_itk(reference_mask, moving_mask, images=(method == 'itk'))
+            initial = None
+            if seed:
+                initial = self._matrix_to_sitk(start, Data.image[self.reference_name].get_center())
 
-            correction = (old_center_h - transformed_old_center) - (new_center_h - transformed_new_center)
-            T_corr = np.eye(4)
-            T_corr[:3, 3] = correction[:3]
-            self.matrix = T_pos @ extra_rotation @ R_icp @ T_neg @ T_corr
+            run = helper.rigid if method == 'itk' else helper.rigid_mask
+            # sitk convention is pull-back (reference point -> moving point), the same as self.matrix.
+            transform, info = run(initial_transform=initial, return_info=True, **kwargs)
+            combined = self._sitk_to_matrix(transform)
 
-        else:
-            self.matrix = icp.get_matrix()
+        elif method == 'landmark':
+            if reference_points is None or moving_points is None:
+                raise ValueError("'landmark' needs reference_points and moving_points.")
 
-    def compute_o3d(self, source_mesh, target_mesh, distance=10, iterations=50, rmse=1e-6, fitness=1e-6, method='point',
-                    com_matching=True, inverse=False, src_frac=0.1, tgt_frac=1.0, min_pts=1000, max_pts=20000, seed=0,
-                    center=None):
-        """Runs an Iterative Closest Point algorithm on mesh pairings via an Open3D computational backend.
-        
-        Parameters
-        ----------
-        source_mesh : pyvista.PolyData
-            The stable source tracking spatial point cloud dataset mesh.
-        target_mesh : pyvista.PolyData
-            The floating destination alignment point cloud mesh tracking updates.
-        distance : float, default 10
-            The maximum correspondence search radius distance parameter.
-        iterations : int, default 1000
-            The maximal computational cycle threshold iterations to try.
-        rmse : float, default 1e-7
-            Root Mean Squared Error divergence tracking constraints.
-        fitness : float, default 1e-7
-            Overlapping verification matching target constraint values.
-        method : str, default 'point'
-            The surface approach metric to execute (e.g. 'point' or 'plane').
-        com_matching : bool, default True
-            Enables alignment matching starting values using Center of Mass matching parameters first.
-        inverse : bool, default False
-            If True, flips matrix operations inside target registration workflows.
-        center : str, optional
-            Sets specific origin balancing locations. If set to 'image', recalibrates around centers.
-        
-        Returns
-        -------
-        None
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Data.rigid[mia.Data.rigid_list()[0]]
-        >>> rigid.compute_o3d(...)
-        """
-        target_mesh.transform(self.matrix @ self.combo_matrix, inplace=True)
-
-        icp = ICP(source_mesh, target_mesh)
-        icp.compute_o3d(distance=distance, iterations=iterations, rmse=rmse, fitness=fitness, method=method,
-                        com_matching=com_matching, inverse=inverse, src_frac=src_frac, tgt_frac=tgt_frac,
-                        min_pts=min_pts, max_pts=max_pts, seed=seed)
-
-        if center == 'image':
-            R_icp = np.asarray(icp.get_matrix(), dtype=float)
-            old_center = np.array([0, 0, 0], dtype=float)
-            new_center = np.array(Data.image[self.moving_name].get_center(), dtype=float)
-
-            T_neg = np.eye(4)
-            T_neg[:3, 3] = -new_center
-            T_pos = np.eye(4)
-            T_pos[:3, 3] = new_center
-
-            extra_rotation = np.eye(4)
-            old_center_h = np.hstack([old_center, 1])
-            new_center_h = np.hstack([new_center, 1])
-
-            R_total = extra_rotation @ R_icp
-            transformed_old_center = R_total @ old_center_h
-            transformed_new_center = R_total @ new_center_h
-
-            correction = (old_center_h - transformed_old_center) - (new_center_h - transformed_new_center)
-            T_corr = np.eye(4)
-            T_corr[:3, 3] = correction[:3]
-            self.matrix = T_pos @ extra_rotation @ R_icp @ T_neg @ T_corr
+            transform, info = RigidITK().landmark(reference_points, moving_points, return_info=True, **kwargs)
+            combined = self._sitk_to_matrix(transform)
 
         else:
-            self.matrix = icp.get_matrix()
+            raise ValueError(f"Unknown method: {method}")
 
-    def compute_mesh_slice(self, roi_name, plane, position, offset=0, return_pixel=True):
-        """Slice one of current_mov's ROIs in the same pixel space as compute_array.
-        
+        # Factor out the earlier stage so that self.matrix @ self.combo_matrix == combined.
+        self.matrix = np.asarray(combined, dtype=float) @ self._rigid_inv(self.combo_matrix)
+
+        return info
+
+    def compute_mesh_slice(self, roi_name, plane, position, offset=0, return_pixel=True, use_cache=True):
+        """Slice one of current_mov's ROIs in the same pixel space as compute_array. Cached per
+        ROI (see Roi.compute_mesh_slice); pass use_cache=False while the user is actively dragging
+        rotate/translate, since everyframe has a new matrix and would only push useful scroll
+        entries out of the LRU.
         Examples
         --------
         >>> import medicalimageanalysis as mia
@@ -356,7 +422,7 @@ class Rigid(object):
 
         return roi.compute_mesh_slice(origin=position, plane=plane, offset=offset,
                                       rigid_matrix=self.get_display_matrix(),
-                                      return_pixel=return_pixel, grid=grid)
+                                      return_pixel=return_pixel, grid=grid, use_cache=use_cache)
 
     def copy_roi(self, roi_name=None):
         """Clones and projects an ROI structural mesh model alignment into different volume spaces.
