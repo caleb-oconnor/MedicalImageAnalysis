@@ -52,7 +52,7 @@ import psutil
 from pathlib import Path
 from typing import Optional
 
-from .read import DicomReader, MhdReader, StlReader, VtkReader, ThreeMfReader
+from .read import DicomReader, MhdReader, ThreeMfReader
 
 
 def check_memory(files: dict[str, list[str]]) -> float:
@@ -446,17 +446,3 @@ def read_mhd(
 
         # Load image into system
         mhd_reader.load()
-
-
-# def read_stl(self, files=None, create_image=False, match_image=None):
-#     stl_reader = StlReader(self)
-#     if files is not None:
-#         stl_reader.input_files(files)
-#     stl_reader.load()
-#
-#
-# def read_vtk(self, files=None, create_image=False, match_image=None):
-#         vtk_reader = VtkReader(self)
-#         if files is not None:
-#             vtk_reader.input_files(files)
-#         vtk_reader.load()

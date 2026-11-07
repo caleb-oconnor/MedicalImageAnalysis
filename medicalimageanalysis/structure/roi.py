@@ -25,11 +25,11 @@ from collections import OrderedDict
 import numpy as np
 import SimpleITK as sitk
 
-
+from ..utils.roi.discrete_converters import ContourToDiscreteMesh, MaskToContour
+from ..utils.mesh.slicer import MeshSlicer
 from ..utils.mesh.surface import Refinement, compute_components
 from ..utils.roi.to_mask import contours_to_mask
 from ..utils.roi.to_mesh import contours_to_mesh
-from ..utils.roi.discrete_converters import ContourToDiscreteMesh, ContourToMask, MaskToContour, MeshToContour
 
 
 def random_color(rgb_255=True):
@@ -594,6 +594,8 @@ class Roi(object):
             If True, calculates and formats structural data outputs as pixel indexes.
         grid: image.display.get_grid(plane, origin)
             Grid defines the plane in DISPLAYED world. Default: this image's own view.
+        use_cache: bool
+            If True stays in memory
         
         Returns
         -------
@@ -611,7 +613,7 @@ class Roi(object):
         if self.mesh is None:
             return ([], []) if return_pixel else (None, None)
         elif self.cutter is None:
-            self.cutter = MeshToContour(self.mesh)
+            self.cutter = MeshSlicer(self.mesh)
 
         rigid_matrix = rigid_matrix if rigid_matrix is not None else np.eye(4)
 

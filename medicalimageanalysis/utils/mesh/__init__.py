@@ -7,4 +7,4 @@ Examples
 >>> mask = np.zeros((8, 32, 32), dtype=np.uint8)
 """
 from .volume import Volume
-from .surface import Refinement, expansion, surface_boundary
+from .surface import Refinement
