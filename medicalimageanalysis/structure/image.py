@@ -1,27 +1,50 @@
-"""Morfeus lab
-The University of Texas
+"""The University of Texas
 MD Anderson Cancer Center
 Author - Caleb O'Connor
 Email - csoconnor@mdanderson.org
 
 Description:
-    Medical imaging visualization library handling coordinate transformations,
-    off-axis slice reslicing, and ROI/POI annotations for CT/MR datasets.
+    Image volumes of any modality (CT, MR, PT, US, X-ray, tomo) with their DICOM tags, geometry, ROIs and POIs, plus
+    the display helper that reslices them into axis-aligned or oblique 2D views. Images are saved either encrypted
+    (pickled metadata + compressed array) or unencrypted (numpy/pickle folders).
+
+    Conventions
+    -----------
+    * Every image array is (z, y, x), including 2D X-ray (z = 1) and ultrasound frames. Color data is (z, y, x, c).
+      ``image.dimensions`` follows the array: (z, y, x).
+    * Origin, spacing and world points are (x, y, z). Pixel indices given to ``compute_position`` and returned by
+      ``compute_pixel`` are (x, y, z) too.
+    * ``image.matrix`` rows are the image axes in world coordinates. VTK and SimpleITK want columns, so they get the
+      transpose.
+    * ``Display.AXES[plane]`` is (x index, y index, normal index) into (x, y, z): Axial (0, 1, 2), Sagittal (1, 2, 0),
+      Coronal (0, 2, 1).
+    * A plane's ``position`` is the world point of its slice's top-left pixel, not the slice center.
+    * ``Display.matrix`` is the shared view rotation: every plane of an image turns with it. The rows of
+      ``image.matrix @ display.matrix.T`` are the view axes.
+    * ``rigid_matrix`` (4x4) maps this image's native world to the displayed world, as returned by
+      ``Rigid.get_display_matrix``. Identity or None = no registration.
 
 Structure:
-    - Display: Manages slice viewing planes, coordinate transforms, and VTK reslicing.
-    - Image: Holds volumetric arrays, metadata tags, and geometric properties.
+    - _fused_oblique_sample_kernel: numba kernel that trilinearly samples one oblique slice.
+    - Display: slice positions, shared view rotation, crosshair lines and reslicing for one image. Built by Image.
+    - Image: array, DICOM tags, geometry, ROIs/POIs and saving/loading.
 
 Examples
 --------
 >>> import medicalimageanalysis as mia
 >>> mia.read_mhd(file='C:/Data/scan.mhd', modality='CT')
 >>> image = mia.Data.image[mia.Data.image_list()[0]]
+>>> res = image.display.compute_array('Axial', image.display.position['Axial'])
+>>> res['array'].shape
+
+Rotate every view of the image 10 degrees about z, then redraw
+
+>>> image.display.update_rotation(r_z=10)
+>>> res = image.display.compute_array('Sagittal', image.display.position['Sagittal'])
 """
 
 import os
 import copy
-import time
 import blosc2
 import pickle
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -52,9 +75,10 @@ def _fused_oblique_sample_kernel(volume, h, w, sx, sy,
                                  yax0, yax1, yax2,  # slice y_axis (unit vector, world)
                                  img_ox, img_oy, img_oz,  # image.origin (world), rigid already folded in
                                  Minv,  # 3x3 world->index rotation (rows = index axes in world), rigid folded in
-                                 isp0, isp1, isp2,  # image voxel spacing (i, j, k)
+                                 isp0, isp1, isp2,  # image voxel spacing (x, y, z)
                                  background):
-    """
+    """(h, w) float32 slice of a (z, y, x) volume, sampled trilinearly on an oblique grid.
+
     One pass per output pixel: builds the world-space sampling point, maps it into the volume's own voxel space, and
     trilinearly samples, all as scalar math inside the compiled loop (no intermediate numpy arrays).
 
@@ -81,6 +105,7 @@ def _fused_oblique_sample_kernel(volume, h, w, sx, sy,
             ry = wy - img_oy
             rz = wz - img_oz
 
+            # ii, jj, kk = fractional x, y, z index
             ii = (Minv[0, 0] * rx + Minv[0, 1] * ry + Minv[0, 2] * rz) / isp0
             jj = (Minv[1, 0] * rx + Minv[1, 1] * ry + Minv[1, 2] * rz) / isp1
             kk = (Minv[2, 0] * rx + Minv[2, 1] * ry + Minv[2, 2] * rz) / isp2
@@ -122,28 +147,42 @@ def _fused_oblique_sample_kernel(volume, h, w, sx, sy,
 
 
 class Display(object):
-    """Display helper for axis-aligned and oblique reslicing.
-    
-    The class tracks the current shared rotation state, plane positions, and
-    sampling helpers required to render 2D views from a 3D image volume.
-    
+    """Reslicing and view state for one image: slice positions, the shared view rotation and crosshair lines.
+
+    Built by :class:`Image`, not created directly. Each call names its own plane and position, so any number of widgets
+    can share one Display.
+
+    Parameters
+    ----------
+    image : Image
+        The image this display reslices.
+
+    Attributes
+    ----------
+    matrix : (3, 3) ndarray
+        Shared view rotation, rebuilt from rotation_totals (Euler 'xyz'). Identity = native orientation.
+    rotation_totals : (3,) ndarray
+        Total rotation about x, y, z in degrees.
+    rotation_center : (3,) ndarray
+        World pivot every plane passes through while rotating.
+    crosshair : (3,) ndarray
+        World point where the crosshair lines cross.
+    position : dict
+        Plane name -> world position (top-left corner) of that plane's current slice.
+    oblique_shape : dict
+        Plane name -> (h, w) of the resliced output grid.
+
     Examples
     --------
     >>> import medicalimageanalysis as mia
-    >>> mia.read_mhd(file='C:/Data/scan.mhd', modality='CT')
-    >>> display = image.display
+    >>> display = mia.Data.image['CT 01'].display
+    >>> res = display.compute_array('Axial', display.position['Axial'])
     """
+    AXES = {'Axial':    (0, 1, 2),
+            'Sagittal': (1, 2, 0),
+            'Coronal':  (0, 2, 1)}
 
     def __init__(self, image):
-        """Initialize display state and cache geometry derived from an :class:`Image`.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> display = image.display
-        >>> display.__init__(...)
-        """
         self.image = image
         self.matrix = np.eye(3)
         self.spacing = copy.deepcopy(image.spacing)
@@ -152,12 +191,8 @@ class Display(object):
         self.rotation_center = np.asarray(image.get_center(), dtype=float)
         self.crosshair = self.rotation_center.copy()
 
-        self.position = {'Axial':    self.image.compute_initial_origin('Axial'),
-                         'Sagittal': self.image.compute_initial_origin('Sagittal'),
-                         'Coronal':  self.image.compute_initial_origin('Coronal')}
-        self.axes = {'Axial':    (0, 1, 2),
-                     'Sagittal': (1, 2, 0),
-                     'Coronal':  (0, 2, 1)}
+        self.position = {plane: self.image.compute_initial_origin(plane) for plane in self.AXES}
+        self.axes = self.AXES     # lowercase alias for callers that read display.axes (e.g. rigid.py)
 
         # Native direction matrix is orthonormal -> inverse == transpose. Cache it,
         # plus float32 versions of everything the fused kernel needs as scalars, once.
@@ -171,68 +206,15 @@ class Display(object):
 
         self._warm_up_kernel()
 
-    @staticmethod
-    def _axes_from_normal(normal, up=(0.0, 1.0, 0.0)):
-        """Escape hatch: build an orthonormal basis from a bare normal, for reference views that intentionally ignore
-        shared rotation."""
-
-        normal = np.asarray(normal, dtype=float)
-        normal = normal / np.linalg.norm(normal)
-        up = np.asarray(up, dtype=float)
-
-        if abs(np.dot(normal, up)) > 0.999:
-            up = np.array([1.0, 0.0, 0.0])
-
-        x_axis = np.cross(up, normal); x_axis /= np.linalg.norm(x_axis)
-        y_axis = np.cross(normal, x_axis)
-
-        return np.stack([x_axis, y_axis, normal], axis=1)   # columns = (x, y, normal)
-
-    @staticmethod
-    def _build_vtk_slice_image(array_2d, origin_3d, direction_matrix_3x3, spacing_2d):
-        """Wrap a 2D NumPy slice as a ``vtkImageData`` object."""
-        vtk_img = vtk.vtkImageData()
-
-        h, w = array_2d.shape
-        vtk_img.SetDimensions(w, h, 1)
-        vtk_img.SetSpacing(spacing_2d[0], spacing_2d[1], 1.0)
-        vtk_img.SetOrigin(origin_3d[0], origin_3d[1], origin_3d[2])
-        vtk_img.SetDirectionMatrix(direction_matrix_3x3.ravel())
-        vtk_scalars = numpy_support.numpy_to_vtk(array_2d.ravel(order="C"), deep=False, array_type=vtk.VTK_FLOAT)
-        vtk_img.GetPointData().SetScalars(vtk_scalars)
-
-        return vtk_img
-
-    def _compute_plane_geometry_for_lines(self, plane):
-        """
-        origin = rotation_center (the shared pivot every plane passes through), NOT the widget's top-left reslice
-        origin. x_axis/y_axis/normal come live from self.matrix, so lines rotate correctly with any applied rotation.
-        """
-        xi, yi, ni = self.axes[plane]
-        effective = self.image.matrix @ self.matrix.T
-        return {'origin': self.rotation_center,
-                'x_axis': effective[xi],
-                'y_axis': effective[yi],
-                'normal': effective[ni],
-                'spacing': (self.spacing[xi], self.spacing[yi])}
-
-    def _get_axis_aligned_array(self, plane, position):
-        """Return a native slice directly from the stored volume when no reslicing is needed."""
-        pixel = self.image.compute_pixel(position)
-        x_idx, y_idx, z_idx = (int(round(pixel[0])), int(round(pixel[1])), int(round(pixel[2])))
-
-        if plane == 'Axial' and 0 <= z_idx < self.image.array.shape[0]:
-            return self.image.array[z_idx, :, :]
-        elif plane == 'Coronal' and 0 <= y_idx < self.image.array.shape[1]:
-            return self.image.array[:, y_idx, :]
-        elif  0 <= x_idx < self.image.array.shape[2]:
-            return self.image.array[:, :, x_idx]
-
-        return None
-
+    # ------------------------------------------------------------------------------------------------------------
+    # Static methods
+    # ------------------------------------------------------------------------------------------------------------
     @staticmethod
     def _intersection_line(active_plane, crossing_plane):
-        """Compute the line where two slice planes intersect in view coordinates."""
+        """Line where crossing_plane cuts active_plane, in active_plane's pixel coordinates.
+
+        Returns {'pos': (col, row), 'angle': degrees}, or None when the planes are parallel.
+        """
         n1, p1 = active_plane['normal'], active_plane['origin']
         n2, p2 = crossing_plane['normal'], crossing_plane['origin']
         u = np.cross(n1, n2)
@@ -253,11 +235,57 @@ class Display(object):
 
         return {'pos': (col0, row0), 'angle': np.degrees(np.arctan2(drow, dcol))}
 
-    def _warm_up_kernel(self):
+    @staticmethod
+    def _to_vtk_scalars(array):
+        """2D slice to VTK point scalars; a color slice (h, w, c) keeps its c components."""
+        array = np.ascontiguousarray(array)
+        flat = array.reshape(-1, array.shape[2]) if array.ndim == 3 else array.ravel(order="C")
+
+        return numpy_support.numpy_to_vtk(flat)
+
+    @staticmethod
+    def grid_with_spacing(grid, sx, sy):
+        """Same corner, axes and physical extent as grid, with a different pixel size.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> display = mia.Data.image['CT 01'].display
+        >>> grid = display.get_grid('Axial', display.position['Axial'])
+        >>> fine = mia.Display.grid_with_spacing(grid, 0.5, 0.5)
         """
-        Numba JIT-compiles a separate specialization per input dtype (int16 vs float32 vs whatever) and layout. Trigger
-        that compile now, on a throwaway 2x2 array of the SAME dtype as the real volume (and a strided channel view for
-        color), so the ~1-1.5s one-time cost happens at construction instead of on the user's first scroll/rotate.
+        h, w = grid['shape']
+        new = dict(grid)
+        new['sx'], new['sy'] = float(sx), float(sy)
+        new['shape'] = (int(np.floor((h - 1) * grid['sy'] / sy + 1e-6)) + 1,
+                        int(np.floor((w - 1) * grid['sx'] / sx + 1e-6)) + 1)
+
+        return new
+
+    # ------------------------------------------------------------------------------------------------------------
+    # Private methods
+    # ------------------------------------------------------------------------------------------------------------
+    def _get_axis_aligned_array(self, plane, position):
+        """Native slice straight from the stored volume (no reslicing), or None when position is outside it."""
+        pixel = self.image.compute_pixel(position)
+        x_idx, y_idx, z_idx = (int(round(pixel[0])), int(round(pixel[1])), int(round(pixel[2])))
+        nz, ny, nx = self.image.array.shape[:3]
+
+        if plane == 'Axial':
+            return self.image.array[z_idx, :, :] if 0 <= z_idx < nz else None
+        if plane == 'Coronal':
+            return self.image.array[:, y_idx, :] if 0 <= y_idx < ny else None
+        if plane == 'Sagittal':
+            return self.image.array[:, :, x_idx] if 0 <= x_idx < nx else None
+
+        return None
+
+    def _warm_up_kernel(self):
+        """Compile the sampling kernel now instead of on the first scroll/rotate.
+
+        Numba compiles a separate specialization per input dtype and layout. Running it once on a throwaway 2x2 array
+        of the SAME dtype as the real volume (and a strided channel view for color) moves the ~1-1.5 s one-time cost to
+        construction.
         """
         if self.image.array.ndim == 4:
             dummy_vol = np.zeros((2, 2, 2, 3), dtype=self.image.array.dtype)[..., 0]
@@ -272,49 +300,84 @@ class Display(object):
             np.float32(0), np.float32(0), np.float32(0),
             M, np.float32(1), np.float32(1), np.float32(1), 0.0)
 
+    # ------------------------------------------------------------------------------------------------------------
+    # Public methods
+    # ------------------------------------------------------------------------------------------------------------
     def compute_array(self, plane, position, matrix_override=None, rigid_matrix=None, grid=None, as_array=True,
                       as_vtk=False, copy_array=False, force_reslice=False, background=-3001.0):
-        """plane, position supplied by the caller each call. Orientation comes from self.matrix (shared) unless
-        matrix_override is given. If grid is given (from a reference Display's get_grid / grid_with_spacing), it fully
-        defines the output pixels and this Display only supplies its volume (+ rigid_matrix).
-        
+        """2D slice of this image for one plane, axis-aligned when possible, otherwise resliced.
+
+        Parameters
+        ----------
+        plane : str
+            'Axial', 'Sagittal' or 'Coronal'.
+        position : array_like
+            World position (top-left corner) of the slice.
+        matrix_override : (3, 3) array_like, optional
+            View rotation to use instead of the shared ``self.matrix``.
+        rigid_matrix : (4, 4) array_like, optional
+            This image's native world -> displayed world (e.g. ``Rigid.get_display_matrix``).
+        grid : dict, optional
+            Output pixel grid from another Display's :meth:`get_grid` / :meth:`grid_with_spacing`. When given, it fully
+            defines the output pixels and this Display only supplies its volume.
+        as_array, as_vtk : bool
+            Return the slice as a numpy array, a vtkImageData, or both. Color slices keep their channels in VTK.
+        copy_array : bool, default False
+            Copy the array. The axis-aligned path otherwise returns a view into the volume.
+        force_reslice : bool, default False
+            Always use the reslice kernel, even when a native slice would do.
+        background : float, default -3001.0
+            Value outside the volume (0 for color).
+
+        Returns
+        -------
+        dict
+            'dimensions', 'spacing', 'pixel_spacing', 'x_axis', 'y_axis', 'normal', 'origin', 'grid', plus 'array'
+            and/or 'vtk_image'. A slice outside the volume is filled with background (never None).
+
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> display = image.display
-        >>> display.compute_array('Axial', image.get_center())
+        >>> display = mia.Data.image['CT 01'].display
+        >>> res = display.compute_array('Axial', display.position['Axial'])
+        >>> res = display.compute_array('Coronal', display.position['Coronal'], as_vtk=True)
         """
         m = matrix_override if matrix_override is not None else self.matrix
         has_rigid = rigid_matrix is not None and not np.allclose(rigid_matrix, np.eye(4), atol=1e-9)
         rigid_matrix = rigid_matrix if rigid_matrix is not None else np.eye(4)
 
-        xi, yi, ni = self.axes[plane]
+        xi, yi, ni = self.AXES[plane]
         d = np.asarray(position, dtype=float) - self.image.origin
         on_native_grid = abs(d[xi]) < 1e-3 and abs(d[yi]) < 1e-3
         is_identity = (grid is None and not has_rigid and on_native_grid and
                        np.allclose(self.image.matrix, np.eye(3), atol=1e-6) and
                        np.allclose(m, np.eye(3), atol=1e-6))
 
+        arr = None
         if is_identity and not force_reslice:
+            # None past the first/last slice: the kernel below then returns a background slice, so side-by-side and
+            # fusion views can keep scrolling beyond this image
             arr = self._get_axis_aligned_array(plane, position)
-            if arr is None:
-                return None
 
-            arr_shape = arr.shape
-            if plane == 'Axial':
-                dim = [arr_shape[1], arr_shape[0], 1]
-            elif plane == 'Sagittal':
-                dim = [1, arr_shape[1], arr_shape[0]]
-            else:
-                dim = [arr_shape[1], 1, arr_shape[0]]
-            result = {'dimensions': dim, 'spacing': self.spacing,
-                      'pixel_spacing': (float(self.spacing[xi]), float(self.spacing[yi]))}
+        if arr is not None:
+            h, w = arr.shape[:2]
+            grid = self.get_grid(plane, position, matrix_override=m)
+            result = {'dimensions': (w, h), 'spacing': self.spacing,
+                      'pixel_spacing': (float(self.spacing[xi]), float(self.spacing[yi])),
+                      'x_axis': grid['x_axis'].astype(np.float32), 'y_axis': grid['y_axis'].astype(np.float32),
+                      'normal': grid['normal'], 'origin': grid['origin'].astype(np.float32), 'grid': grid}
 
             if as_array:
                 result['array'] = arr.copy() if copy_array else arr
 
             if as_vtk:
+                # the native slice keeps its place in the volume, so VTK gets a 3D extent with 1 along the normal
+                if plane == 'Axial':
+                    dim = [w, h, 1]
+                elif plane == 'Sagittal':
+                    dim = [1, w, h]
+                else:
+                    dim = [w, 1, h]
                 matrix_reshape = np.linalg.inv(self.image.matrix).reshape(1, 9)[0]
 
                 vtk_out = vtk.vtkImageData()
@@ -322,7 +385,7 @@ class Display(object):
                 vtk_out.SetDirectionMatrix(matrix_reshape)
                 vtk_out.SetDimensions(dim)
                 vtk_out.SetOrigin(position)
-                vtk_out.GetPointData().SetScalars(numpy_support.numpy_to_vtk(arr.flatten(order="C")))
+                vtk_out.GetPointData().SetScalars(self._to_vtk_scalars(arr))
 
                 result['vtk_image'] = vtk_out
 
@@ -378,27 +441,25 @@ class Display(object):
             direction[:, 2] = normal
             vtk_out.SetDirectionMatrix(direction.reshape(1, 9)[0])
 
-            vtk_out.GetPointData().SetScalars(numpy_support.numpy_to_vtk(arr.ravel(order="C")))
+            vtk_out.GetPointData().SetScalars(self._to_vtk_scalars(arr))
 
             result['vtk_image'] = vtk_out
 
         return result
 
     def compute_plane_geometry(self, plane, position, matrix_override=None):
-        """Used by get_slice: position = this plane's actual reslice origin (top-left corner), needed to place the VTK
-        output correctly.
-        
+        """Plane origin (= position, the slice's top-left corner), view axes and spacing, used to place the output.
+
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> display = image.display
-        >>> display.compute_plane_geometry('Axial', image.get_center())
+        >>> display = mia.Data.image['CT 01'].display
+        >>> geometry = display.compute_plane_geometry('Axial', display.position['Axial'])
+        >>> geometry['normal']
         """
-
         m = matrix_override if matrix_override is not None else self.matrix
         effective = self.image.matrix @ m.T
-        xi, yi, ni = self.axes[plane]
+        xi, yi, ni = self.AXES[plane]
 
         return {'origin': np.asarray(position, dtype=float),
                 'x_axis': effective[xi],
@@ -407,16 +468,16 @@ class Display(object):
                 'spacing': self.spacing}
 
     def compute_slice_lines(self, plane, position):
-        """Compute crosshair intersection lines for the other anatomical planes.
-        
+        """Crosshair lines of the other two planes on this plane, keyed by plane name (see _intersection_line).
+
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> display = image.display
-        >>> display.compute_slice_lines('Axial', image.get_center())
+        >>> display = mia.Data.image['CT 01'].display
+        >>> lines = display.compute_slice_lines('Axial', display.position['Axial'])
+        >>> lines['Sagittal']['pos'], lines['Sagittal']['angle']
         """
-        xi, yi, ni = self.axes[plane]
+        xi, yi, ni = self.AXES[plane]
         effective = self.image.matrix @ self.matrix.T
         active = {'origin': np.asarray(position, dtype=float),
                   'x_axis': effective[xi], 'y_axis': effective[yi], 'normal': effective[ni],
@@ -426,7 +487,7 @@ class Display(object):
         for other in ('Axial', 'Coronal', 'Sagittal'):
             if other == plane:
                 continue
-            oxi, oyi, oni = self.axes[other]
+            oxi, oyi, oni = self.AXES[other]
             crossing = {'origin': self.crosshair,
                         'x_axis': effective[oxi], 'y_axis': effective[oyi], 'normal': effective[oni],
                         'spacing': (self.spacing[oxi], self.spacing[oyi])}
@@ -437,88 +498,94 @@ class Display(object):
         return lines
 
     def get_grid(self, plane, position, matrix_override=None):
-        """Output pixel grid for this plane: corner, axes, in-plane spacing, shape. Plain dict.
-        
+        """Output pixel grid for this plane: corner, axes, in-plane spacing and shape.
+
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> display = image.display
-        >>> display.get_grid('Axial', image.get_center())
+        >>> display = mia.Data.image['CT 01'].display
+        >>> grid = display.get_grid('Axial', display.position['Axial'])
+        >>> grid['shape'], grid['sx'], grid['sy']
         """
         geom = self.compute_plane_geometry(plane, position, matrix_override=matrix_override)
-        xi, yi, _ = self.axes[plane]
+        xi, yi, _ = self.AXES[plane]
 
         return {'origin': geom['origin'], 'x_axis': geom['x_axis'], 'y_axis': geom['y_axis'],
                 'normal': geom['normal'],
                 'sx': float(self.spacing[xi]), 'sy': float(self.spacing[yi]),
                 'shape': tuple(self.oblique_shape[plane])}
 
-    @staticmethod
-    def grid_with_spacing(grid, sx, sy):
-        """Same corner, axes and physical extent as grid, different pixel size.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> display = image.display
-        >>> display.grid_with_spacing(...)
-        """
-        h, w = grid['shape']
-        new = dict(grid)
-        new['sx'], new['sy'] = float(sx), float(sy)
-        new['shape'] = (int(np.floor((h - 1) * grid['sy'] / sy + 1e-6)) + 1,
-                        int(np.floor((w - 1) * grid['sx'] / sx + 1e-6)) + 1)
-
-        return new
-
     def pivot_position(self, position, R):
-        """Repositions one widget's origin around self.rotation_center using incremental rotation R (from
-        update_rotation's return value).
-        Caller applies this to every widget's position right after calling update_rotation.
-        
+        """Rotate one widget's position about rotation_center by R (the value returned by :meth:`update_rotation`).
+
+        update_rotation already moves ``self.position``; use this for positions the caller keeps itself.
+
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> display = image.display
-        >>> display.pivot_position(...)
+        >>> display = mia.Data.image['CT 01'].display
+        >>> R = display.update_rotation(r_z=5)
+        >>> widget_position = display.pivot_position(widget_position, R)
         """
         position = np.asarray(position, dtype=float)
 
         return R.dot(position - self.rotation_center) + self.rotation_center
 
-    def set_rotation_center(self, center):
-        """Call when the user picks a new pivot (click, ROI centroid, a Rigid instance's target center, etc).
-        
+    def reset(self):
+        """Back to the native orientation: no rotation, pivot and crosshair at the image center, every plane at its
+        initial slice.
+
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> display = image.display
-        >>> display.set_rotation_center(image.get_center())
+        >>> mia.Data.image['CT 01'].display.reset()
+        """
+        self.matrix = np.eye(3)
+        self.rotation_totals = np.zeros(3)
+        self.rotation_center = np.asarray(self.image.get_center(), dtype=float)
+        self.crosshair = self.rotation_center.copy()
+        self.position = {plane: self.image.compute_initial_origin(plane) for plane in self.AXES}
+
+    def set_rotation_center(self, center):
+        """Set the rotation pivot (a click, ROI centroid, a Rigid's center, ...) and move the crosshair there.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> image = mia.Data.image['CT 01']
+        >>> image.display.set_rotation_center(image.roi['Liver'].mesh.center)
         """
         self.rotation_center = np.asarray(center, dtype=float)
         self.crosshair = self.rotation_center.copy()
 
     def update_rotation(self, r_x=0, r_y=0, r_z=0, absolute=True):
-        """Rotates the SHARED matrix (affects every plane) and pivots the shared crosshair and every plane's position
-        around rotation_center to match. Returns the incremental R actually applied this call (old -> new orientation).
-        
-        absolute=True (default): r_x/r_y/r_z are the TOTAL desired angle per axis (e.g. read straight off a slider).
-        absolute=False: r_x/r_y/r_z are INCREMENTAL deltas added to the current rotation_totals.
-        
-        Either way, self.matrix is recomputed fresh from self.rotation_totals (Euler 'xyz', degrees), not accumulated
-        by multiplying deltas onto the previous matrix. Rotations about different axes don't commute, so accumulating
-        would make the orientation path-dependent; recomputing from totals makes (0, 0, 0) always the identity.
-        
+        """Rotate the shared view (every plane) and pivot the crosshair and every plane's position to match.
+
+        Parameters
+        ----------
+        r_x, r_y, r_z : float
+            Degrees about the world x, y, z axes.
+        absolute : bool, default True
+            True: the angles are the total rotation (e.g. read straight off a slider). False: they are added to the
+            current rotation_totals.
+
+        Returns
+        -------
+        (3, 3) ndarray
+            The incremental rotation applied this call (old -> new orientation), for :meth:`pivot_position`.
+
+        Notes
+        -----
+        self.matrix is rebuilt from rotation_totals (Euler 'xyz') each call, not accumulated from deltas. Rotations
+        about different axes don't commute, so accumulating would make the orientation path-dependent; rebuilding
+        keeps (0, 0, 0) the identity.
+
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> display = image.display
-        >>> display.update_rotation(...)
+        >>> display = mia.Data.image['CT 01'].display
+        >>> R = display.update_rotation(r_x=0, r_y=0, r_z=15)
+        >>> R = display.update_rotation(r_z=1, absolute=False)
         """
         if absolute:
             self.rotation_totals = np.array([r_x, r_y, r_z], dtype=float)
@@ -537,16 +604,17 @@ class Display(object):
         return R
 
     def wheel_position(self, plane, position, steps=1, main=True):
-        """Advance a slice position along its normal by a number of scroll steps.
-        
+        """Move a slice position along its plane's normal by a number of scroll steps (one voxel each).
+
+        main=True also stores it as this plane's position and moves the crosshair with it.
+
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> display = image.display
-        >>> display.wheel_position('Axial', image.get_center())
+        >>> display = mia.Data.image['CT 01'].display
+        >>> new_position = display.wheel_position('Axial', display.position['Axial'], steps=-3)
         """
-        xi, yi, ni = self.axes[plane]
+        xi, yi, ni = self.AXES[plane]
         effective = self.image.matrix @ self.matrix.T
         normal = effective[ni]  # row, not effective[:, ni]
         normal_hat = normal / np.linalg.norm(normal)
@@ -560,28 +628,22 @@ class Display(object):
 
 
 class Image(object):
-    """Main data class containing standard medical image volume blocks, metadata parsing, structures, and geometric transforms.
-    
+    """One image volume with its DICOM tags, geometry, ROIs, POIs and display.
+
     Parameters
     ----------
     image : object
-        A wrapper object tracking image arrays, properties, file locations, and DICOM field configurations.
-    
+        Reader output (e.g. Read3D, ReadUS, ReadXRay) providing image_set, array, image_name, modality, filepaths,
+        sops, plane, spacing, dimensions, orientation, origin, image_matrix, skipped_slice and rgb.
+
     Examples
     --------
     >>> import medicalimageanalysis as mia
     >>> mia.read_mhd(file='C:/Data/scan.mhd', modality='CT')
     >>> image = mia.Data.image[mia.Data.image_list()[0]]
+    >>> image.origin, image.spacing, image.array.shape
     """
     def __init__(self, image):
-        """Copy image data and metadata from a reader object into the runtime image model.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> image.__init__(...)
-        """
         self.roi = {}
         self.poi = {}
 
@@ -592,14 +654,16 @@ class Image(object):
         self.image_name = image.image_name
         self.modality = image.modality
 
-        self.patient_name = self.get_patient_name()
-        self.mrn = self.get_mrn()
-        self.birthdate = self.get_birthdate()
-        self.date = self.get_date()
-        self.time = self.get_time()
-        self.series_uid = self.get_series_uid()
-        self.acq_number = self.get_acq_number()
-        self.frame_ref = self.get_frame_ref()
+        patient_name = self._first_tag(['PatientName'])
+        self.patient_name = 'missing' if patient_name is None else str(patient_name).split('^')[:3]
+        self.mrn = str(self._first_tag(['PatientID'], 'missing'))
+        self.birthdate = str(self._first_tag(['PatientBirthDate'], ''))
+        self.date = self._first_tag(['SeriesDate', 'ContentDate', 'AcquisitionDate', 'StudyDate'], '00000')
+        self.time = self._first_tag(['SeriesTime', 'ContentTime', 'AcquisitionTime', 'StudyTime'], '00000')
+        self.study_uid = self._first_tag(['StudyInstanceUID'], '00000.00000')
+        self.series_uid = self._first_tag(['SeriesInstanceUID'], '00000.00000')
+        self.acq_number = self._first_tag(['AcquisitionNumber'], '1')
+        self.frame_ref = self._first_tag(['FrameOfReferenceUID'], '00000.00000')
         self.window = self.get_window()
 
         self.filepaths = image.filepaths
@@ -624,7 +688,7 @@ class Image(object):
         self.display = Display(self)
 
     def __getstate__(self):
-        """Return a lightweight state dictionary suitable for pickling metadata only."""
+        """Metadata-only state for pickling (array, ROIs and POIs are left out)."""
         state = self.__dict__.copy()
         state.pop("array", None)
         state.pop("roi", None)
@@ -633,383 +697,355 @@ class Image(object):
         return state
 
     def __setstate__(self, state):
-        """Restore metadata-only state and recreate empty in-memory containers."""
+        """Restore metadata-only state with empty array/ROI/POI containers, and point the display back at this image."""
         self.__dict__.update(state)
         self.array = None
         self.roi = {}
         self.poi = {}
 
-    def input_mhd(self, filename, roi_names, values, plane='Axial'):
-        """Parses an explicit MetaImage (.mhd/.raw) dataset and adds segmented regions as tracking ROIs.
-        
+        # load_metadata copies another instance's state in, so its display would still reslice that instance.
+        display = self.__dict__.get('display')
+        if display is not None:
+            display.image = self
+
+    # ------------------------------------------------------------------------------------------------------------
+    # Private methods
+    # ------------------------------------------------------------------------------------------------------------
+    def _first_tag(self, keywords, default=None):
+        """Value of the first DICOM keyword present in the first file's tags, else default."""
+        for keyword in keywords:
+            if keyword in self.tags[0]:
+                return getattr(self.tags[0], keyword)
+
+        return default
+
+    # ------------------------------------------------------------------------------------------------------------
+    # Public methods
+    # ------------------------------------------------------------------------------------------------------------
+    def add_poi(self, poi_name=None, color=None, visible=False, path=None, point=None):
+        """Add a point of interest at a world position.
+
         Parameters
         ----------
-        filename : str
-            Full system path string linking directly to the MetaImage configuration header file.
-        roi_names : list of str
-            Label identifiers to map sequentially to each discrete voxel label segment.
-        values : list of int
-            The absolute voxel pixel configuration value flags used to isolate segmentation volumes.
-        plane : str, default 'Axial'
-            The principal acquisition structural reference frame.
-        
-        Returns
-        -------
-        None
-        
+        poi_name : str, optional
+            Key in ``self.poi``.
+        color : list of int, optional
+            RGB, 0-255.
+        visible : bool, default False
+            Show in the views.
+        path : str, optional
+            Source file.
+        point : (3,) array_like, optional
+            World position (x, y, z).
+
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> image.input_mhd(...)
+        >>> mia.Data.image['CT 01'].add_poi('Iso', color=[255, 0, 0], point=[0.0, -20.0, 15.5])
         """
-        roi_image = sitk.ReadImage(filename)
-        roi_array = sitk.GetArrayFromImage(roi_image)
-        for ii, roi_name in enumerate(roi_names):
-            if roi_name not in list(self.roi.keys()):
-                self.roi[roi_name] = Roi(self, name=roi_name, visible=True, filepaths=filename,
-                                          plane=plane)
-
-            roi_mask = roi_array == values[ii]
-            self.roi[roi_name].convert_mask(roi_mask)
-
-    def input_rtstruct(self, rtstruct):
-        """Imports structured DICOM RT-Struct data elements, populating the local instances with ROI/POI objects.
-        
-        Parameters
-        ----------
-        rtstruct : object
-            An imported container struct containing parsed contours, names, points, and colors.
-        
-        Returns
-        -------
-        None
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> image.input_rtstruct(...)
-        """
-        for ii, roi_name in enumerate(rtstruct.roi_names):
-            if roi_name not in list(self.roi.keys()) or self.roi[roi_name].contour_position is None:
-                self.roi[roi_name] = Roi(self, position=rtstruct.contours[ii], name=roi_name,
-                                          color=rtstruct.roi_colors[ii], visible=False, filepaths=rtstruct.filepaths)
-
-        for ii, poi_name in enumerate(rtstruct.poi_names):
-            if poi_name not in list(self.poi.keys()) or self.poi[poi_name].point_position is None:
-                self.poi[poi_name] = Poi(self, position=rtstruct.points[ii], name=poi_name,
-                                          color=rtstruct.poi_colors[ii], visible=False, filepaths=rtstruct.filepaths)
-
-        Data.match_rois()
+        self.poi[poi_name] = Poi(self, position=point, name=poi_name, color=color, visible=visible, filepaths=path)
         Data.match_pois()
 
     def add_roi(self, roi_name=None, color=None, visible=False, path=None, contour=None, plane='Axial'):
-        """Appends an explicitly instantiated Region of Interest object into the image volume structure tracking frame.
-        
+        """Add an ROI from world-space contours.
+
         Parameters
         ----------
         roi_name : str, optional
-            A distinct tracking string key identifier.
+            Key in ``self.roi``.
         color : list of int, optional
-            An RGB list of integers mapping structural color displays.
+            RGB, 0-255.
         visible : bool, default False
-            Determines whether the structure maps to active slice plot view renders automatically.
+            Show in the views.
         path : str, optional
-            Direct file system tracking reference source link.
-        contour : array_like, optional
-            Coordinate positional boundary point datasets.
+            Source file.
+        contour : list of (N, 3) array_like, optional
+            World-space contour points.
         plane : str, default 'Axial'
-            Standard tracking plane orientation label.
-        
-        Returns
-        -------
-        None
-        
+            Plane the contours were drawn on.
+
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> image.add_roi(...)
+        >>> mia.Data.image['CT 01'].add_roi('Liver', color=[0, 255, 0], contour=contours)
         """
         self.roi[roi_name] = Roi(self, position=contour, name=roi_name, color=color, visible=visible, filepaths=path,
                                   plane=plane)
         Data.match_rois()
 
-    def add_poi(self, poi_name=None, color=None, visible=False, path=None, point=None):
-        """Appends a Point of Interest landmark element onto the active frame tracking tracking system.
-        
-        Parameters
-        ----------
-        poi_name : str, optional
-            Landmark distinct name label configuration string.
-        color : list of int, optional
-            An RGB collection tracking visual markers.
-        visible : bool, default False
-            Active viewport display flag constraint state.
-        path : str, optional
-            System reference origin source path data details.
-        point : array_like, optional
-            Length-3 coordinate point setting absolute landmark position.
-        
-        Returns
-        -------
-        None
-        
+    def compute_corner_positions(self):
+        """(8, 3) world positions of the corner voxel centers.
+
+        Corners 0-3 go around the first slice: index (0, 0), (x, 0), (x, y), (0, y). Corners 4-7 are the same on the
+        last slice, so corner i + 4 sits above corner i.
+
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> image.add_poi(...)
+        >>> corners = mia.Data.image['CT 01'].compute_corner_positions()
         """
-        self.poi[poi_name] = Poi(self, position=point, name=poi_name, color=color, visible=visible, filepaths=path)
-        Data.match_pois()
+        nz, ny, nx = [int(d) - 1 for d in self.dimensions[:3]]
+        index = np.array([[0, 0, 0], [nx, 0, 0], [nx, ny, 0], [0, ny, 0],
+                          [0, 0, nz], [nx, 0, nz], [nx, ny, nz], [0, ny, nz]], dtype=float)
+
+        pixel_to_position = self.compute_matrix_pixel_to_position()
+        return index @ pixel_to_position[:3, :3].T + pixel_to_position[:3, 3]
+
+    def compute_initial_origin(self, plane):
+        """World position (top-left corner) of the plane's slice through the middle of the volume.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> mia.Data.image['CT 01'].compute_initial_origin('Sagittal')
+        """
+        _, _, ni = Display.AXES[plane]
+        dims = self.dimensions  # (z, y, x): xyz index i is dims[2 - i]
+
+        idx_xyz = np.zeros(3)
+        idx_xyz[ni] = int(np.round(dims[2 - ni] / 2))  # center index along the through-plane axis
+        # in-plane indices stay 0 -> top-left corner
+
+        return self.compute_position(idx_xyz)
+
+    def compute_matrix_pixel_to_position(self):
+        """(4, 4) matrix mapping a pixel index (x, y, z, 1) to a world position.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> pixel_to_position = mia.Data.image['CT 01'].compute_matrix_pixel_to_position()
+        """
+        pixel_to_position = np.identity(4)
+        pixel_to_position[:3, :3] = np.asarray(self.matrix, dtype=float).T * np.asarray(self.spacing, dtype=float)
+        pixel_to_position[:3, 3] = self.origin
+
+        return pixel_to_position
+
+    def compute_matrix_position_to_pixel(self):
+        """(4, 4) matrix mapping a world position (x, y, z, 1) to a fractional pixel index.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> position_to_pixel = mia.Data.image['CT 01'].compute_matrix_position_to_pixel()
+        """
+        position_to_pixel = np.identity(4)
+        position_to_pixel[:3, :3] = np.asarray(self.matrix, dtype=float) / np.asarray(self.spacing, dtype=float)[:, None]
+        position_to_pixel[:3, 3] = -position_to_pixel[:3, :3] @ np.asarray(self.origin, dtype=float)
+
+        return position_to_pixel
+
+    def compute_pixel(self, position):
+        """Fractional pixel index (x, y, z) of a world position. Round it for a voxel.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> mia.Data.image['CT 01'].compute_pixel([10.0, -42.5, 103.0])
+        """
+        return (self.compute_matrix_position_to_pixel() @ [*position, 1])[:3]
+
+    def compute_position(self, xyz):
+        """World position of a pixel index (x, y, z), fractional allowed.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> mia.Data.image['CT 01'].compute_position([256, 256, 40])
+        """
+        return (self.compute_matrix_pixel_to_position() @ [*xyz, 1])[:3]
+
+    def create_external(self, name='External', color=None, visible=False, filepaths=None, threshold=-250):
+        """Body outline ROI from an intensity threshold (contours + mesh).
+
+        Parameters
+        ----------
+        name : str, default 'External'
+            ROI name; created when missing.
+        color : list of int, optional
+            RGB, 0-255. Defaults to green.
+        visible : bool, default False
+            Show in the views.
+        filepaths : str, optional
+            Source file.
+        threshold : float, default -250
+            Lowest value inside the body (HU for CT).
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> mia.Data.image['CT 01'].create_external(threshold=-300)
+        """
+        if color is None:
+            color = [0, 255, 0]
+
+        if name not in list(self.roi.keys()):
+            self.roi[name] = Roi(self, name=name, color=color, visible=visible, filepaths=filepaths)
+
+        mask = external(self.array, threshold=threshold, only_mask=True)
+        positions = mask_to_contours(mask, self.origin, self.spacing, self.matrix)
+        contours = self.roi[name].convert_position_to_pixel(points=positions)
+
+        self.roi[name].contour_pixel = contours
+        self.roi[name].contour_position = positions
+        self.roi[name].create_mesh(reduction=0.50)
 
     def create_roi(self, name=None, color=None, visible=False, filepath=None):
-        """Initializes an empty tracking ROI structural instance mapped onto the localized tracking frame.
-        
-        Parameters
-        ----------
-        name : str, optional
-            Distinct label reference key identifier.
-        color : list of int, optional
-            RGB visual display settings profile tracking array.
-        visible : bool, default False
-            Active component visibility state configurations.
-        filepath : str, optional
-            Source processing storage folder context.
-        
-        Returns
-        -------
-        None
-        
+        """Add an empty ROI (to be drawn or filled later).
+
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> image.create_roi(...)
+        >>> mia.Data.image['CT 01'].create_roi('GTV', color=[255, 0, 0])
         """
         self.roi[name] = Roi(self, name=name, color=color, visible=visible, filepaths=filepath)
         Data.match_rois()
 
-    def create_rtstruct(self, roi_names=None, poi_names=None):
-        """Placeholder interface configuration method to handle downstream structured export pipeline generations.
-        
+    def create_sitk_image(self, empty=False):
+        """SimpleITK image with this image's geometry. Color becomes a vector image.
+
         Parameters
         ----------
-        roi_names : list of str, optional
-            Target tracking segments to collect into structure.
-        poi_names : list of str, optional
-            Target landmarks tracking points array metrics.
-        
-        Returns
-        -------
-        None
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> image.create_rtstruct(...)
-        """
-        pass
+        empty : bool, default False
+            True gives a zero UInt8 image of the same size (e.g. for a mask).
 
-    def get_patient_name(self):
-        """Parses PatientName field segments out from the current base DICOM data metadata structures.
-        
-        Returns
-        -------
-        list of str or str
-            A parsed string collection containing name fragments, or 'missing'.
-        
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> image.get_patient_name(...)
+        >>> sitk_image = mia.Data.image['CT 01'].create_sitk_image()
+        >>> mask = mia.Data.image['CT 01'].create_sitk_image(empty=True)
         """
-        if 'PatientName' in self.tags[0]:
-            return str(self.tags[0].PatientName).split('^')[:3]
+        if empty:
+            sitk_image = sitk.Image([int(d) for d in self.dimensions[2::-1]], sitk.sitkUInt8)   # (z, y, x) -> (x, y, z)
         else:
-            return 'missing'
+            sitk_image = sitk.GetImageFromArray(self.array, isVector=self.array.ndim == 4)
 
-    def get_mrn(self):
-        """Extracts PatientID medical record number identifiers from the base header profiles.
-        
-        Returns
-        -------
-        str
-            The tracked reference alphanumeric MRN string label context.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> image.get_mrn(...)
-        """
-        if 'PatientID' in self.tags[0]:
-            return str(self.tags[0].PatientID)
-        else:
-            return 'missing'
+        # rows = axes in this convention; flattening in Fortran order gives sitk its column layout
+        sitk_image.SetDirection([float(v) for v in np.asarray(self.matrix).flatten(order='F')])
+        sitk_image.SetOrigin([float(v) for v in self.origin])
+        sitk_image.SetSpacing([float(v) for v in self.spacing])
 
-    def get_birthdate(self):
-        """Extracts PatientBirthDate metadata attributes directly out from the primary DICOM attributes profile.
-        
-        Returns
-        -------
-        str
-            The text string date code tracking birth entries.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> image.get_birthdate(...)
-        """
-        if 'PatientBirthDate' in self.tags[0]:
-            return str(self.tags[0].PatientBirthDate)
-        else:
-            return ''
+        return sitk_image
 
-    def get_date(self):
-        """Finds first available series or acquisition validation date indicators across sequential structural headers.
-        
-        Returns
-        -------
-        str
-            A structured numeric string sequence identifying configuration transaction dates.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> image.get_date(...)
-        """
-        if 'SeriesDate' in self.tags[0]:
-            return self.tags[0].SeriesDate
-        elif 'ContentDate' in self.tags[0]:
-            return self.tags[0].ContentDate
-        elif 'AcquisitionDate' in self.tags[0]:
-            return self.tags[0].AcquisitionDate
-        elif 'StudyDate' in self.tags[0]:
-            return self.tags[0].StudyDate
-        else:
-            return '00000'
+    def get_aspect(self, slice_plane):
+        """Pixel aspect (sx / sy) of a native slice, rounded to 2 decimals.
 
-    def get_time(self):
-        """Finds chronological tracking timestamp variables across fallback structural dataset headers.
-        
-        Returns
-        -------
-        str
-            The identified chronological session execution time value sequence.
-        
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> image.get_time(...)
+        >>> mia.Data.image['CT 01'].get_aspect('Coronal')
         """
-        if 'SeriesTime' in self.tags[0]:
-            return self.tags[0].SeriesTime
-        elif 'ContentTime' in self.tags[0]:
-            return self.tags[0].ContentTime
-        elif 'AcquisitionTime' in self.tags[0]:
-            return self.tags[0].AcquisitionTime
-        elif 'StudyTime' in self.tags[0]:
-            return self.tags[0].StudyTime
+        if slice_plane == 'Axial':
+            aspect = np.round(self.spacing[0] / self.spacing[1], 2)
+        elif slice_plane == 'Coronal':
+            aspect = np.round(self.spacing[0] / self.spacing[2], 2)
         else:
-            return '00000'
+            aspect = np.round(self.spacing[1] / self.spacing[2], 2)
 
-    def get_study_uid(self):
-        """Queries tracking dataset files to expose unique master StudyInstanceUID identity profiles.
-        
-        Returns
-        -------
-        str
-            The explicit string mapping absolute global study uniqueness values.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> image.get_study_uid(...)
-        """
-        if 'StudyInstanceUID' in self.tags[0]:
-            return self.tags[0].StudyInstanceUID
-        else:
-            return '00000.00000'
+        return aspect
 
-    def get_series_uid(self):
-        """Queries tracking elements to extract explicit target SeriesInstanceUID system profiles.
-        
-        Returns
-        -------
-        str
-            The string mapping detailed operational image series paths.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> image.get_series_uid(...)
-        """
-        if 'SeriesInstanceUID' in self.tags[0]:
-            return self.tags[0].SeriesInstanceUID
-        else:
-            return '00000.00000'
+    def get_bounds(self):
+        """World bounding box of the voxel centers: [x_min, x_max, y_min, y_max, z_min, z_max].
 
-    def get_acq_number(self):
-        """Locates clear acquisition tracking metrics inside individual data frames.
-        
-        Returns
-        -------
-        str
-            The structured acquisition catalog identification key indicator string.
-        
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> image.get_acq_number(...)
+        >>> mia.Data.image['CT 01'].get_bounds()
         """
-        if 'AcquisitionNumber' in self.tags[0]:
-            return self.tags[0].AcquisitionNumber
-        else:
-            return '1'
+        corners = self.compute_corner_positions()
+        low, high = corners.min(axis=0), corners.max(axis=0)
 
-    def get_frame_ref(self):
-        """Acquires FrameOfReferenceUID descriptors matching 3D geometric registration alignments.
-        
-        Returns
-        -------
-        str
-            Unique alignment string verification system coordinates.
-        
+        return [float(low[0]), float(high[0]), float(low[1]), float(high[1]), float(low[2]), float(high[2])]
+
+    def get_center(self, position=True, zyx=False):
+        """Center of the volume as a world position or a pixel index.
+
+        Parameters
+        ----------
+        position : bool, default True
+            True gives the world position, False the pixel index.
+        zyx : bool, default False
+            Return in (z, y, x) order instead of (x, y, z).
+
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> image.get_frame_ref(...)
+        >>> mia.Data.image['CT 01'].get_center()
+        >>> mia.Data.image['CT 01'].get_center(position=False, zyx=True)
         """
-        if 'FrameOfReferenceUID' in self.tags[0]:
-            return self.tags[0].FrameOfReferenceUID
+        pixel_index = [int(self.dimensions[2] / 2),
+                       int(self.dimensions[1] / 2),
+                       int(self.dimensions[0] / 2)]
+
+        if position:
+            center = self.compute_position(pixel_index)
+            if zyx:
+                return np.flip(center)
+            else:
+                return center
+
         else:
-            return '00000.00000'
+            if zyx:
+                return [pixel_index[2], pixel_index[1], pixel_index[0]]
+            else:
+                return pixel_index
+
+    def get_corner_sides(self):
+        """Box surface (6 quads) through the corner voxel centers, for showing the image extent in 3D.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> box = mia.Data.image['CT 01'].get_corner_sides()
+        """
+        corner_points = self.compute_corner_positions()
+        points = [corner_points[0], corner_points[4], corner_points[7], corner_points[3],
+                  corner_points[1], corner_points[2], corner_points[6], corner_points[5]]
+        faces = [4, 0, 1, 2, 3,
+                 4, 4, 5, 6, 7,
+                 4, 0, 4, 7, 1,
+                 4, 3, 2, 6, 5,
+                 4, 0, 3, 5, 4,
+                 4, 1, 7, 6, 2]
+
+        return pv.PolyData(points, faces)
+
+    def get_specific_tag(self, tag):
+        """A DICOM tag from the first file, or None.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> mia.Data.image['CT 01'].get_specific_tag('SliceThickness')
+        >>> mia.Data.image['CT 01'].get_specific_tag((0x0018, 0x0050))
+        """
+        if tag in self.tags[0]:
+            return self.tags[0][tag]
+        else:
+            return None
+
+    def get_specific_tag_on_all_files(self, tag):
+        """A DICOM tag from every file (list), or None when the first file doesn't have it.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> mia.Data.image['CT 01'].get_specific_tag_on_all_files('ImagePositionPatient')
+        """
+        if tag in self.tags[0]:
+            return [t[tag] for t in self.tags]
+        else:
+            return None
 
     def get_window(self):
-        """Computes active visual window boundaries tracking WindowCenter and WindowWidth DICOM configurations.
-        
-        Returns
-        -------
-        list of int
-            A 2-element collection defining absolute [Lower, Upper] grayscale threshold window parameters.
-        
+        """[lower, upper] display window from WindowCenter/WindowWidth, else the array's min and max.
+
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> image.get_window(...)
+        >>> mia.Data.image['CT 01'].get_window()
+        [-160, 240]
         """
         if (0x0028, 0x1050) in self.tags[0] and (0x0028, 0x1051) in self.tags[0]:
             center = self.tags[0].WindowCenter
@@ -1029,88 +1065,71 @@ class Image(object):
         else:
             return [0, 1]
 
-    def get_specific_tag(self, tag):
-        """Polls the initial index tracking dictionary config profile looking for targeted custom DICOM tags.
-        
-        Parameters
-        ----------
-        tag : str or tuple
-            The custom explicit DICOM lookup sequence tracker.
-        
-        Returns
-        -------
-        object or None
-            The raw localized tag content payload matching data lookups.
-        
+    def input_mhd(self, filename, roi_names, values, plane='Axial'):
+        """Add ROIs from a MetaImage (.mhd/.raw) label map: each value in values becomes the ROI of the same position.
+
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> image.get_specific_tag(...)
+        >>> mia.Data.image['CT 01'].input_mhd('C:/Data/labels.mhd', ['Liver', 'Spleen'], [1, 2])
         """
-        if tag in self.tags[0]:
-            return self.tags[0][tag]
-        else:
-            return None
+        roi_image = sitk.ReadImage(filename)
+        roi_array = sitk.GetArrayFromImage(roi_image)
+        for ii, roi_name in enumerate(roi_names):
+            if roi_name not in list(self.roi.keys()):
+                self.roi[roi_name] = Roi(self, name=roi_name, visible=True, filepaths=filename,
+                                          plane=plane)
 
-    def get_specific_tag_on_all_files(self, tag):
-        """Loops through all sequential discrete file tags tracking uniform instance parameters.
-        
-        Parameters
-        ----------
-        tag : str or tuple
-            The designated search identifier variable parameters.
-        
-        Returns
-        -------
-        list of object or None
-            A collected list tracking sequential structural tag findings.
-        
+            roi_mask = roi_array == values[ii]
+            self.roi[roi_name].convert_mask(roi_mask)
+
+    def input_rtstruct(self, rtstruct):
+        """Add the ROIs and POIs of a read RTSTRUCT. Existing ones are kept unless they have no contours.
+
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> image.get_specific_tag_on_all_files(...)
+        >>> mia.Data.image['CT 01'].input_rtstruct(rtstruct)
         """
-        if tag in self.tags[0]:
-            return [t[tag] for t in self.tags]
-        else:
-            return None
+        for ii, roi_name in enumerate(rtstruct.roi_names):
+            if roi_name not in list(self.roi.keys()) or self.roi[roi_name].contour_position is None:
+                self.roi[roi_name] = Roi(self, position=rtstruct.contours[ii], name=roi_name,
+                                          color=rtstruct.roi_colors[ii], visible=False, filepaths=rtstruct.filepaths)
 
-    def save(self, folder_path, key, clevel=5):
-        """Encrypt and compress image metadata and array content to disk.
-        
+        for ii, poi_name in enumerate(rtstruct.poi_names):
+            if poi_name not in list(self.poi.keys()) or self.poi[poi_name].point_position is None:
+                self.poi[poi_name] = Poi(self, position=rtstruct.points[ii], name=poi_name,
+                                          color=rtstruct.poi_colors[ii], visible=False, filepaths=rtstruct.filepaths)
+
+        Data.match_rois()
+        Data.match_pois()
+
+    def load_array(self, array_path, key):
+        """Decrypt and decompress the array written by :meth:`save`.
+
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> image.save(...)
+        >>> image.load_array('C:/Data/CT 01/array.enc', key)
         """
-        aes = AESGCM(key)
+        with open(array_path, "rb") as f:
+            data = f.read()
 
-        metadata = pickle.dumps(self)
-        nonce = os.urandom(12)
-        metadata = nonce + aes.encrypt(nonce, metadata, None)
-        with open(os.path.join(folder_path, 'metadata.enc'), "wb") as f:
-            f.write(metadata)
-
-        raw = self.array.tobytes(order="C")
-        compressed = blosc2.compress(raw, typesize=self.array.itemsize,
-                                     codec=blosc2.Codec.ZSTD, clevel=clevel, filter=blosc2.Filter.BITSHUFFLE)
-
-        nonce = os.urandom(12)
-        encrypted = nonce + aes.encrypt(nonce, compressed, None)
-        with open(os.path.join(folder_path, 'array.enc'), "wb") as f:
-            f.write(encrypted)
+        nonce, encrypted = data[:12], data[12:]
+        raw = blosc2.decompress(AESGCM(key).decrypt(nonce, encrypted, None))
+        self.array = np.frombuffer(raw, dtype=self.array_dtype).reshape(self.dimensions).copy()
 
     def load_metadata(self, metadata_path, key):
-        """Load encrypted metadata from disk and register the image in :class:`Data`.
-        
+        """Decrypt the metadata written by :meth:`save` into this image and register it in ``Data.image``.
+
+        Call :meth:`load_array` afterwards for the pixels.
+
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> image.load_metadata(...)
+        >>> image = mia.Image.__new__(mia.Image)
+        >>> image.load_metadata('C:/Data/CT 01/metadata.enc', key)
+        >>> image.load_array('C:/Data/CT 01/array.enc', key)
         """
         with open(metadata_path, "rb") as f:
             data = f.read()
@@ -1121,153 +1140,13 @@ class Image(object):
 
         Data.image[self.image_name] = self
 
-    def load_array(self, array_path, key):
-        """Load, decrypt, and decompress the persisted array data for this image.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> image.load_array(...)
-        """
-        with open(array_path, "rb") as f:
-            data = f.read()
-
-        nonce, encrypted = data[:12], data[12:]
-        raw = blosc2.decompress(AESGCM(key).decrypt(nonce, encrypted, None))
-        self.array = np.frombuffer(raw, dtype=self.array_dtype).reshape(self.dimensions).copy()
-
-    def save_unencrypted(self, path, rois=True, pois=True):
-        """Serializes data matrices, tags, metadata frames, and ROI trackers directly onto storage directories.
-        
-        Parameters
-        ----------
-        path : str
-            The absolute system storage target path context directory.
-        rois : bool, default True
-            Determines whether to trigger standalone object loops archiving structure regions.
-        pois : bool, default True
-            Determines whether to process and store companion geometric point landmark items.
-        
-        Returns
-        -------
-        None
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> image.save_unencrypted(...)
-        """
-        variable_names = self.__dict__.keys()
-        column_names = [name for name in variable_names if name not in ['roi', 'poi', 'tags', 'array', 'display']]
-
-        df = pd.DataFrame(index=[0], columns=column_names)
-        for name in column_names:
-            df.at[0, name] = getattr(self, name)
-
-        df.to_pickle(os.path.join(path, 'info.p'))
-        np.save(os.path.join(path, 'tags.npy'), self.tags, allow_pickle=True)
-        np.save(os.path.join(path, 'array.npy'), self.array, allow_pickle=True)
-
-        if rois:
-            self.save_unencrypted_rois(path, create_main_folder=True)
-
-        if pois:
-            self.save_unencrypted_pois(path, create_main_folder=True)
-
-    def save_unencrypted_rois(self, path, create_main_folder=False):
-        """Iterates over trackable ROI dictionary values to store serialized NumPy matrices configurations.
-        
-        Parameters
-        ----------
-        path : str
-            The parent export folder path location context.
-        create_main_folder : bool, default False
-            When True, explicitly establishes a new nested directory sub-folder labeled 'ROIs'.
-        
-        Returns
-        -------
-        None
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> image.save_unencrypted_rois(...)
-        """
-        if create_main_folder:
-            path = os.path.join(path, 'ROIs')
-            os.mkdir(path)
-
-        for name in list(self.roi.keys()):
-            roi_path = os.path.join(os.path.join(path, name))
-            os.mkdir(roi_path)
-
-            np.save(os.path.join(roi_path, 'name.npy'), self.roi[name].name, allow_pickle=True)
-            np.save(os.path.join(roi_path, 'visible.npy'), self.roi[name].visible, allow_pickle=True)
-            np.save(os.path.join(roi_path, 'color.npy'), self.roi[name].color, allow_pickle=True)
-            np.save(os.path.join(roi_path, 'filepaths.npy'), self.roi[name].filepaths, allow_pickle=True)
-            if self.roi[name].contour_position is not None:
-                np.save(os.path.join(roi_path, 'contour_position.npy'),
-                        np.array(self.roi[name].contour_position, dtype=object),
-                        allow_pickle=True)
-
-    def save_unencrypted_pois(self, path, create_main_folder=False):
-        """Saves individual Point of Interest coordinate datasets to disk.
-        
-        Parameters
-        ----------
-        path : str
-            The targeted backup output destination directory path.
-        create_main_folder : bool, default False
-            When true, generates a structured container folder named 'POIs'.
-        
-        Returns
-        -------
-        None
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> image.save_unencrypted_pois(...)
-        """
-        if create_main_folder:
-            path = os.path.join(path, 'POIs')
-            os.mkdir(path)
-
-        for name in list(self.poi.keys()):
-            poi_path = os.path.join(os.path.join(path, name))
-            os.mkdir(poi_path)
-
-            np.save(os.path.join(poi_path, 'name.npy'), self.poi[name].name, allow_pickle=True)
-            np.save(os.path.join(poi_path, 'visible.npy'), self.poi[name].visible, allow_pickle=True)
-            np.save(os.path.join(poi_path, 'color.npy'), self.poi[name].color, allow_pickle=True)
-            np.save(os.path.join(poi_path, 'filepaths.npy'), self.poi[name].filepaths, allow_pickle=True)
-            np.save(os.path.join(poi_path, 'point_position.npy'), self.poi[name].point_position, allow_pickle=True)
-
     def load_unencrypted_image(self, image_path, rois=True, pois=True):
-        """Loads and populates volumetric imaging elements out from saved system processing sub-directories.
-        
-        Parameters
-        ----------
-        image_path : str
-            The system path linking directly to the archived target dataset root directory.
-        rois : bool, default True
-            Enables structural lookups parsing accompanying Region of Interest segments.
-        pois : bool, default True
-            Enables targeted reconstruction reading Point of Interest configuration arrays.
-        
-        Returns
-        -------
-        None
-        
+        """Load an image folder written by :meth:`save_unencrypted`, optionally with its ROIs and POIs.
+
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> image.load_unencrypted_image(...)
+        >>> image.load_unencrypted_image('C:/Data/CT 01')
         """
         self.array = np.load(os.path.join(image_path, 'array.npy'), allow_pickle=True)
         self.tags = np.load(os.path.join(image_path, 'tags.npy'), allow_pickle=True)
@@ -1285,63 +1164,13 @@ class Image(object):
             for name in roi_names:
                 self.load_unencrypted_pois(os.path.join(image_path, 'POIs', name))
 
-    def load_unencrypted_rois(self, roi_path):
-        """Parses archived individual target ROI binary properties, formatting components to avoid index namespace conflicts.
-        
-        Parameters
-        ----------
-        roi_path : str
-            Direct source storage context tracking individual mask files.
-        
-        Returns
-        -------
-        None
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> image.load_unencrypted_rois(...)
-        """
-        name = str(np.load(os.path.join(roi_path, 'name.npy'), allow_pickle=True))
-
-        existing_rois = list(self.roi.keys())
-        if name in existing_rois:
-            n = 0
-            while n >= 0:
-                n += 1
-                new_name = name + '_' + str(n)
-                if new_name not in existing_rois:
-                    name = new_name
-                    n = -1
-
-        self.roi[name] = Roi(self)
-        self.roi[name].name = name
-        self.roi[name].visible = bool(np.load(os.path.join(roi_path, 'visible.npy'), allow_pickle=True))
-        self.roi[name].color = list(np.load(os.path.join(roi_path, 'color.npy'), allow_pickle=True))
-        self.roi[name].filepaths = str(np.load(os.path.join(roi_path, 'filepaths.npy'), allow_pickle=True))
-
-        if os.path.exists(os.path.join(roi_path, 'contour_position.npy')):
-            self.roi[name].contour_position = list(np.load(os.path.join(roi_path, 'contour_position.npy'),
-                                                            allow_pickle=True))
-
     def load_unencrypted_pois(self, poi_path):
-        """Parses archived single target landmark configurations from disk.
-        
-        Parameters
-        ----------
-        poi_path : str
-            Direct folder path to read specified landmark point geometries.
-        
-        Returns
-        -------
-        None
-        
+        """Load one POI folder. A name that already exists gets a _1, _2, ... suffix.
+
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> image.load_unencrypted_pois(...)
+        >>> image.load_unencrypted_pois('C:/Data/CT 01/POIs/Iso')
         """
         name = str(np.load(os.path.join(poi_path, 'name.npy'), allow_pickle=True))
 
@@ -1365,408 +1194,166 @@ class Image(object):
             self.poi[name].point_position = list(np.load(os.path.join(poi_path, 'point_position.npy'),
                                                          allow_pickle=True))
 
-    def create_sitk_image(self, empty=False):
-        """Converts the active internal image data block matrix into a native SimpleITK image container.
-        
-        Parameters
-        ----------
-        empty : bool, default False
-            When True, drops data allocation arrays to return a zero-initialized UInt8 volume container.
-        
-        Returns
-        -------
-        SimpleITK.Image
-            The generated ITK core volumetric structure block tracking spacing and directions.
-        
+    def load_unencrypted_rois(self, roi_path):
+        """Load one ROI folder. A name that already exists gets a _1, _2, ... suffix.
+
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> image.create_sitk_image(...)
+        >>> image.load_unencrypted_rois('C:/Data/CT 01/ROIs/Liver')
         """
-        if empty:
-            sitk_image = sitk.Image([int(dim) for dim in self.dimensions], sitk.sitkUInt8)
-        else:
-            sitk_image = sitk.GetImageFromArray(self.array)
+        name = str(np.load(os.path.join(roi_path, 'name.npy'), allow_pickle=True))
 
-        matrix_flat = self.matrix.flatten(order='F')
-        sitk_image.SetDirection([float(mat) for mat in matrix_flat])
-        sitk_image.SetOrigin(self.origin)
-        sitk_image.SetSpacing(self.spacing)
+        existing_rois = list(self.roi.keys())
+        if name in existing_rois:
+            n = 0
+            while n >= 0:
+                n += 1
+                new_name = name + '_' + str(n)
+                if new_name not in existing_rois:
+                    name = new_name
+                    n = -1
 
-        return sitk_image
+        self.roi[name] = Roi(self)
+        self.roi[name].name = name
+        self.roi[name].visible = bool(np.load(os.path.join(roi_path, 'visible.npy'), allow_pickle=True))
+        self.roi[name].color = list(np.load(os.path.join(roi_path, 'color.npy'), allow_pickle=True))
+        self.roi[name].filepaths = str(np.load(os.path.join(roi_path, 'filepaths.npy'), allow_pickle=True))
 
-    def create_rotated_sitk_image(self):
-        """Applies a custom sample 3D Euler transformation rotation tracking localized anatomical structures.
-        
-        Returns
-        -------
-        numpy.ndarray
-            The newly resampled volumetric data matrix block.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> image.create_rotated_sitk_image(...)
-        """
-        sitk_image = sitk.GetImageFromArray(self.array)
-        matrix_flat = self.matrix.flatten(order='F')
-        sitk_image.SetDirection([float(mat) for mat in matrix_flat])
-        sitk_image.SetOrigin(self.origin)
-        sitk_image.SetSpacing(self.spacing)
-
-        transform = sitk.Euler3DTransform()
-        transform.SetRotation(0, 0, 10 * np.pi / 180)
-        transform.SetCenter(self.roi['Liver'].mesh.center)
-        transform.SetComputeZYX(True)
-
-        resample_image = sitk.ResampleImageFilter()
-        resample_image.SetOutputDirection(sitk_image.GetDirection())
-        resample_image.SetOutputOrigin(sitk_image.GetOrigin())
-        resample_image.SetTransform(transform)
-        resample_image.SetInterpolator(sitk.sitkLinear)
-        resample_image.Execute(sitk_image)
-
-        return sitk.GetArrayFromImage(resample_image)
-
-    def create_external(self, name='External', color=None, visible=False, filepaths=None, threshold=-250):
-        """Generates a continuous exterior bounding structural contour mask using an intensity threshold setting.
-        
-        Parameters
-        ----------
-        name : str, default 'External'
-            Tracking key string mapped onto the generated ROI structure block.
-        color : list of int, optional
-            Custom visual color definition profile mapping. Defaults to bright green.
-        visible : bool, default False
-            Standard viewport visualization status tracker constraint.
-        filepaths : str, optional
-            Source processing storage location links.
-        threshold : int, default -250
-            The low Hounsfield Unit value or raw scalar intensity configuration cap.
-        
-        Returns
-        -------
-        None
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> image.create_external(...)
-        """
-        if color is None:
-            color = [0, 255, 0]
-
-        if name not in list(self.roi.keys()):
-            self.roi[name] = Roi(self, name=name, color=color, visible=visible, filepaths=filepaths)
-
-        mask = external(self.array, threshold=threshold, only_mask=True)
-        positions = mask_to_contours(mask,
-                                    Data.image[self.image_name].origin,
-                                    Data.image[self.image_name].spacing,
-                                    Data.image[self.image_name].matrix)
-        contours = self.roi[name].convert_position_to_pixel(points=positions)
-
-        self.roi[name].contour_pixel = contours
-        self.roi[name].contour_position = positions
-        self.roi[name].create_mesh(reduction=0.50)
-
-    def compute_initial_origin(self, plane):
-        """Top-left corner of this plane's slice, at the volume's center index
-        along the plane's normal.
-        
-        self.display.image.dimensions is (z, y, x).
-        compute_position expects pixel index as [x, y, z].
-        axes gives (xi, yi, ni) in xyz terms, so the matching
-        dimensions slot for a given xyz index i is dimensions[2 - i].
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> image.compute_initial_origin(...)
-        """
-
-        axes = {'Axial':    (0, 1, 2),
-                'Sagittal': (1, 2, 0),
-                'Coronal':  (0, 2, 1)}
-
-        xi, yi, ni = axes[plane]
-        dims = self.dimensions  # (z, y, x)
-
-        idx_xyz = np.zeros(3)
-        idx_xyz[ni] = int(np.round(dims[2 - ni] / 2))  # center index along the through-plane axis
-        # xi/yi stay 0 -- top-left corner in-plane
-
-        return self.compute_position(idx_xyz)
-
-    def compute_pixel(self, position):
-        """Transforms a physical coordinate location string back to fractional/integer index pixel coordinates.
-        
-        Parameters
-        ----------
-        position : array_like
-            A 3-element physical point position configuration matrix tracking space.
-        
-        Returns
-        -------
-        numpy.ndarray
-            An int32 array tracking specific structural pixel matrix indices.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> image.compute_pixel(...)
-        """
-        matrix = copy.deepcopy(self.matrix)
-
-        hold = np.eye(3)
-        hold[0, :] = matrix[0, :] / self.spacing[0]
-        hold[1, :] = matrix[1, :] / self.spacing[1]
-        hold[2, :] = matrix[2, :] / self.spacing[2]
-        pos2pix = np.eye(4)
-        pos2pix[:3, :3] = hold
-        pos2pix[:3, 3] = np.asarray(self.origin).dot(-hold.T)
-
-        return pos2pix.dot([*position, 1])[:3]
-
-    def compute_position(self, xyz):
-        """Transforms local pixel grid coordinates to physical 3D space locations.
-        
-        Parameters
-        ----------
-        xyz : array_like
-            A 3-element index profile tracking data grid points.
-        
-        Returns
-        -------
-        numpy.ndarray
-            A float32 coordinate array defining physical space coordinates.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> image.compute_position(...)
-        """
-        matrix = copy.deepcopy(self.matrix)
-
-        p2p = np.eye(4)
-        p2p[:3, 0] = matrix[0, :] * self.spacing[0]
-        p2p[:3, 1] = matrix[1, :] * self.spacing[1]
-        p2p[:3, 2] = matrix[2, :] * self.spacing[2]
-        p2p[:3, 3] = self.origin
-
-        return p2p.dot([*xyz, 1])[:3]
-
-    def compute_matrix_pixel_to_position(self):
-        """Helper method computing homogeneous index transformation systems.
-        
-        Returns
-        -------
-        numpy.ndarray
-            A 4x4 coordinate tracking matrix.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> image.compute_matrix_pixel_to_position(...)
-        """
-        matrix = copy.deepcopy(self.matrix)
-        spacing = self.spacing
-
-        pixel_to_position_matrix = np.identity(4, dtype=np.float32)
-        pixel_to_position_matrix[:3, 0] = matrix[0, :] * spacing[0]
-        pixel_to_position_matrix[:3, 1] = matrix[1, :] * spacing[1]
-        pixel_to_position_matrix[:3, 2] = matrix[2, :] * spacing[2]
-        pixel_to_position_matrix[:3, 3] = self.origin
-
-        return pixel_to_position_matrix
-
-    def compute_matrix_position_to_pixel(self):
-        """Helper method generating transformation matrices targeting internal structural transformations.
-        
-        Returns
-        -------
-        None
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> image.compute_matrix_position_to_pixel(...)
-        """
-        matrix = copy.deepcopy(self.matrix)
-        spacing = self.spacing
-
-        hold_matrix = np.identity(3, dtype=np.float32)
-        hold_matrix[0, :] = matrix[0, :] / spacing[0]
-        hold_matrix[1, :] = matrix[1, :] / spacing[1]
-        hold_matrix[2, :] = matrix[2, :] / spacing[2]
-
-        position_to_pixel_matrix = np.identity(4, dtype=np.float32)
-        position_to_pixel_matrix[:3, :3] = hold_matrix
-        position_to_pixel_matrix[:3, 3] = np.asarray(self.origin).dot(-hold_matrix.T)
-
-        return position_to_pixel_matrix
-
-    def get_aspect(self, slice_plane):
-        """Calculates viewport pixel aspect ratios required to prevent image skewing during display stretching.
-        
-        Parameters
-        ----------
-        slice_plane : str
-            The viewport display target orientation frame. Options: 'Axial', 'Coronal', 'Sagittal'.
-        
-        Returns
-        -------
-        float
-            The proportion scalar value rounded strictly to 2 decimal points.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> image.get_aspect(...)
-        """
-        if slice_plane == 'Axial':
-            aspect = np.round(self.spacing[0] / self.spacing[1], 2)
-        elif slice_plane == 'Coronal':
-            aspect = np.round(self.spacing[0] / self.spacing[2], 2)
-        else:
-            aspect = np.round(self.spacing[1] / self.spacing[2], 2)
-
-        return aspect
-
-    def get_bounds(self):
-        """Calculates absolute spatial bounding box ranges using VTK internal volume tracking logic.
-        
-        Returns
-        -------
-        list of float
-            A 6-element list tracking spatial limits: [x_min, x_max, y_min, y_max, z_min, z_max].
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> image.get_bounds(...)
-        """
-        shape = self.array.shape
-        matrix_reshape = self.matrix.reshape(1, 9)[0]
-        vtk_image = vtk.vtkImageData()
-        vtk_image.SetSpacing(self.spacing)
-        vtk_image.SetDirectionMatrix(matrix_reshape)
-        vtk_image.SetDimensions([shape[1], shape[2], shape[0]])
-        vtk_image.SetOrigin(self.origin)
-
-        x_min, x_max, y_min, y_max, z_min, z_max = vtk_image.GetBounds()
-
-        return [x_min, x_max, y_min, y_max, z_min, z_max]
-
-    def get_center(self, position=True, zyx=False):
-        """Identifies mid-volume coordinate points in either pixel space grids or absolute physical systems.
-        
-        Parameters
-        ----------
-        position : bool, default True
-            When True, transforms center coordinates into millimeter space. Otherwise keeps pixel indexes.
-        zyx : bool, default False
-            Flips positional vectors to sequence coordinates along inverted index trajectories.
-        
-        Returns
-        -------
-        list of int or numpy.ndarray
-            The length-3 mid-volume structural position elements.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> image.get_center(...)
-        """
-        pixel_index = [int(self.dimensions[2] / 2),
-                       int(self.dimensions[1] / 2),
-                       int(self.dimensions[0] / 2)]
-
-        if position:
-            center = self.compute_position(pixel_index)
-            if zyx:
-                return np.flip(center)
-            else:
-                return center
-
-        else:
-            if zyx:
-                return [pixel_index[2], pixel_index[1], pixel_index[0]]
-            else:
-                return pixel_index
-
-    def get_corner_sides(self):
-        """Generates a PyVista visual wireframe bounding box tracking the extreme dimensional corners.
-        
-        Returns
-        -------
-        pyvista.PolyData
-            The generated surface data object ready for rendering pipelines.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> image.get_corner_sides(...)
-        """
-        corner_points = self.compute_corner_positions()
-        points = [corner_points[0], corner_points[4], corner_points[7], corner_points[3],
-                  corner_points[1], corner_points[2], corner_points[6], corner_points[5]]
-        faces = [4, 0, 1, 2, 3,
-                 4, 4, 5, 6, 7,
-                 4, 0, 4, 7, 1,
-                 4, 3, 2, 6, 5,
-                 4, 0, 3, 5, 4,
-                 4, 1, 7, 6, 2]
-
-        return pv.PolyData(points, faces)
+        if os.path.exists(os.path.join(roi_path, 'contour_position.npy')):
+            self.roi[name].contour_position = list(np.load(os.path.join(roi_path, 'contour_position.npy'),
+                                                            allow_pickle=True))
 
     def reset_display(self):
-        """Clears out off-axis reslice transformations to re-establish standard viewing orientations.
-        
-        Returns
-        -------
-        None
-        
+        """Clear the view rotation and put every plane back at its initial slice (see :meth:`Display.reset`).
+
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> image.reset_display(...)
+        >>> mia.Data.image['CT 01'].reset_display()
         """
-        self.display.matrix = np.eye(3)
-        self.display.rotation_center = np.asarray(self.get_center(), dtype=float)
+        self.display.reset()
 
     def retrieve_angles(self, order='ZXY'):
-        """Converts the active viewing matrix configuration into standard Euler angles.
-        
-        Parameters
-        ----------
-        order : str, default 'ZXY'
-            The specific axis processing rotation sequence layout constraint.
-        
-        Returns
-        -------
-        numpy.ndarray
-            Calculated rotation angle vectors returned explicitly in degrees format.
-        
+        """Euler angles (degrees) of the display's view rotation.
+
+        The display builds its rotation from Euler 'xyz', so the angles differ from rotation_totals unless order='xyz'.
+
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image[mia.Data.image_list()[0]]
-        >>> image.retrieve_angles(...)
+        >>> mia.Data.image['CT 01'].retrieve_angles()
         """
         rotation = Rotation.from_matrix(self.display.matrix[:3, :3])
 
         return rotation.as_euler(order, degrees=True)
+
+    def save(self, folder_path, key, clevel=5):
+        """Write encrypted metadata.enc (pickled, no array/ROIs/POIs) and array.enc (blosc2 ZSTD) into folder_path.
+
+        Parameters
+        ----------
+        folder_path : str
+            Existing folder.
+        key : bytes
+            AES-GCM key (16, 24 or 32 bytes).
+        clevel : int, default 5
+            Compression level, 0-9.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> mia.Data.image['CT 01'].save('C:/Data/CT 01', key)
+        """
+        aes = AESGCM(key)
+
+        metadata = pickle.dumps(self)
+        nonce = os.urandom(12)
+        metadata = nonce + aes.encrypt(nonce, metadata, None)
+        with open(os.path.join(folder_path, 'metadata.enc'), "wb") as f:
+            f.write(metadata)
+
+        raw = self.array.tobytes(order="C")
+        compressed = blosc2.compress(raw, typesize=self.array.itemsize,
+                                     codec=blosc2.Codec.ZSTD, clevel=clevel, filter=blosc2.Filter.BITSHUFFLE)
+
+        nonce = os.urandom(12)
+        encrypted = nonce + aes.encrypt(nonce, compressed, None)
+        with open(os.path.join(folder_path, 'array.enc'), "wb") as f:
+            f.write(encrypted)
+
+    def save_unencrypted(self, path, rois=True, pois=True):
+        """Write the image to a folder: info.p (attributes), tags.npy, array.npy, plus ROIs/ and POIs/ folders.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> mia.Data.image['CT 01'].save_unencrypted('C:/Data/CT 01')
+        """
+        variable_names = self.__dict__.keys()
+        column_names = [name for name in variable_names if name not in ['roi', 'poi', 'tags', 'array', 'display']]
+
+        df = pd.DataFrame(index=[0], columns=column_names)
+        for name in column_names:
+            df.at[0, name] = getattr(self, name)
+
+        df.to_pickle(os.path.join(path, 'info.p'))
+        np.save(os.path.join(path, 'tags.npy'), self.tags, allow_pickle=True)
+        np.save(os.path.join(path, 'array.npy'), self.array, allow_pickle=True)
+
+        if rois:
+            self.save_unencrypted_rois(path, create_main_folder=True)
+
+        if pois:
+            self.save_unencrypted_pois(path, create_main_folder=True)
+
+    def save_unencrypted_pois(self, path, create_main_folder=False):
+        """Write one folder per POI (name, visible, color, filepaths, point_position) under path.
+
+        create_main_folder=True puts them in a new 'POIs' subfolder.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> mia.Data.image['CT 01'].save_unencrypted_pois('C:/Data/CT 01', create_main_folder=True)
+        """
+        if create_main_folder:
+            path = os.path.join(path, 'POIs')
+            os.mkdir(path)
+
+        for name in list(self.poi.keys()):
+            poi_path = os.path.join(os.path.join(path, name))
+            os.mkdir(poi_path)
+
+            np.save(os.path.join(poi_path, 'name.npy'), self.poi[name].name, allow_pickle=True)
+            np.save(os.path.join(poi_path, 'visible.npy'), self.poi[name].visible, allow_pickle=True)
+            np.save(os.path.join(poi_path, 'color.npy'), self.poi[name].color, allow_pickle=True)
+            np.save(os.path.join(poi_path, 'filepaths.npy'), self.poi[name].filepaths, allow_pickle=True)
+            np.save(os.path.join(poi_path, 'point_position.npy'), self.poi[name].point_position, allow_pickle=True)
+
+    def save_unencrypted_rois(self, path, create_main_folder=False):
+        """Write one folder per ROI (name, visible, color, filepaths, contour_position) under path.
+
+        create_main_folder=True puts them in a new 'ROIs' subfolder.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> mia.Data.image['CT 01'].save_unencrypted_rois('C:/Data/CT 01', create_main_folder=True)
+        """
+        if create_main_folder:
+            path = os.path.join(path, 'ROIs')
+            os.mkdir(path)
+
+        for name in list(self.roi.keys()):
+            roi_path = os.path.join(os.path.join(path, name))
+            os.mkdir(roi_path)
+
+            np.save(os.path.join(roi_path, 'name.npy'), self.roi[name].name, allow_pickle=True)
+            np.save(os.path.join(roi_path, 'visible.npy'), self.roi[name].visible, allow_pickle=True)
+            np.save(os.path.join(roi_path, 'color.npy'), self.roi[name].color, allow_pickle=True)
+            np.save(os.path.join(roi_path, 'filepaths.npy'), self.roi[name].filepaths, allow_pickle=True)
+            if self.roi[name].contour_position is not None:
+                np.save(os.path.join(roi_path, 'contour_position.npy'),
+                        np.array(self.roi[name].contour_position, dtype=object),
+                        allow_pickle=True)
