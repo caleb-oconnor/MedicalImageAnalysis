@@ -57,9 +57,17 @@ def _fused_oblique_sample_kernel(volume, h, w, sx, sy,
     """
     One pass per output pixel: builds the world-space sampling point, maps it into the volume's own voxel space, and
     trilinearly samples, all as scalar math inside the compiled loop (no intermediate numpy arrays).
+
+    An axis with a single slice (2D X-ray, one US frame) has no thickness, so a plane would only hit it at exactly
+    index 0 and float error from any rigid matrix blanks it. Those axes accept +/- half a voxel and snap onto the slice.
     """
     out = np.empty((h, w), dtype=np.float32)
     nz, ny, nx = volume.shape
+
+    tz = 0.5 if nz == 1 else 0.0
+    ty = 0.5 if ny == 1 else 0.0
+    tx = 0.5 if nx == 1 else 0.0
+
     for i in prange(h):
         v = i * sy
         for j in range(w):
@@ -77,15 +85,22 @@ def _fused_oblique_sample_kernel(volume, h, w, sx, sy,
             jj = (Minv[1, 0] * rx + Minv[1, 1] * ry + Minv[1, 2] * rz) / isp1
             kk = (Minv[2, 0] * rx + Minv[2, 1] * ry + Minv[2, 2] * rz) / isp2
 
-            if kk < 0 or kk > nz - 1 or jj < 0 or jj > ny - 1 or ii < 0 or ii > nx - 1:
+            if (kk < -tz or kk > nz - 1 + tz or jj < -ty or jj > ny - 1 + ty or
+                    ii < -tx or ii > nx - 1 + tx):
                 out[i, j] = background
                 continue
 
-            # clamp so the last voxel is sampled (f == n-1 -> t == 1.0) and i0+1 stays in bounds
-            z0 = min(int(kk), nz - 2)
-            y0 = min(int(jj), ny - 2)
-            x0 = min(int(ii), nx - 2)
-            z1, y1, x1 = z0 + 1, y0 + 1, x0 + 1
+            # no-op for normal axes; snaps a single-slice axis onto its slice
+            kk = min(max(kk, 0.0), nz - 1.0)
+            jj = min(max(jj, 0.0), ny - 1.0)
+            ii = min(max(ii, 0.0), nx - 1.0)
+
+            # clamp so the last voxel is sampled (f == n-1 -> t == 1.0) and i0+1 stays in bounds;
+            # max(..., 0) and min(i0 + 1, n - 1) only matter for single-slice axes
+            z0 = max(min(int(kk), nz - 2), 0)
+            y0 = max(min(int(jj), ny - 2), 0)
+            x0 = max(min(int(ii), nx - 2), 0)
+            z1, y1, x1 = min(z0 + 1, nz - 1), min(y0 + 1, ny - 1), min(x0 + 1, nx - 1)
             fz, fy, fx = kk - z0, jj - y0, ii - x0
 
             c000 = volume[z0, y0, x0]
@@ -151,7 +166,7 @@ class Display(object):
         self._image_spacing_f32 = self.image.spacing.astype(np.float32)
 
         # Fixed per-plane oblique output pixel grid (H, W).
-        nz, ny, nx = self.image.array.shape
+        nz, ny, nx = self.image.array.shape[:3]
         self.oblique_shape = {'Axial': (ny, nx), 'Sagittal': (nz, ny), 'Coronal': (nz, nx)}
 
         self._warm_up_kernel()
@@ -240,11 +255,14 @@ class Display(object):
 
     def _warm_up_kernel(self):
         """
-        Numba JIT-compiles a separate specialization per input dtype (int16 vs float32 vs whatever). Trigger that
-        compile now, on a throwaway 2x2 array of the SAME dtype as the real volume, so the ~1-1.5s one-time cost happens
-        at construction instead of on the user's first scroll/rotate.
+        Numba JIT-compiles a separate specialization per input dtype (int16 vs float32 vs whatever) and layout. Trigger
+        that compile now, on a throwaway 2x2 array of the SAME dtype as the real volume (and a strided channel view for
+        color), so the ~1-1.5s one-time cost happens at construction instead of on the user's first scroll/rotate.
         """
-        dummy_vol = np.zeros((2, 2, 2), dtype=self.image.array.dtype)
+        if self.image.array.ndim == 4:
+            dummy_vol = np.zeros((2, 2, 2, 3), dtype=self.image.array.dtype)[..., 0]
+        else:
+            dummy_vol = np.zeros((2, 2, 2), dtype=self.image.array.dtype)
         M = self._image_matrix_f32
         _fused_oblique_sample_kernel(
             dummy_vol, 2, 2, np.float32(1), np.float32(1),
@@ -326,15 +344,22 @@ class Display(object):
         Mcomb = (self._image_matrix_f32.astype(np.float64) @ Rrot.T).astype(np.float32)
         origin_comb = (Rrot @ self._image_origin_f32.astype(np.float64) + Rtrans).astype(np.float32)
 
-        arr = _fused_oblique_sample_kernel(
-            self.image.array, h, w, sx, sy,
-            origin[0], origin[1], origin[2],
-            x_axis[0], x_axis[1], x_axis[2],
-            y_axis[0], y_axis[1], y_axis[2],
-            origin_comb[0], origin_comb[1], origin_comb[2],
-            Mcomb,
-            self._image_spacing_f32[0], self._image_spacing_f32[1], self._image_spacing_f32[2],
-            background)
+        kernel_args = (h, w, sx, sy,
+                       origin[0], origin[1], origin[2],
+                       x_axis[0], x_axis[1], x_axis[2],
+                       y_axis[0], y_axis[1], y_axis[2],
+                       origin_comb[0], origin_comb[1], origin_comb[2],
+                       Mcomb,
+                       self._image_spacing_f32[0], self._image_spacing_f32[1], self._image_spacing_f32[2])
+
+        volume = self.image.array
+        if volume.ndim == 4:
+            arr = np.stack([_fused_oblique_sample_kernel(volume[..., c], *kernel_args, 0.0)
+                            for c in range(volume.shape[3])], axis=-1)
+            if np.issubdtype(volume.dtype, np.integer):
+                arr = np.clip(np.rint(arr), 0, np.iinfo(volume.dtype).max).astype(volume.dtype)
+        else:
+            arr = _fused_oblique_sample_kernel(volume, *kernel_args, background)
 
         result = {'dimensions': (w, h), 'spacing': self.spacing, 'pixel_spacing': (float(sx), float(sy)),
                   'x_axis': x_axis, 'y_axis': y_axis, 'normal': normal, 'origin': origin, 'grid': grid}
