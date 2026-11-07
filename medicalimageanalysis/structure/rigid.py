@@ -328,9 +328,6 @@ class Rigid(object):
 
         return rigid
 
-    # ------------------------------------------------------------------------------------------------------------
-    # Private methods
-    # ------------------------------------------------------------------------------------------------------------
     def _apply_display_transform(self, T, base_name, image_name):
         """Apply T (in the base image's world) to the resliced image: A_new = T @ A, then solve back for self.matrix
         so the parent's base stays untouched. Manual edits act on the full registration, so the animation snaps to 1."""
@@ -372,6 +369,28 @@ class Rigid(object):
         """Pivot where it appears in the base image's world before this step is applied."""
         pivot = self._pivot(moved_side)
         return base_display[:3, :3] @ pivot + base_display[:3, 3]
+
+    def _extend_grid(self, grid, base_name, image_name):
+        """grid grown (by whole pixels, so it stays aligned) to cover image_name's full extent as displayed on base_name.
+
+        Returns (grid, (col0, row0)): col0/row0 (<= 0) are where the grown grid's top-left pixel sits, in grid pixels,
+        relative to the original grid's top-left pixel.
+        """
+        A = self.get_display_matrix(base_name, image_name)
+        corners = Data.image[image_name].compute_corner_positions() @ A[:3, :3].T + A[:3, 3]
+        rel = corners - grid['origin']
+        u = rel @ grid['x_axis'] / grid['sx']
+        v = rel @ grid['y_axis'] / grid['sy']
+
+        h, w = grid['shape']
+        col0, row0 = int(np.floor(min(u.min(), 0))), int(np.floor(min(v.min(), 0)))
+        col1, row1 = int(np.ceil(max(u.max(), w - 1))), int(np.ceil(max(v.max(), h - 1)))
+
+        new = dict(grid)
+        new['origin'] = grid['origin'] + col0 * grid['sx'] * grid['x_axis'] + row0 * grid['sy'] * grid['y_axis']
+        new['shape'] = (row1 - row0 + 1, col1 - col0 + 1)
+
+        return new, (col0, row0)
 
     def _find_parent(self):
         """Parent Rigid by uid, or None if there is no parent or it no longer exists."""
@@ -490,7 +509,7 @@ class Rigid(object):
             if spacing not in (None, 'native'):
                 raise ValueError(f"spacing must be None, 'native', a number or (sx, sy); got {spacing!r}")
             display = Data.image[base_name if spacing is None else image_name].display
-            xi, yi, _ = display.axes[plane]
+            xi, yi, _ = display.AXES[plane]
             return float(display.spacing[xi]), float(display.spacing[yi])
 
         if np.isscalar(spacing):
@@ -498,9 +517,6 @@ class Rigid(object):
 
         return float(spacing[0]), float(spacing[1])
 
-    # ------------------------------------------------------------------------------------------------------------
-    # Public methods
-    # ------------------------------------------------------------------------------------------------------------
     def add_rigid(self, rigid_name):
         """Store this registration in ``Data.rigid``; None builds a unique name from the image names.
 
@@ -536,8 +552,8 @@ class Rigid(object):
 
         self.matrix = combined @ self._rigid_inv(self.get_base_matrix())
 
-    def compute_array(self, plane, position, base_name=None, image_name=None, spacing=None):
-        """image_name resliced onto base_name's view: Display.compute_array's result plus 'scale'.
+    def compute_array(self, plane, position, base_name=None, image_name=None, spacing=None, extend=True):
+        """image_name resliced onto base_name's view: Display.compute_array's result plus 'scale' and 'offset'.
 
         Parameters
         ----------
@@ -553,29 +569,37 @@ class Rigid(object):
         spacing : None, 'native', float or (sx, sy), optional
             None = base image grid, 'native' = moved image spacing, or any spacing. Use the same value in
             :meth:`compute_mesh_slice` and :meth:`compute_aspect`.
+        extend : bool, default True
+            Grow the grid past the base image so the whole of image_name is shown (fusion with a larger moving image).
+            Place the result at 'offset' instead of the base image's top-left pixel.
 
         Returns
         -------
-        dict or None
-            Display.compute_array's result plus 'scale' (sample spacing / base spacing).
+        dict
+            Display.compute_array's result plus 'scale' (sample spacing / base spacing) and 'pixel_offset' (col, row) of the
+            result's top-left pixel in the base view's pixel coords; (0, 0) unless extend=True.
 
         Examples
         --------
         >>> import medicalimageanalysis as mia
         >>> rigid = mia.Data.rigid['CT 01_MR 01']
         >>> res = rigid.compute_array('Axial', position)
+        >>> res = rigid.compute_array('Sagittal', position, extend=True)    # whole MR, even past the CT's z range
         >>> res = rigid.compute_array('Axial', position, base_name='MR 01', image_name='Dose 01')
         """
         base_name = self.reference.image_name if base_name is None else base_name
         image_name = self.moving.image_name if image_name is None else image_name
 
         grid, base_grid = self._view_grid(plane, position, base_name, image_name, spacing)
+        col0, row0 = 0, 0
+        if extend:
+            grid, (col0, row0) = self._extend_grid(grid, base_name, image_name)
+
         res = Data.image[image_name].display.compute_array(plane, position,
                                                            rigid_matrix=self.get_display_matrix(base_name, image_name),
                                                            grid=grid)
-        if res is None:
-            return None
         res['scale'] = (grid['sx'] / base_grid['sx'], grid['sy'] / base_grid['sy'])
+        res['pixel_offset'] = (col0 * res['scale'][0], row0 * res['scale'][1])
 
         return res
 
