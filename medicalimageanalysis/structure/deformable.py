@@ -283,6 +283,7 @@ class Deformable(object):
         self.current_mov = None
         self.set_current_order(inverse)
 
+        self.percent = 100
         self.visual = {'opacity': 0.5, 'vector': None}
         self.misc = {}
 
@@ -484,7 +485,7 @@ class Deformable(object):
         else:
             caches.pop(plane, None)
 
-    def compute_array(self, plane, position, use_moving_spacing=False, percent=100, background=-3001.0):
+    def compute_array(self, plane, position, use_moving_spacing=False, percent=None, background=-3001.0):
         """Same call as Rigid.compute_array: plane + the widget's position (top-left corner of the current_ref view).
         Returns current_mov rigidly + deformably mapped onto that view, plus 'scale' and 'pixel_offset'.
         
@@ -497,6 +498,7 @@ class Deformable(object):
         >>> deform = mia.Data.deformable[mia.Data.deformable_list()[0]]
         >>> deform.compute_array(...)
         """
+        percent = self.percent if percent is None else percent
         if self.dvf is None or self.current_ref is None or self.current_mov is None:
             return None
 
@@ -750,7 +752,7 @@ class Deformable(object):
 
         return inverted
 
-    def compute_mesh_slice(self, roi_name, plane, position, percent=100, return_pixel=True, use_cache=True):
+    def compute_mesh_slice(self, roi_name, plane, position, percent=None, return_pixel=True, use_cache=True):
         """Slice current_mov's deformed ROI in the same pixel space as compute_array: (col, row) floats relative to the
         view's top-left corner, pixel centers at integers. Each contour is closed (first point repeated).
         
@@ -1021,7 +1023,7 @@ class Deformable(object):
         self._display_cache = {}
         self.inverted_dvf = None
 
-    def map_mesh(self, roi_name, percent=100, set_moving=True, return_mesh=False):
+    def map_mesh(self, roi_name, set_moving=True, return_mesh=False):
         """Map a deformed display ROI back into the moving image space.
         
         Examples
@@ -1037,7 +1039,7 @@ class Deformable(object):
             return None
 
         deformed_points = np.asarray(self.roi[roi_name].points)
-        disp = (percent / 100) * self._sample_field_points(self.get_inverted_dvf(), deformed_points)
+        disp = (self.percent / 100) * self._sample_field_points(self.get_inverted_dvf(), deformed_points)
 
         self.rigid_rois[roi_name] = copy.deepcopy(self.roi[roi_name])
         self.rigid_rois[roi_name].points = deformed_points + disp
@@ -1096,15 +1098,23 @@ class Deformable(object):
         else:
             self.current_ref, self.current_mov = self.reference_name, self.moving_name
 
-    def update_rois(self, roi_name=None, percent=100):
+    def set_percent(self, percent):
+        """Deformation level used by compute_array / compute_mesh_slice when no percent is passed."""
+        percent = float(percent)
+        if percent == self.percent:
+            return
+        self.percent = percent
+        # drop warped meshes for other levels so dragging a slider doesn't pile up mesh copies
+        for key in [k for k in self._display_cache if isinstance(k, tuple) and k[0] == 'mesh' and k[3] != percent]:
+            del self._display_cache[key]
+
+    def update_rois(self, roi_name=None):
         """Warps visible moving ROI meshes into the reference world: rigid^-1, then + dvf.
         
         Parameters
         ----------
         roi_name : str, optional
             Target ROI. If None, all instances are updated. Defaults to None.
-        percent : float, optional
-            Magnitude modifier scaling field vector step sizes. Defaults to 100.
         
         Examples
         --------
@@ -1128,4 +1138,4 @@ class Deformable(object):
 
                     points = np.asarray(self.rigid_rois[name].points)
                     self.roi[name] = copy.deepcopy(self.rigid_rois[name])
-                    self.roi[name].points = points + (percent / 100) * self._sample_field_points(self.dvf, points)
+                    self.roi[name].points = points + (self.percent / 100) * self._sample_field_points(self.dvf, points)
