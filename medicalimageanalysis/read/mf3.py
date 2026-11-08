@@ -5,44 +5,55 @@ Author - Caleb O'Connor
 Email - csoconnor@mdanderson.org
 
 3D Manufacturing Format (3MF) Mesh Reader and Voxelizer
-======================================================
+=======================================================
 
 Description:
-    This module provides functionality to parse .3mf archives—a modern 3D
-    printing format—and integrate them into a medical imaging workflow.
-    The reader extracts mesh geometry and vertex-level color data, converting
-    it into a PyVista PolyData object and subsequently voxelizing it into
-    an internal Image/ROI structure.
+    This module parses .3mf archives, a modern 3D printing format, and
+    brings them into the imaging workflow. The reader extracts mesh
+    geometry and per-vertex color, builds a PyVista PolyData mesh, and
+    voxelizes it into a new Image that carries the mesh as an ROI.
 
-Key Features:
-    1. **Archive Handling**: Unzips the 3MF package to access the underlying
-       XML model descriptions and texture images.
-    2. **Color Resolution**: Supports two 3MF color workflows:
-        - Texture-based: Maps UV coordinates to pixel colors in texture files.
-        - Basematerials: Resolves hex-coded display colors via property IDs.
-    3. **Mesh Optimization**: Automatically decimated high-density meshes
-       (targeting ~50k points) to maintain application performance.
-    4. **Voxelization**: Converts mesh geometry into a binary mask to create
-       a registered `Image` and `ROI` within the global `Data` state.
+Key Functionalities:
+    1. **Archive Handling**: Opens the 3MF zip package to read the
+       `3D/3dmodel.model` XML and any texture images it references.
+    2. **Color Resolution**: Supports the two common 3MF color workflows:
+        - Texture-based: UV coordinates sampled from a texture image.
+        - Basematerials: hex `displaycolor` values looked up by property ID.
+       Vertices without color stay light grey [200, 200, 200].
+    3. **Mesh Optimization**: Decimates meshes above 50k points down to
+       roughly 50k to keep rendering and voxelization fast; smaller meshes
+       are kept as is.
+    4. **Voxelization**: Converts the mesh into a binary mask, registers it
+       as a new 'CT NN' image, and attaches the mesh as an ROI.
 
-Structure:
-    * ThreeMfReader:
-        - load(): The primary execution pipeline (Parse -> Build -> Voxelize).
-        - get_color(): Inner helper to resolve vertex colors based on mode.
+Architecture Note:
+    Only the first `<object>` in the model is read. The result is written
+    to the global `Data` registry, and `Data.match_rois()` is called so the
+    new ROI name exists on every loaded image.
 
 Usage:
+    >>> from medicalimageanalysis.read.mf3 import ThreeMfReader
+    >>> from medicalimageanalysis import Data
     >>> # Load an implant mesh and register it as an ROI named 'Implant'
-    >>> reader = ThreeMfReader("path/to/implant.3mf", roi_name="Implant")
+    >>> reader = ThreeMfReader('C:/Data/implant.3mf', roi_name='Implant')
     >>> reader.load()
+    >>> Data.image_list()
 
 Examples
 --------
 >>> import medicalimageanalysis as mia
->>> files = mia.file_parser(folder_path='C:/Data/Patient01')
->>> mia.read_dicoms(file_list=files['Dicom'])
+>>> from medicalimageanalysis import Data
+>>> Data.clear()
+>>> mia.read_3mf(file='C:/Data/pelvis_model.3mf', roi_name='Pelvis')
+>>> Data.image_list()
+['CT 01']
+>>> roi = Data.image['CT 01'].roi['Pelvis']
+>>> roi.color, roi.multi_color, roi.visible
+([128, 128, 128], True, False)
 """
 
 import zipfile
+from pathlib import Path
 from PIL import Image as pil_image
 from PIL import ImageColor
 import xml.etree.ElementTree as ET
@@ -61,68 +72,123 @@ class ThreeMfReader(object):
     """
     Reader for `.3mf` (3D Manufacturing Format) files.
 
-    This class converts a `.3mf` file into:
-    - A PyVista mesh (PolyData)
-    - Optional ROI creation
-    - Internal image/mask representation
-
-    It supports:
-    - Vertex/triangle mesh extraction
-    - Vertex coloring from textures or basematerials
-    - Mesh decimation
-    - Conversion into internal image + ROI structures
+    Converts one `.3mf` file into a decimated PyVista mesh with vertex
+    colors, voxelizes it into a new image, and stores the mesh as an ROI on
+    that image in the global `Data` registry.
 
     Parameters
     ----------
     file : str
         Path to the `.3mf` file.
+
     roi_name : str, optional
-        Name of ROI to create from the mesh.
+        Name of the ROI that holds the mesh. Defaults to the file stem
+        (e.g. 'implant' for 'C:/Data/implant.3mf').
+
+    Attributes
+    ----------
+    file : str
+        Path to the `.3mf` file.
+
+    roi_name : str
+        ROI name used when registering the mesh (never None).
 
     Examples
     --------
-    Basic usage::
+    Load a colored tumor model and inspect the result:
 
-        reader = ThreeMfReader("model.3mf", roi_name="Tumor")
-        reader.load()
+    >>> from medicalimageanalysis.read.mf3 import ThreeMfReader
+    >>> from medicalimageanalysis import Data
+    >>> Data.clear()
+    >>> reader = ThreeMfReader('C:/Data/tumor_model.3mf', roi_name='Tumor')
+    >>> reader.load()
+    >>> Data.image_list()
+    ['CT 01']
+    >>> list(Data.image['CT 01'].roi.keys())
+    ['Tumor']
+
+    The convenience wrapper does the same thing in one call:
+
+    >>> import medicalimageanalysis as mia
+    >>> mia.read_3mf(file='C:/Data/tumor_model.3mf', roi_name='Tumor')
     """
 
     def __init__(self, file, roi_name=None):
-        """Initialize the 3MF reader.
-        
+        """
+        Store the file path and ROI name. Nothing is read until `load`.
+
         Parameters
         ----------
         file : str
             Path to `.3mf` file.
+
         roi_name : str, optional
-            ROI name to assign to generated mesh.
-        
+            ROI name to assign to the generated mesh. Defaults to the file
+            stem.
+
         Examples
         --------
+        Constructing the reader is cheap and does not touch the file:
+
         >>> from medicalimageanalysis.read.mf3 import ThreeMfReader
-        >>> reader = ThreeMfReader('C:/Data/model.3mf', roi_name='Mandible')
-        >>> reader.__init__()
+        >>> reader = ThreeMfReader('C:/Data/mandible.3mf', roi_name='Mandible')
+        >>> reader.file, reader.roi_name
+        ('C:/Data/mandible.3mf', 'Mandible')
+
+        Without a name the file stem is used:
+
+        >>> ThreeMfReader('C:/Data/cutting_guide.3mf').roi_name
+        'cutting_guide'
         """
         self.file = file
-        self.roi_name = roi_name
+        self.roi_name = roi_name if roi_name is not None else Path(file).stem
 
     def load(self):
-        """Load and parse a `.3mf` file.
-        
+        """
+        Parse the `.3mf` file and register it as a new image + ROI.
+
         Steps performed:
-        1. Extract XML model from archive
-        2. Parse vertices and triangles
-        3. Handle color information (texture or basematerials)
-        4. Build PyVista mesh
-        5. Decimate mesh
-        6. Convert mesh to internal mask/image
-        7. Register ROI in global `Data` structure
-        
+            1. Read `3D/3dmodel.model` from the archive.
+            2. Parse vertices and triangles of the first object.
+            3. Resolve vertex colors (texture or basematerials).
+            4. Build the PyVista mesh and store colors in `mesh['colors']`.
+            5. Decimate to roughly 50k points (only if larger).
+            6. Voxelize into a mask image named 'CT NN'.
+            7. Attach the mesh as an ROI and run `Data.match_rois()`.
+
+        Returns
+        -------
+        None
+
+        Raises
+        ------
+        KeyError
+            If the archive has no `3D/3dmodel.model` entry.
+
+        IndexError
+            If the model contains no `<object>`.
+
         Examples
         --------
+        Load a mesh into an empty session:
+
         >>> from medicalimageanalysis.read.mf3 import ThreeMfReader
-        >>> reader = ThreeMfReader('C:/Data/model.3mf', roi_name='Mandible')
-        >>> reader.load()
+        >>> from medicalimageanalysis import Data
+        >>> Data.clear()
+        >>> ThreeMfReader('C:/Data/mandible.3mf', roi_name='Mandible').load()
+        >>> Data.image_list()
+        ['CT 01']
+
+        The image name continues the session's numbering, and the new ROI
+        is added (empty) to the images already loaded:
+
+        >>> import medicalimageanalysis as mia
+        >>> mia.read_dicoms(folder_path='C:/Data/Patient01')
+        >>> ThreeMfReader('C:/Data/guide.3mf', roi_name='CuttingGuide').load()
+        >>> Data.image_list()
+        ['CT 01', 'MR 02', 'CT 03']
+        >>> 'CuttingGuide' in Data.image['MR 02'].roi
+        True
         """
 
         ns = {
@@ -226,7 +292,12 @@ class ThreeMfReader(object):
         mesh = pv.PolyData(vertex_list, faces)
         mesh["colors"] = vertex_colors
 
-        decimate_mesh = mesh.decimate_pro(1 - (50000 / len(mesh.points)))
+        # Only reduce meshes above the target; smaller ones would need a negative reduction
+        target_points = 50000
+        if mesh.n_points > target_points:
+            decimate_mesh = mesh.decimate_pro(1 - (target_points / mesh.n_points))
+        else:
+            decimate_mesh = mesh
 
         # --- Convert mesh to image/mask ---
         image_name = f"CT {len(Data.image_list()) + 1:02d}"

@@ -8,57 +8,75 @@ DICOM Pipeline Orchestrator and Volumetric Reconstructor
 ========================================================
 
 Description:
-    This module serves as the primary ingestion engine for DICOM data. It
-    facilitates the transition from raw pydicom datasets to structured,
-    physically-accurate 3D volumes and 2D images within the global `Data` state.
+    This module is the ingestion engine for DICOM data. It takes raw
+    pydicom datasets and turns them into physically consistent images,
+    structures, registrations and dose grids inside the global `Data`
+    registry.
 
-Core Components:
-    1. **DicomReader**: The high-level orchestrator. It manages multithreaded
-       file reading, filters by modality, and groups individual slices into
-       logical series based on `SeriesInstanceUID` and spatial orientation.
-    2. **Read3D**: The volumetric engine for CT, MR, and PT. It performs the
-       heavy lifting of slice stacking, verifying physical spacing, detecting
-       missing slices, and computing the Patient-to-Voxel coordinate matrix.
-    3. **ReadXRay / ReadRF / ReadUS**: Specialized 2D and pseudo-3D readers
-       that normalize non-volumetric modalities into a consistent format
-       compatible with the application's internal Image class.
-    4. **Sorting Logic**: Ensures that disparate imaging series are ordered
-       chronologically using acquisition date and time metadata for
-       longitudinal analysis.
+Supported Objects:
+    * CT / MR / PT          -> `Read3D` (classic and enhanced multi-frame)
+    * DX / CR / Tomo        -> `ReadXRay`
+    * RF (fluoroscopy)      -> `ReadRF`
+    * US                    -> `ReadUS`
+    * RTSTRUCT              -> `ReadRTStruct` (attached to its image)
+    * REG (rigid/deformable)-> `ReadREG` (`Data.rigid` / `Data.deformable`)
+    * RTDOSE                -> `ReadRTDose` (`Data.dose`)
 
-Geometric Processing:
-    The module implements rigorous DICOM coordinate system logic, utilizing
-    `ImageOrientationPatient` and `ImagePositionPatient` to:
-    - Determine anatomical planes (Axial, Coronal, Sagittal).
-    - Construct 3x3 orientation matrices.
-    - Validate slice continuity and handle irregular acquisitions.
+Key Functionalities:
+    1. **Orchestration**: `DicomReader` reads files on a thread pool, filters by
+       SOP Class, and groups slices into volumes by SeriesInstanceUID,
+       orientation and acquisition number.
+    2. **Volume Reconstruction**: `Read3D` sorts slices along the normal,
+       drops duplicates, rescales, fills missing slices by interpolation,
+       and reorients to a canonical (z, y, x) array.
+    3. **Projection / 2D Modalities**: `ReadXRay`, `ReadRF` and `ReadUS`
+       normalize non-volumetric data into the same (z, y, x) layout.
+    4. **Chronological Ordering**: `sort_images_by_datetime` orders the
+       loaded images by their best available acquisition timestamp.
 
-Thread Safety & Memory Management:
-    - Utilizes `threading` for I/O bound DICOM parsing.
-    - Explicitly deletes `PixelData` buffers after NumPy array conversion to
-      minimize RAM overhead—critical for processing large medical datasets.
+Geometric Conventions:
+    - Arrays are (z, y, x), each axis increasing along patient +z, +y, +x
+      (LPS).
+    - `origin` is the patient position of `array[0, 0, 0]`.
+    - `spacing` and `origin` are (x, y, z); `dimensions` is (z, y, x).
+    - `image_matrix` rows are the patient directions of the array's x, y
+      and z axes (identity for any orthogonal acquisition).
+
+Memory Management:
+    Pixel buffers (`PixelData`) are deleted from each dataset right after
+    decoding, so only the NumPy volume stays in RAM.
+
+Architecture Note:
+    Reader classes do their work in `__init__` and register the result in
+    `Data` themselves; callers normally only use `DicomReader` (or the
+    `read_dicoms` wrapper) and then read from `Data`.
 
 Usage:
-    >>> from medicalimageanalysis import DicomReader
-    >>>
-    >>> reader = DicomReader(folder_path=path, only_tags=False, clear=True)
+    >>> from medicalimageanalysis import Data
+    >>> from medicalimageanalysis.read.dicom import DicomReader
+    >>> files = {'Dicom': ['C:/Data/ct_001.dcm', 'C:/Data/ct_002.dcm']}
+    >>> reader = DicomReader(files, only_tags=False, only_modality=None,
+    ...                      only_load_roi_names=None, clear=True)
     >>> reader.load()
-    >>> 
-    >>> files = {"Dicom": ["/path/to/slice1.dcm", "/path/to/slice2.dcm"]}
-    >>> reader = DicomReader(files, only_tags=False, clear=True)
-    >>> reader.load()
-    >>> # Volumes are now available in Data.image
+    >>> Data.image_list()
 
 Examples
 --------
 >>> import medicalimageanalysis as mia
->>> files = mia.file_parser(folder_path='C:/Data/Patient01')
->>> mia.read_dicoms(file_list=files['Dicom'])
+>>> from medicalimageanalysis import Data
+>>> mia.read_dicoms(folder_path='C:/Data/Patient01')
+>>> Data.image_list()
+['CT 01', 'MR 02']
+>>> ct = Data.image['CT 01']
+>>> ct.array.shape, ct.spacing
+((142, 512, 512), array([0.977, 0.977, 2.5  ]))
+>>> Data.rigid_list(), Data.dose_list()
+(['CT 01_MR 02'], ['RTDOSE 01'])
 """
 
 import time
 import hashlib
-import threading
+from concurrent.futures import ThreadPoolExecutor
 import itertools
 from datetime import datetime
 
@@ -75,25 +93,54 @@ from ..data import Data
 
 
 def get_modality(series_sop_class):
-    """Map a DICOM SOP Class UID to an internal modality label.
-    
+    """
+    Map a DICOM SOP Class UID to an internal modality label.
+
+    Covers the image, RT, registration, segmentation, report and document
+    SOP classes. Enhanced (multi-frame) variants of CT, MR, US, XA, RF, PET
+    and RT Image are flagged so callers can treat them differently.
+
+    Note that PET maps to 'PET' (not the DICOM Modality value 'PT').
+
     Parameters
     ----------
     series_sop_class : str
-        SOP Class UID from DICOM tag ``(0008,0016)``.
-    
+        SOP Class UID from DICOM tag (0008,0016).
+
     Returns
     -------
     tuple[str | None, bool | None]
-        A pair containing the internal modality name and a flag indicating
-        whether the object is an enhanced variant. ``(None, None)`` is
-        returned for unsupported UIDs.
-    
+        Internal modality name and whether it is an enhanced variant.
+        (None, None) for unsupported UIDs.
+
     Examples
     --------
+    Classic and enhanced CT:
+
     >>> from medicalimageanalysis.read.dicom import get_modality
     >>> get_modality('1.2.840.10008.5.1.4.1.1.2')
     ('CT', False)
+    >>> get_modality('1.2.840.10008.5.1.4.1.1.2.1')
+    ('CT', True)
+
+    RT objects:
+
+    >>> get_modality('1.2.840.10008.5.1.4.1.1.481.3')
+    ('RTSTRUCT', False)
+    >>> get_modality('1.2.840.10008.5.1.4.1.1.481.2')
+    ('RTDOSE', False)
+
+    Read the UID straight from a dataset:
+
+    >>> import pydicom
+    >>> ds = pydicom.dcmread('C:/Data/ct_001.dcm', stop_before_pixels=True)
+    >>> get_modality(ds[0x0008, 0x0016].value)
+    ('CT', False)
+
+    Unknown UIDs return a pair of Nones:
+
+    >>> get_modality('1.2.3.4')
+    (None, None)
     """
     # --- Computed/Digital Radiography ---
     cr_sop_class = ["1.2.840.10008.5.1.4.1.1.1"]
@@ -333,7 +380,23 @@ def get_modality(series_sop_class):
 
 
 def _parse_dicom_date(value):
-    """Return a ``datetime.date`` parsed from a DICOM DA-like value."""
+    """
+    Return a `datetime.date` parsed from a DICOM DA-like value.
+
+    Non-digit characters are ignored, so both '20240315' and the legacy
+    '2024.03.15' form parse. Values with fewer than 8 digits, or invalid
+    dates, return None.
+
+    Examples
+    --------
+    >>> from medicalimageanalysis.read.dicom import _parse_dicom_date
+    >>> _parse_dicom_date('20240315')
+    datetime.date(2024, 3, 15)
+    >>> _parse_dicom_date('2024.03.15')
+    datetime.date(2024, 3, 15)
+    >>> _parse_dicom_date('2024') is None, _parse_dicom_date('20241345') is None
+    (True, True)
+    """
     if value is None:
         return None
 
@@ -348,7 +411,23 @@ def _parse_dicom_date(value):
 
 
 def _parse_dicom_time(value):
-    """Return ``(hour, minute, second, microsecond)`` from a DICOM TM-like value."""
+    """
+    Return (hour, minute, second, microsecond) from a DICOM TM-like value.
+
+    Minutes and seconds may be omitted (DICOM allows 'HH' and 'HHMM'). The
+    fraction is padded/truncated to microseconds. Out-of-range values return
+    None.
+
+    Examples
+    --------
+    >>> from medicalimageanalysis.read.dicom import _parse_dicom_time
+    >>> _parse_dicom_time('143015.25')
+    (14, 30, 15, 250000)
+    >>> _parse_dicom_time('1430')
+    (14, 30, 0, 0)
+    >>> _parse_dicom_time('25') is None, _parse_dicom_time('') is None
+    (True, True)
+    """
     if value is None:
         return None
 
@@ -375,7 +454,24 @@ def _parse_dicom_time(value):
 
 
 def _parse_dicom_datetime(date_value=None, time_value=None, datetime_value=None):
-    """Return a Python ``datetime`` parsed from DICOM date/time metadata."""
+    """
+    Return a Python `datetime` parsed from DICOM date/time metadata.
+
+    A DT value (`datetime_value`) takes priority over separate DA/TM values.
+    A valid date with a missing or invalid time gives midnight.
+
+    Examples
+    --------
+    >>> from medicalimageanalysis.read.dicom import _parse_dicom_datetime
+    >>> _parse_dicom_datetime('20240315', '143015')
+    datetime.datetime(2024, 3, 15, 14, 30, 15)
+    >>> _parse_dicom_datetime(datetime_value='20240315143015.5')
+    datetime.datetime(2024, 3, 15, 14, 30, 15, 500000)
+    >>> _parse_dicom_datetime('20240315')
+    datetime.datetime(2024, 3, 15, 0, 0)
+    >>> _parse_dicom_datetime(None, '143015') is None
+    True
+    """
     if datetime_value is not None:
         raw = ''.join(ch for ch in str(datetime_value).strip() if ch.isdigit() or ch == '.')
         if len(raw) >= 8:
@@ -402,7 +498,20 @@ def _parse_dicom_datetime(date_value=None, time_value=None, datetime_value=None)
 
 
 def _image_datetime(image):
-    """Best-available image timestamp for chronological ordering."""
+    """
+    Best-available timestamp of a loaded image for chronological ordering.
+
+    Tries AcquisitionDateTime, then acquisition, series, content, study and
+    instance-creation date/time from the image's first tag set. Returns None
+    when nothing parses.
+
+    Examples
+    --------
+    >>> from medicalimageanalysis import Data
+    >>> from medicalimageanalysis.read.dicom import _image_datetime
+    >>> _image_datetime(Data.image['CT 01'])
+    datetime.datetime(2024, 3, 15, 14, 30, 15)
+    """
     tags = image.tags[0] if getattr(image, 'tags', None) else None
     if tags is None:
         return None
@@ -425,17 +534,36 @@ def _image_datetime(image):
 
 
 def sort_images_by_datetime():
-    """Reorder loaded images chronologically by DICOM date/time metadata.
+    """
+    Reorder `Data.image` chronologically by DICOM date/time metadata.
 
-    All loaded images are reordered strictly by their best available DICOM
-    timestamp, regardless of the order in which they were imported. Sorting
-    uses this priority: ``AcquisitionDateTime`` -> acquisition -> series ->
-    content -> study -> instance creation. Missing or invalid timestamps are
-    placed last.
+    All loaded images are reordered by their best available timestamp,
+    regardless of import order, using this priority: AcquisitionDateTime ->
+    acquisition -> series -> content -> study -> instance creation. Images
+    without a usable timestamp go last. Image names are not changed, only the
+    order of `Data.image`.
+
+    Returns
+    -------
+    None
 
     Examples
     --------
+    A follow-up loaded before the baseline is moved behind it:
+
+    >>> import medicalimageanalysis as mia
+    >>> from medicalimageanalysis import Data
     >>> from medicalimageanalysis.read.dicom import sort_images_by_datetime
+    >>> mia.read_dicoms(folder_path='C:/Data/Patient01_followup')
+    >>> mia.read_dicoms(folder_path='C:/Data/Patient01_baseline', clear=False)
+    >>> sort_images_by_datetime()
+    >>> Data.image_list()
+    ['CT 02', 'CT 01']
+
+    `DicomReader.load` already calls this, so it is only needed after
+    adding images by other means (e.g. MHD):
+
+    >>> mia.read_mhd(file='C:/Data/cbct.mhd', modality='CT')
     >>> sort_images_by_datetime()
     """
     ordered_names = sorted(
@@ -450,24 +578,38 @@ def sort_images_by_datetime():
 
 
 def thread_process_dicom(path, stop_before_pixels=False):
-    """Read a DICOM file using pydicom in a thread-safe manner.
-    
+    """
+    Read one DICOM file, returning an empty list instead of raising.
+
+    Used as the worker for the threaded read in `DicomReader.read`, where a
+    single unreadable file should not stop the whole load.
+
     Parameters
     ----------
     path : str
         Path to the DICOM file.
+
     stop_before_pixels : bool, optional
         If True, only metadata is loaded (no pixel data).
-    
+
     Returns
     -------
     pydicom.dataset.FileDataset or list
-        Parsed DICOM dataset or empty list on failure.
-    
+        Parsed dataset, or [] if the file could not be read.
+
     Examples
     --------
+    Header-only read:
+
     >>> from medicalimageanalysis.read.dicom import thread_process_dicom
-    >>> ds = thread_process_dicom('C:/Data/slice001.dcm', stop_before_pixels=True)
+    >>> ds = thread_process_dicom('C:/Data/ct_001.dcm', stop_before_pixels=True)
+    >>> ds.Modality, 'PixelData' in ds
+    ('CT', False)
+
+    A non-DICOM file gives an empty list:
+
+    >>> thread_process_dicom('C:/Data/notes.txt')
+    []
     """
     try:
         datasets = dicom.dcmread(str(path), stop_before_pixels=stop_before_pixels)
@@ -479,52 +621,95 @@ def thread_process_dicom(path, stop_before_pixels=False):
 
 class DicomReader(object):
     """
-    Main DICOM pipeline for reading, organizing, and converting datasets.
+    Main DICOM pipeline: read, group, reconstruct and register.
 
-    Features
-    --------
-    - Multithreaded DICOM reading
-    - Modality-based grouping
-    - Series and slice sorting
-    - Image/structure creation
-    - RTSTRUCT / RTDOSE association
-    - Global Data integration
+    Reads files on a bounded thread pool, keeps the SOP classes listed in
+    `only_modality`, groups slices into volumes and hands each group to the
+    matching reader class. Images are created first so RTSTRUCT, REG and
+    RTDOSE can be matched to them, then everything is sorted by date.
 
     Parameters
     ----------
     files : dict
-        Dictionary containing file lists (expects key ``'Dicom'``).
+        Categorized file paths with a 'Dicom' key (output of `file_parser`).
+
     only_tags : bool
-        If True, loads only metadata (no pixel arrays).
+        If True, load metadata only (no pixel arrays). Geometry is still
+        computed.
+
     only_modality : list of str or None
-        Modalities to process. If None, defaults to all supported modalities.
-    only_load_roi_names : bool
-        If True, loads only ROI names (not full contours).
+        Modalities to process. None means ['CT', 'MR', 'PT', 'US', 'DX',
+        'RF', 'TOMOSYNTHESIS', 'CR', 'RTSTRUCT', 'REG', 'RTDOSE'].
+
+    only_load_roi_names : list of str or None
+        ROI names to keep from RTSTRUCT files.
+
     clear : bool
-        If True, clears global `Data` before loading.
+        If True, clears the global `Data` registry before loading.
+
+    Attributes
+    ----------
+    ds : list
+        Every dataset read (failed reads appear as empty lists).
+
+    ds_modality : dict
+        Modality -> list of datasets (2D/RT) or list of slice groups (3D).
 
     Examples
     --------
-    Basic usage::
+    Load a patient through the reader directly:
 
-        reader = DicomReader(
-            files={"Dicom": dicom_paths},
-            only_tags=True,
-            only_modality=None,
-            only_load_roi_names=False,
-            clear=True
-        )
-        reader.load()
+    >>> import medicalimageanalysis as mia
+    >>> from medicalimageanalysis import Data
+    >>> from medicalimageanalysis.read.dicom import DicomReader
+    >>> files = mia.file_parser(folder_path='C:/Data/Patient01')
+    >>> reader = DicomReader(files, only_tags=False, only_modality=None,
+    ...                      only_load_roi_names=None, clear=True)
+    >>> reader.load()
+    >>> Data.image_list()
+    ['CT 01', 'MR 02']
+
+    Inspect the grouping after a load:
+
+    >>> {key: len(groups) for key, groups in reader.ds_modality.items() if groups}
+    {'CT': 1, 'MR': 1, 'RTSTRUCT': 1, 'REG': 1}
+
+    The `read_dicoms` wrapper builds the file dictionary for you:
+
+    >>> mia.read_dicoms(folder_path='C:/Data/Patient01')
     """
 
     def __init__(self, files, only_tags, only_modality, only_load_roi_names, clear):
-        """Initialize DICOM reader.
-        
+        """
+        Store settings, optionally clear `Data`, and prepare modality buckets.
+
+        Parameters
+        ----------
+        files : dict
+            Categorized file paths with a 'Dicom' key.
+
+        only_tags : bool
+            Metadata-only flag.
+
+        only_modality : list of str or None
+            Modalities to keep (None for the default set).
+
+        only_load_roi_names : list of str or None
+            ROI names to keep from RTSTRUCT files.
+
+        clear : bool
+            Clear the `Data` registry now.
+
         Examples
         --------
+        One empty bucket is created per requested modality:
+
         >>> from medicalimageanalysis.read.dicom import DicomReader
-        >>> reader = DicomReader(files={'Dicom': dicom_paths}, only_tags=True, only_modality=['CT'], only_load_roi_names=None, clear=True)
-        >>> reader.__init__()
+        >>> reader = DicomReader({'Dicom': []}, only_tags=True,
+        ...                      only_modality=['CT', 'RTSTRUCT'],
+        ...                      only_load_roi_names=None, clear=False)
+        >>> reader.ds_modality
+        {'CT': [], 'RTSTRUCT': []}
         """
         self.files = files
         self.only_tags = only_tags
@@ -543,25 +728,31 @@ class DicomReader(object):
         self.ds_modality = {key: [] for key in self.only_modality}
 
     def load(self, display_time=False):
-        """Execute full DICOM pipeline.
-        
-        Steps
-        -----
-        1. Read files (multithreaded)
-        2. Separate modalities
-        3. Create images/structures
-        4. Sort by acquisition time
-        
+        """
+        Run the full pipeline: read -> group -> create -> sort by date.
+
         Parameters
         ----------
         display_time : bool
-            If True, prints total runtime.
-        
+            If True, print the total runtime.
+
+        Returns
+        -------
+        None
+
         Examples
         --------
+        Load a folder and time it:
+
+        >>> import medicalimageanalysis as mia
+        >>> from medicalimageanalysis import Data
         >>> from medicalimageanalysis.read.dicom import DicomReader
-        >>> reader = DicomReader(files={'Dicom': dicom_paths}, only_tags=True, only_modality=['CT'], only_load_roi_names=None, clear=True)
-        >>> reader.load()
+        >>> files = mia.file_parser(folder_path='C:/Data/Patient01')
+        >>> reader = DicomReader(files, False, None, None, True)
+        >>> reader.load(display_time=True)
+        Dicom Read Time: 3.41
+        >>> Data.image_list()
+        ['CT 01', 'MR 02']
         """
         t1 = time.time()
 
@@ -576,41 +767,69 @@ class DicomReader(object):
             print("Dicom Read Time:", t2 - t1)
 
     def read(self):
-        """Read all DICOM files using multithreading.
-        
+        """
+        Read every file in `files['Dicom']` into `self.ds` with a thread pool.
+
+        Uses a bounded `ThreadPoolExecutor` (Python's default worker count,
+        min(32, CPU count + 4)), so a study with thousands of files does not
+        start thousands of threads. Unreadable files are stored as empty lists
+        and skipped later. `self.ds` keeps the input file order.
+
+        Returns
+        -------
+        None
+
         Examples
         --------
         >>> from medicalimageanalysis.read.dicom import DicomReader
-        >>> reader = DicomReader(files={'Dicom': dicom_paths}, only_tags=True, only_modality=['CT'], only_load_roi_names=None, clear=True)
+        >>> reader = DicomReader({'Dicom': ['C:/Data/ct_001.dcm', 'C:/Data/ct_002.dcm']},
+        ...                      True, ['CT'], None, False)
         >>> reader.read()
+        >>> len(reader.ds), reader.ds[0].Modality
+        (2, 'CT')
+
+        Results line up with the input paths:
+
+        >>> reader.ds[1].filename
+        'C:/Data/ct_002.dcm'
         """
-        threads = []
-        def read_file_thread(file_path):
-            self.ds.append(thread_process_dicom(file_path, stop_before_pixels=self.only_tags))
-
-        for file_path in self.files['Dicom']:
-            thread = threading.Thread(target=read_file_thread, args=(file_path,))
-            threads.append(thread)
-            thread.start()
-
-        for thread in threads:
-            thread.join()
+        with ThreadPoolExecutor() as executor:
+            self.ds.extend(executor.map(
+                lambda file_path: thread_process_dicom(file_path, stop_before_pixels=self.only_tags),
+                self.files['Dicom'],
+            ))
 
     def separate_modalities_and_images(self):
-        """Group DICOM datasets by modality, series, orientation, and slice order.
-        
-        This function:
-        - Separates modalities (CT, MR, RTSTRUCT, etc.)
-        - Groups by SeriesInstanceUID
-        - Sorts slices by spatial orientation and position
-        - Determines acquisition plane (Axial / Coronal / Sagittal)
-        - Stores results in `self.ds_modality`
-        
+        """
+        Group the read datasets into `self.ds_modality`.
+
+        - US, DX, RF, CR, TOMOSYNTHESIS, RTSTRUCT, REG and RTDOSE: one entry per
+          dataset.
+        - CT, MR, PT: one entry per volume. Slices are split by
+          SeriesInstanceUID, then orientation (rounded to 3 decimals), then
+          AcquisitionNumber, and sorted along the acquisition plane. Acquisitions
+          that tile without overlapping and with equal gaps are merged back into
+          one volume; otherwise each stays its own entry.
+
+        Slices missing ImageOrientationPatient or ImagePositionPatient are
+        dropped.
+
+        Returns
+        -------
+        None
+
         Examples
         --------
+        A CT series and a two-orientation MR series become three volumes:
+
         >>> from medicalimageanalysis.read.dicom import DicomReader
-        >>> reader = DicomReader(files={'Dicom': dicom_paths}, only_tags=True, only_modality=['CT'], only_load_roi_names=None, clear=True)
+        >>> reader = DicomReader(files, False, ['CT', 'MR'], None, True)
+        >>> reader.read()
         >>> reader.separate_modalities_and_images()
+        >>> len(reader.ds_modality['CT']), len(reader.ds_modality['MR'])
+        (1, 2)
+        >>> len(reader.ds_modality['CT'][0])
+        142
         """
         for modality in list(self.ds_modality.keys()):
             images_in_modality = [d for d in self.ds if (0x0008, 0x0016) in d
@@ -770,21 +989,32 @@ class DicomReader(object):
                                     self.ds_modality[modality] += [img.tolist()]
 
     def image_creation(self):
-        """Convert grouped DICOM datasets into internal image structures.
-        
-        Handles:
-        - CT/MR/PT → 3D image reader
-        - DX/CR → X-ray reader
-        - RF → fluoroscopy reader
-        - US → ultrasound reader
-        - RTSTRUCT → ROI association
-        - REG / RTDOSE → specialized readers
-        
+        """
+        Turn the grouped datasets into registered objects.
+
+        Order matters so the RT objects can find their images:
+
+        1. CT/MR/PT -> `Read3D`; DX/CR/TOMOSYNTHESIS -> `ReadXRay`;
+           RF -> `ReadRF`; US -> `ReadUS`
+        2. RTSTRUCT -> `ReadRTStruct`, attached via `Image.input_rtstruct`
+           (a message is printed when no matching image is found)
+        3. REG -> `ReadREG`
+        4. RTDOSE -> `ReadRTDose`
+
+        Returns
+        -------
+        None
+
         Examples
         --------
+        >>> from medicalimageanalysis import Data
         >>> from medicalimageanalysis.read.dicom import DicomReader
-        >>> reader = DicomReader(files={'Dicom': dicom_paths}, only_tags=True, only_modality=['CT'], only_load_roi_names=None, clear=True)
+        >>> reader = DicomReader(files, False, None, None, True)
+        >>> reader.read()
+        >>> reader.separate_modalities_and_images()
         >>> reader.image_creation()
+        >>> Data.image_list(), Data.dose_list()
+        (['CT 01', 'MR 02'], ['RTDOSE 01'])
         """
 
         for modality in self.only_modality:
@@ -820,76 +1050,142 @@ class DicomReader(object):
 
 class Read3D(object):
     """
-    Reads and constructs 3D medical image volumes from DICOM slices.
+    Reconstruct a 3D CT / MR / PT volume from DICOM and register it.
 
-    Handles CT/MR/PT as either classic single-frame series or enhanced
-    (multi-frame) objects. The volume is:
-    - Sorted along the slice normal, with duplicate positions removed
-    - Rescaled per slice (RescaleSlope/RescaleIntercept)
-    - Gap-filled by linear interpolation where slices are missing
-    - Reoriented so the array is (z, y, x) with each axis increasing along +z, +y, +x
-    - Registered into the global `Data` structure
+    Handles classic single-frame series and enhanced multi-frame objects.
+    The volume is:
+
+    - sorted along the slice normal, with duplicate positions removed
+    - rescaled per slice (RescaleSlope / RescaleIntercept)
+    - gap-filled by linear interpolation where slices are missing
+    - reoriented so the array is (z, y, x) with each axis increasing along
+      patient +z, +y, +x
+    - registered in `Data.image` under a generated name
+
+    Geometry problems never stop the load; they are recorded in
+    `unverified` / `unverified_reasons` ('Orientation', 'Spacing',
+    'Position', 'Duplicate', 'Irregular', 'Skipped').
 
     Parameters
     ----------
     image_set : list or pydicom.Dataset
-        Classic slices of one volume, or one or more enhanced multi-frame datasets.
+        Classic slices of one volume, or one or more enhanced datasets.
+
     only_tags : bool
-        If True, only geometry/metadata is computed (pixel data is not decoded).
+        If True, only geometry/metadata is computed (pixels not decoded).
 
     Attributes
     ----------
     array : np.ndarray or None
-        Volume in (z, y, x) order. int16 when all rescale values are integers and the
-        data fits, int32 if it overflows int16, float32 for non-integer rescale (e.g. PT).
+        Volume in (z, y, x). int16 when every rescale value is an integer and
+        the data fits, int32 if it overflows, float32 for non-integer rescale
+        (e.g. PT in Bq/ml).
+
     spacing : np.ndarray
         Voxel spacing [x, y, z] in mm.
+
     dimensions : np.ndarray
-        Volume shape [z, y, x] (also valid when only_tags=True).
+        Volume shape [z, y, x] (valid with only_tags=True).
+
     origin : np.ndarray
-        Patient-space position of voxel array[0, 0, 0].
+        Patient-space position of array[0, 0, 0].
+
     image_matrix : np.ndarray
-        3x3, rows are the patient-space directions of the array's x, y, z axes.
-        Identity for any orthogonal acquisition, residual rotation for oblique ones.
+        3x3, rows are the patient directions of the array's x, y, z axes.
+        Identity for orthogonal acquisitions, residual rotation for obliques.
+
     orientation : np.ndarray
-        Direction cosines of the reoriented array (row = x axis, column = y axis).
+        Direction cosines of the reoriented array (row = x, column = y).
+
     acquisition_orientation : np.ndarray
         ImageOrientationPatient as acquired (orthonormalized).
+
     plane : str
-        Acquisition plane (Axial, Coronal, Sagittal).
+        Acquisition plane ('Axial', 'Coronal', 'Sagittal').
+
     enhanced : bool
         True if the input contained enhanced multi-frame DICOM.
+
     skipped_slice : list[int]
         Index (in the sorted real slices) of the slice following each gap.
+
     missing_slices : list[dict]
-        Per gap: insert_index into the stacked volume, num_missing, and the labels
-        of the bounding slices (SOPInstanceUID, or (SOPInstanceUID, frame) for enhanced).
+        Per gap: insert_index into the stacked volume, num_missing, and the
+        labels of the bounding slices.
+
     unverified : str or None
-        First geometry problem found; all problems are in `unverified_reasons`.
+        First geometry problem found; all are in `unverified_reasons`.
+
     frame_datasets, frame_numbers, frame_positions, frame_orientations,
     frame_pixel_spacings, frame_slopes, frame_intercepts, frame_thicknesses : list
-        Per-frame values, sorted along the slice normal with duplicates removed.
-        frame_numbers is None for classic slices, the 0-based frame for enhanced.
+        Per-frame values, sorted along the normal with duplicates removed.
+        frame_numbers is None for classic slices, the 0-based frame for
+        enhanced.
+
     duplicate_frames : list
-        Labels of frames dropped for sharing a position with an earlier frame.
+        Labels of frames dropped for sharing a position with an earlier one.
+
     image_name : str
-        Generated internal image identifier.
+        Name the image was registered under.
 
     Examples
     --------
-    Basic usage::
+    Reconstruct a sorted CT series (normally done by `DicomReader`):
 
-        reader = Read3D(dicom_series, only_tags=False)
-        print(reader.image_name)
+    >>> import pydicom
+    >>> from glob import glob
+    >>> from medicalimageanalysis import Data
+    >>> from medicalimageanalysis.read.dicom import Read3D
+    >>> slices = [pydicom.dcmread(p) for p in glob('C:/Data/Patient01/CT/*.dcm')]
+    >>> reader = Read3D(slices, only_tags=False)
+    >>> reader.image_name, reader.plane, reader.array.dtype
+    ('CT 01', 'Axial', dtype('int16'))
+    >>> reader.array.shape, reader.spacing
+    ((142, 512, 512), array([0.977, 0.977, 2.5  ]))
+    >>> Data.image['CT 01'] is not None
+    True
+
+    A series with one missing slice is still loaded, and the gap is
+    reported:
+
+    >>> reader.unverified, reader.missing_slices
+    ('Skipped', [{'insert_index': 57, 'num_missing': 1, 'between': ('1.2.3.57', '1.2.3.58')}])
+
+    Headers only, e.g. for a series browser:
+
+    >>> reader = Read3D(slices, only_tags=True)
+    >>> reader.array is None, tuple(reader.dimensions)
+    (True, (142, 512, 512))
     """
     def __init__(self, image_set, only_tags):
-        """Build a 3D reader instance and immediately register the image.
-        
+        """
+        Compute geometry, optionally decode pixels, and register the image.
+
+        Steps: collect per-frame tags -> common orientation -> plane -> slice
+        layout (sort, dedupe, gaps) -> geometry -> pixels (unless only_tags) ->
+        name -> `Data.image[image_name] = Image(self)`.
+
+        Parameters
+        ----------
+        image_set : list or pydicom.Dataset
+            Slices of one volume, or enhanced dataset(s).
+
+        only_tags : bool
+            Skip pixel decoding.
+
+        Raises
+        ------
+        ValueError
+            If the slices do not all share the same Rows/Columns.
+
         Examples
         --------
+        A coronal MR stack ends up (z, y, x) like every other volume:
+
         >>> from medicalimageanalysis.read.dicom import Read3D
-        >>> reader = Read3D(image_set=dicom_series, only_tags=False)
-        >>> reader.__init__()
+        >>> reader = Read3D(coronal_mr_slices, only_tags=False)
+        >>> reader.plane, reader.array.shape
+        ('Coronal', (256, 40, 256))
         """
         self.image_set = image_set if isinstance(image_set, list) else [image_set]
         self.only_tags = only_tags
@@ -941,7 +1237,16 @@ class Read3D(object):
     def _functional_item(ds, frame_index, keyword):
         """
         First item of a functional-group macro for one frame.
-        Per-frame groups take priority over shared groups.
+
+        Per-frame groups take priority over shared groups; None if neither has
+        the macro.
+
+        Examples
+        --------
+        >>> from medicalimageanalysis.read.dicom import Read3D
+        >>> item = Read3D._functional_item(enhanced_mr, 0, 'PixelMeasuresSequence')
+        >>> list(item.PixelSpacing)
+        [0.9375, 0.9375]
         """
         seq = ds.PerFrameFunctionalGroupsSequence[frame_index].get(keyword)
         if seq:
@@ -955,12 +1260,30 @@ class Read3D(object):
 
     @staticmethod
     def _is_enhanced(ds):
-        """Return ``True`` when a dataset stores per-frame functional groups."""
+        """
+        Return True when a dataset stores per-frame functional groups.
+
+        Examples
+        --------
+        >>> from medicalimageanalysis.read.dicom import Read3D
+        >>> Read3D._is_enhanced(enhanced_mr), Read3D._is_enhanced(ct_slice)
+        (True, False)
+        """
         return 'PerFrameFunctionalGroupsSequence' in ds
 
     @staticmethod
     def _number(value, default=None):
-        """Convert a DICOM value to ``float`` with a fallback default."""
+        """
+        Convert a DICOM value to float, with a fallback for empty/invalid.
+
+        Examples
+        --------
+        >>> from medicalimageanalysis.read.dicom import Read3D
+        >>> Read3D._number('2.5')
+        2.5
+        >>> Read3D._number('', 1.0), Read3D._number('abc', 0.0), Read3D._number(None)
+        (1.0, 0.0, None)
+        """
         if value is None or isinstance(value, (str, bytes)) and not value:
             return default
         try:
@@ -970,14 +1293,36 @@ class Read3D(object):
 
     @staticmethod
     def _vector(value):
-        """Convert a DICOM multi-value field to a flat float vector."""
+        """
+        Convert a DICOM multi-value to a flat float array, or None if empty.
+
+        Examples
+        --------
+        >>> from medicalimageanalysis.read.dicom import Read3D
+        >>> Read3D._vector([0.5, 0.5])
+        array([0.5, 0.5])
+        >>> Read3D._vector('') is None, Read3D._vector([]) is None
+        (True, True)
+        """
         if value is None or isinstance(value, (str, bytes)):
             return None
         arr = np.asarray(value, dtype=np.float64).ravel()
         return arr if arr.size else None
 
     def _add_classic_frame(self, ds):
-        """Collect geometry and rescale metadata from a classic single-frame slice."""
+        """
+        Collect geometry and rescale tags from one classic slice.
+
+        Pixel spacing falls back from PixelSpacing to ImagerPixelSpacing to
+        DetectorElementSpacing; thickness from SpacingBetweenSlices to
+        SliceThickness; slope defaults to 1 and intercept to 0.
+
+        Examples
+        --------
+        >>> reader._add_classic_frame(ct_slice)
+        >>> reader.frame_slopes[-1], reader.frame_intercepts[-1]
+        (1.0, -1024.0)
+        """
         spacing = self._vector(ds.get('PixelSpacing'))
         if spacing is None:
             spacing = self._vector(ds.get('ImagerPixelSpacing'))
@@ -997,7 +1342,19 @@ class Read3D(object):
         )
 
     def _add_enhanced_frames(self, ds):
-        """Collect geometry and rescale metadata from an enhanced multi-frame object."""
+        """
+        Collect geometry and rescale tags for every frame of an enhanced object.
+
+        Reads PlanePosition, PlaneOrientation, PixelMeasures and
+        PixelValueTransformation per frame (falling back to shared groups, and
+        to top-level rescale tags for legacy-converted objects).
+
+        Examples
+        --------
+        >>> reader._add_enhanced_frames(enhanced_mr)
+        >>> len(reader.frame_positions), reader.frame_numbers[:3]
+        (176, [0, 1, 2])
+        """
         def get(item, keyword):
             return item.get(keyword) if item is not None else None
 
@@ -1025,7 +1382,19 @@ class Read3D(object):
 
     def _add_frame(self, ds, frame_number, position, orientation, pixel_spacing,
                    slope, intercept, thickness):
-        """Append one normalized frame record to the internal parallel lists."""
+        """
+        Append one normalized frame record to the parallel per-frame lists.
+
+        Examples
+        --------
+        >>> reader._add_frame(ds=ct_slice, frame_number=None,
+        ...                   position=np.array([-250.0, -250.0, 12.5]),
+        ...                   orientation=np.array([1.0, 0, 0, 0, 1.0, 0]),
+        ...                   pixel_spacing=np.array([0.977, 0.977]),
+        ...                   slope=1.0, intercept=-1024.0, thickness=2.5)
+        >>> reader.frame_positions[-1]
+        array([-250. , -250. ,   12.5])
+        """
         self.frame_datasets.append(ds)
         self.frame_numbers.append(frame_number)
         self.frame_positions.append(position)
@@ -1038,6 +1407,17 @@ class Read3D(object):
     def _collect_frames(self):
         """
         Flatten classic slices and enhanced frames into parallel per-frame lists.
+
+        Raises
+        ------
+        ValueError
+            If the inputs have different Rows/Columns.
+
+        Examples
+        --------
+        >>> reader._collect_frames()
+        >>> len(reader.frame_datasets) == len(reader.frame_positions)
+        True
         """
         shapes = {(int(ds.Rows), int(ds.Columns)) for ds in self.image_set}
         if len(shapes) > 1:
@@ -1059,14 +1439,37 @@ class Read3D(object):
                 self._add_classic_frame(ds)
 
     def _flag(self, reason):
-        """Record a geometry verification issue without interrupting loading."""
+        """
+        Record a geometry issue without interrupting loading.
+
+        The first reason becomes `unverified`; every distinct reason is kept in
+        `unverified_reasons`.
+
+        Examples
+        --------
+        >>> reader._flag('Spacing')
+        >>> reader._flag('Skipped')
+        >>> reader.unverified, reader.unverified_reasons
+        ('Spacing', ['Spacing', 'Skipped'])
+        """
         if reason not in self.unverified_reasons:
             self.unverified_reasons.append(reason)
         if self.unverified is None:
             self.unverified = reason
 
     def _frame_label(self, i):
-        """Return a user-friendly frame identifier for diagnostics and gap reports."""
+        """
+        Identifier for frame i: SOPInstanceUID, or (SOPInstanceUID, frame) for enhanced.
+
+        Enhanced frame numbers are reported 1-based.
+
+        Examples
+        --------
+        >>> reader._frame_label(0)
+        '1.2.840.113619.2.55.3.1'
+        >>> enhanced_reader._frame_label(4)
+        ('1.2.840.113619.2.55.3.9', 5)
+        """
         uid = self.frame_datasets[i].SOPInstanceUID
         n = self.frame_numbers[i]
         return uid if n is None else (uid, n + 1)
@@ -1074,6 +1477,19 @@ class Read3D(object):
     def _interpolate_missing(self, volume):
         """
         Linearly interpolate missing slices in rescaled space (in place).
+
+        Slices between two real slices `lo` and `hi` get
+        (1 - t) * volume[lo] + t * volume[hi]; integer volumes are rounded.
+
+        Examples
+        --------
+        >>> reader.slice_map
+        [0, 1, None, 2]
+        >>> volume[:, 0, 0]
+        array([  0, 100,   0, 300], dtype=int16)
+        >>> reader._interpolate_missing(volume)
+        >>> volume[:, 0, 0]
+        array([  0, 100, 200, 300], dtype=int16)
         """
         real = [k for k, idx in enumerate(self.slice_map) if idx is not None]
         is_int = np.issubdtype(volume.dtype, np.integer)
@@ -1089,7 +1505,16 @@ class Read3D(object):
                 volume[k] = np.rint(plane) if is_int else plane
 
     def _nominal_thickness(self):
-        """Return the first available slice thickness or spacing estimate."""
+        """
+        First available slice thickness; flags 'Spacing' and returns 1.0 if none.
+
+        Examples
+        --------
+        >>> reader.frame_thicknesses
+        [None, 2.5, 2.5]
+        >>> reader._nominal_thickness()
+        2.5
+        """
         for thickness in self.frame_thicknesses:
             if thickness:
                 return abs(thickness)
@@ -1098,7 +1523,18 @@ class Read3D(object):
 
     def _read_plane(self, i, cache):
         """
-        Stored pixel values of frame i. PixelData is released after decoding.
+        Stored (un-rescaled) pixel values of frame i.
+
+        Classic slices free their PixelData immediately. Enhanced datasets are
+        decoded once into `cache` (keyed by dataset id) and then indexed by
+        frame.
+
+        Examples
+        --------
+        >>> cache = {}
+        >>> plane = reader._read_plane(0, cache)
+        >>> plane.shape, plane.dtype
+        ((512, 512), dtype('uint16'))
         """
         ds = self.frame_datasets[i]
         frame_number = self.frame_numbers[i]
@@ -1119,6 +1555,14 @@ class Read3D(object):
     def _reorder_frames(self, order):
         """
         Reorder (or subset) every per-frame list with the same index list.
+
+        Examples
+        --------
+        >>> [p[2] for p in reader.frame_positions]
+        [-7.5, -5.0, -10.0]
+        >>> reader._reorder_frames([2, 0, 1])
+        >>> [p[2] for p in reader.frame_positions]
+        [-10.0, -7.5, -5.0]
         """
         for name in ('frame_datasets', 'frame_numbers', 'frame_positions', 'frame_orientations',
                      'frame_pixel_spacings', 'frame_slopes', 'frame_intercepts', 'frame_thicknesses'):
@@ -1128,6 +1572,16 @@ class Read3D(object):
     def _reorient(self, volume):
         """
         Permute/flip the stacked volume into (+z, +y, +x).
+
+        Uses the permutation and flips worked out by `compute_geometry`; returns
+        the input unchanged for a standard axial stack.
+
+        Examples
+        --------
+        >>> reader._stack_perm, reader._stack_flips
+        ((1, 0, 2), (True, False, False))
+        >>> reader._reorient(np.zeros((40, 256, 256))).shape
+        (256, 40, 256)
         """
         if self._stack_perm == (0, 1, 2) and not any(self._stack_flips):
             return volume
@@ -1140,15 +1594,33 @@ class Read3D(object):
         return np.ascontiguousarray(volume)
 
     def compute_array(self):
-        """Stack rescaled frames, interpolate gaps and reorient to (z, y, x).
-        
-        _INT16_MIN, _INT16_MAX = np.iinfo(np.int16).min, np.iinfo(np.int16).max
-        
+        """
+        Stack rescaled frames, interpolate gaps and reorient to (z, y, x).
+
+        The volume starts as int16 when every slope and intercept is an integer
+        and is promoted to int32 if a slice overflows int16; otherwise it is
+        float32. Missing slices are interpolated before reorientation. Sets
+        `self.array`.
+
+        Returns
+        -------
+        None
+
         Examples
         --------
-        >>> from medicalimageanalysis.read.dicom import Read3D
-        >>> reader = Read3D(image_set=dicom_series, only_tags=False)
+        CT stays integer HU:
+
+        >>> reader = Read3D(ct_slices, only_tags=True)
         >>> reader.compute_array()
+        >>> reader.array.dtype, int(reader.array.min())
+        (dtype('int16'), -1024)
+
+        PET with a fractional slope is float:
+
+        >>> reader = Read3D(pet_slices, only_tags=True)
+        >>> reader.compute_array()
+        >>> reader.array.dtype
+        dtype('float32')
         """
         ds0 = self.image_set[0]
         rows, cols = int(ds0.Rows), int(ds0.Columns)
@@ -1179,15 +1651,40 @@ class Read3D(object):
         self.array = self._reorient(volume)
 
     def compute_geometry(self):
-        """Work out how the stacked volume maps to (z, y, x) and the resulting
-        spacing, dimensions, origin and image matrix. Header only, so it is
-        valid with only_tags=True; the array itself is permuted in _reorient.
-        
+        """
+        Work out how the stacked volume maps to (z, y, x).
+
+        From header tags only (valid with only_tags=True), finds the axis
+        permutation with the best alignment to patient x, y, z (so 45-degree
+        obliques cannot map two axes to one), which axes need flipping, and the
+        resulting spacing, dimensions, origin, orientation and image matrix. The
+        array itself is permuted later in `_reorient`.
+
+        Returns
+        -------
+        None
+
         Examples
         --------
-        >>> from medicalimageanalysis.read.dicom import Read3D
-        >>> reader = Read3D(image_set=dicom_series, only_tags=False)
-        >>> reader.compute_geometry()
+        Standard axial CT: no permutation, identity matrix, origin = lowest slice:
+
+        >>> reader = Read3D(ct_slices, only_tags=True)
+        >>> reader._stack_perm, reader._stack_flips
+        ((0, 1, 2), (False, False, False))
+        >>> reader.image_matrix
+        array([[1., 0., 0.],
+               [0., 1., 0.],
+               [0., 0., 1.]], dtype=float32)
+
+        Coronal MR (IOP [1, 0, 0, 0, 0, -1]), 40 slices of 256 x 256:
+
+        >>> reader = Read3D(coronal_mr_slices, only_tags=True)
+        >>> reader._stack_perm, reader._stack_flips
+        ((1, 0, 2), (True, False, False))
+        >>> tuple(reader.dimensions)
+        (256, 40, 256)
+        >>> reader.spacing   # x = column, y = slice, z = row spacing
+        array([0.9375, 4.    , 0.9375])
         """
         row = self.acquisition_orientation[:3]
         col = self.acquisition_orientation[3:]
@@ -1226,15 +1723,28 @@ class Read3D(object):
         self.image_matrix = np.array([x_dir, y_dir, z_dir], dtype=np.float32)
 
     def compute_orientation(self):
-        """Common ImageOrientationPatient of all frames, orthonormalized.
-        
-        _ORIENTATION_TOL = 1e-3  # max direction-cosine difference between frames of one volume
-        
+        """
+        Common ImageOrientationPatient of all frames, orthonormalized.
+
+        Flags 'Orientation' when frames differ by more than 1e-3 in any
+        direction cosine, or when no frame has an orientation (identity is then
+        assumed).
+
+        Returns
+        -------
+        np.ndarray
+            Six direction cosines (row, column).
+
         Examples
         --------
-        >>> from medicalimageanalysis.read.dicom import Read3D
-        >>> reader = Read3D(image_set=dicom_series, only_tags=False)
         >>> reader.compute_orientation()
+        array([1., 0., 0., 0., 1., 0.])
+
+        A slightly non-orthogonal header is cleaned up:
+
+        >>> reader.frame_orientations = [np.array([1.0, 0, 0, 0.001, 1.0, 0])]
+        >>> np.round(reader.compute_orientation(), 6)
+        array([1., 0., 0., 0., 1., 0.])
         """
         orientations = [o for o in self.frame_orientations if o is not None and o.size == 6]
         if not orientations:
@@ -1251,25 +1761,48 @@ class Read3D(object):
         return np.concatenate([row, col])
 
     def compute_plane(self):
-        """Acquisition plane from the dominant axis of the slice normal.
-        
+        """
+        Acquisition plane from the dominant axis of the slice normal.
+
+        Returns
+        -------
+        str
+            'Axial', 'Coronal' or 'Sagittal'.
+
         Examples
         --------
-        >>> from medicalimageanalysis.read.dicom import Read3D
-        >>> reader = Read3D(image_set=dicom_series, only_tags=False)
+        >>> reader.acquisition_orientation = np.array([1.0, 0, 0, 0, 1.0, 0])
         >>> reader.compute_plane()
+        'Axial'
+        >>> reader.acquisition_orientation = np.array([0, 1.0, 0, 0, 0, -1.0])
+        >>> reader.compute_plane()
+        'Sagittal'
         """
         normal = np.cross(self.acquisition_orientation[:3], self.acquisition_orientation[3:])
         return ('Sagittal', 'Coronal', 'Axial')[int(np.argmax(np.abs(normal)))]
 
     def compute_pixel_spacing(self):
-        """_SPACING_TOL = 1e-4  # mm, max PixelSpacing difference between frames
-        
+        """
+        In-plane [row, column] spacing shared by all frames.
+
+        Flags 'Spacing' when frames differ by more than 1e-4 mm, or when no
+        frame has spacing (1.0 mm is then assumed).
+
+        Returns
+        -------
+        np.ndarray
+            [row spacing, column spacing] in mm.
+
         Examples
         --------
-        >>> from medicalimageanalysis.read.dicom import Read3D
-        >>> reader = Read3D(image_set=dicom_series, only_tags=False)
         >>> reader.compute_pixel_spacing()
+        array([0.977, 0.977])
+
+        Missing spacing falls back to 1 mm and is flagged:
+
+        >>> reader.frame_pixel_spacings = [None]
+        >>> reader.compute_pixel_spacing(), reader.unverified
+        (array([1., 1.]), 'Spacing')
         """
         spacings = [s for s in self.frame_pixel_spacings if s is not None and s.size == 2]
         if not spacings:
@@ -1281,24 +1814,35 @@ class Read3D(object):
         return ref
 
     def compute_slice_layout(self):
-        """Sort frames along the slice normal, drop duplicates and detect gaps.
-        
-        _POSITION_TOL = 0.01  # mm, frames closer than this along the normal are duplicates
-        _IRREGULAR_TOL = 0.05  # mm, max deviation of a real slice from the uniform slice grid
-        
+        """
+        Sort frames along the slice normal, drop duplicates and detect gaps.
+
+        - Frames closer than 0.01 mm along the normal are duplicates; the first
+          is kept and the rest go to `duplicate_frames` ('Duplicate' flag).
+        - Gaps are found as steps that are multiples of the median step; each
+          missing slice gets a None entry in the slice map ('Skipped' flag).
+        - A real slice more than 0.05 mm off the uniform grid flags 'Irregular'.
+        - Without positions, slices are ordered by InstanceNumber and spaced by
+          the nominal thickness ('Position' flag).
+
         Returns
         -------
         spacing : float
             Slice spacing along the normal.
+
         slice_map : list
-            One entry per slice of the stacked volume: index into the frame lists,
-            or None for a missing slice that will be interpolated.
-        
+            One entry per slice of the stacked volume: index into the frame
+            lists, or None for a missing slice to interpolate.
+
         Examples
         --------
-        >>> from medicalimageanalysis.read.dicom import Read3D
-        >>> reader = Read3D(image_set=dicom_series, only_tags=False)
-        >>> reader.compute_slice_layout()
+        Slices at z = 0, 2, 4, 8, 10 mm (6 mm missing):
+
+        >>> spacing, slice_map = reader.compute_slice_layout()
+        >>> spacing, slice_map
+        (2.0, [0, 1, 2, None, 3, 4])
+        >>> reader.skipped_slice, reader.missing_slices[0]['num_missing']
+        ([3], 1)
         """
         normal = np.cross(self.acquisition_orientation[:3], self.acquisition_orientation[3:])
 
@@ -1362,43 +1906,96 @@ class Read3D(object):
 
 
 class ReadXRay:
-    """Reads 2D X-ray (DX / CR / MG) and tomosynthesis into a z-y-x array.
-    
+    """
+    Read 2D X-ray (DX / CR / MG) and tomosynthesis into a (z, y, x) array.
+
     Array axes (0, 1, 2) always run along patient +z, +y, +x (LPS), and
-    image_matrix / orientation / origin / spacing describe that array.
-    
-    Orientation source, in priority order
-    -------------------------------------
-    1. ImageOrientationPatient (top level or functional groups; tomo has it)
-    2. PatientOrientation letters
-    3. ViewPosition (+ laterality for mammography)
-    4. identity (row +x, column +y)
-    
+    `image_matrix`, `orientation`, `origin` and `spacing` describe that
+    array. A frontal projection therefore becomes a one-voxel-thick coronal
+    "slab".
+
+    Orientation source, in priority order:
+        1. ImageOrientationPatient (top level or functional groups; tomo has it)
+        2. PatientOrientation letters
+        3. ViewPosition (+ laterality for mammography)
+        4. identity (row +x, column +y)
+
     Tomo frames are sorted along the slice normal and the origin is the
     first frame's ImagePositionPatient. 2D images without a position get
-    origin (0, 0, 0).
-    
+    origin (0, 0, 0). In-plane spacing from ImagerPixelSpacing is divided by
+    EstimatedRadiographicMagnificationFactor.
+
     Parameters
     ----------
     image_set : pydicom.Dataset or list
         X-ray dataset. Only the first is read; tomo is one multi-frame file.
+
     only_tags : bool
         If True, metadata only. Geometry is still computed from tags.
-    
+
+    Attributes
+    ----------
+    array : np.ndarray or None
+        (z, y, x) array, int16 (<= 15 bits stored) or int32. MONOCHROME1 is
+        inverted so bone is always bright.
+
+    is_tomo : bool
+        True when per-frame positions were found.
+
+    spacing_known : bool
+        False when no spacing tag was present and 1 mm was assumed.
+
+    plane : str
+        Plane of the stored image ('Coronal' for AP/PA, 'Sagittal' for
+        laterals).
+
+    image_name : str
+        Name the image was registered under.
+
     Examples
     --------
+    An AP chest radiograph (2500 rows x 2048 columns):
+
+    >>> import pydicom
     >>> from medicalimageanalysis.read.dicom import ReadXRay
-    >>> reader = ReadXRay(image_set=xray_dataset, only_tags=True)
+    >>> ds = pydicom.dcmread('C:/Data/chest_ap.dcm')
+    >>> reader = ReadXRay(ds, only_tags=False)
+    >>> reader.image_name, reader.plane
+    ('DX 01', 'Coronal')
+    >>> reader.array.shape
+    (2500, 1, 2048)
+
+    Spacing corrected for magnification (ImagerPixelSpacing 0.15 mm,
+    factor 1.25):
+
+    >>> reader.spacing
+    array([0.12, 1.  , 0.12])
+
+    A breast tomosynthesis volume keeps one slice per frame:
+
+    >>> reader = ReadXRay(pydicom.dcmread('C:/Data/tomo_rcc.dcm'), only_tags=True)
+    >>> reader.is_tomo, reader.number_of_frames
+    (True, 61)
     """
 
     def __init__(self, image_set, only_tags):
-        """Initialize an X-ray or tomosynthesis reader and register the image.
-        
+        """
+        Resolve orientation and frames, optionally decode pixels, then register.
+
+        Parameters
+        ----------
+        image_set : pydicom.Dataset or list
+            X-ray dataset (first one used).
+
+        only_tags : bool
+            Skip pixel decoding.
+
         Examples
         --------
         >>> from medicalimageanalysis.read.dicom import ReadXRay
-        >>> reader = ReadXRay(image_set=xray_dataset, only_tags=False)
-        >>> reader.__init__()
+        >>> reader = ReadXRay(lateral_ds, only_tags=True)
+        >>> reader.plane, reader.array
+        ('Sagittal', None)
         """
         self.image_set = image_set if isinstance(image_set, list) else [image_set]
         self.only_tags = only_tags
@@ -1445,7 +2042,14 @@ class ReadXRay:
     @staticmethod
     def _fg_value(frame, shared, seq_name, attr):
         """
-        Functional-group attribute, per-frame first, then shared.
+        Functional-group attribute, per-frame group first, then shared group.
+
+        Examples
+        --------
+        >>> per = tomo_ds.PerFrameFunctionalGroupsSequence[0]
+        >>> shared = tomo_ds.SharedFunctionalGroupsSequence[0]
+        >>> ReadXRay._fg_value(per, shared, 'PixelMeasuresSequence', 'PixelSpacing')
+        [0.085, 0.085]
         """
         for group in (frame, shared):
             if group is None:
@@ -1458,7 +2062,16 @@ class ReadXRay:
         return None
 
     def _frame_positions(self):
-        """(F, 3) ImagePositionPatient per frame, or None if incomplete."""
+        """
+        (F, 3) ImagePositionPatient per frame, or None if any frame lacks one.
+
+        Examples
+        --------
+        >>> reader._frame_positions().shape
+        (61, 3)
+        >>> ReadXRay(chest_ds, only_tags=True)._frame_positions() is None
+        True
+        """
         per = self.ds.get('PerFrameFunctionalGroupsSequence')
         if not per or len(per) != self.number_of_frames:
             return None
@@ -1478,7 +2091,17 @@ class ReadXRay:
     @staticmethod
     def _letters_to_dir(value):
         """
-        'L', 'FR', ... -> unit LPS vector, or None.
+        Patient-direction letters ('L', 'FR', ...) to a unit LPS vector, or None.
+
+        Examples
+        --------
+        >>> from medicalimageanalysis.read.dicom import ReadXRay
+        >>> ReadXRay._letters_to_dir('L')
+        array([1., 0., 0.])
+        >>> ReadXRay._letters_to_dir('FR')
+        array([-0.70710678,  0.        , -0.70710678])
+        >>> ReadXRay._letters_to_dir('X') is None
+        True
         """
 
         # Patient-direction letters -> LPS unit vectors
@@ -1500,7 +2123,18 @@ class ReadXRay:
 
     def _inplane_spacing(self):
         """
-        [row, col] spacing in mm, or None.
+        [row, column] spacing in mm, or None.
+
+        Priority: PixelSpacing, functional-group PixelSpacing, ImagerPixelSpacing
+        divided by EstimatedRadiographicMagnificationFactor, then
+        DetectorElementSpacing.
+
+        Examples
+        --------
+        >>> ds.ImagerPixelSpacing, ds.EstimatedRadiographicMagnificationFactor
+        ([0.15, 0.15], 1.25)
+        >>> reader._inplane_spacing()
+        [0.12, 0.12]
         """
         ds = self.ds
         if 'PixelSpacing' in ds:
@@ -1522,7 +2156,22 @@ class ReadXRay:
         return None
 
     def _orientation_from_view(self):
-        """Infer patient orientation from view-position metadata when explicit orientation is missing."""
+        """
+        (row, column) letters inferred from ViewPosition, or None.
+
+        Used only when neither ImageOrientationPatient nor PatientOrientation is
+        present. Assumes the image is stored display-ready. Mammography views
+        also use ImageLaterality / Laterality.
+
+        Examples
+        --------
+        >>> ds.ViewPosition = 'AP'
+        >>> reader._orientation_from_view()
+        ('L', 'F')
+        >>> ds.ViewPosition, ds.ImageLaterality = 'CC', 'R'
+        >>> reader._orientation_from_view()
+        ('P', 'L')
+        """
         # ViewPosition -> (row direction, column direction), used only when the file
         # has no ImageOrientationPatient and no PatientOrientation. Assumes the image
         # is stored display-ready (patient's right on the viewer's left for AP/PA).
@@ -1554,14 +2203,34 @@ class ReadXRay:
         return view_orientation.get(view)
 
     def _pixel_measures(self, attr):
-        """Fetch a value from functional-group pixel-measure sequences."""
+        """
+        Value from the first frame's (or shared) PixelMeasuresSequence.
+
+        Examples
+        --------
+        >>> reader._pixel_measures('SliceThickness')
+        1.0
+        """
         per = self.ds.get('PerFrameFunctionalGroupsSequence')
         frame = per[0] if per else None
 
         return self._fg_value(frame, self._shared_group(), 'PixelMeasuresSequence', attr)
 
     def _setup_frames(self):
-        """Determine frame order, slice spacing, and frame-origin metadata."""
+        """
+        Work out frame order, slice step and first-frame origin for multi-frame data.
+
+        Single-frame images get a 1 mm step. When every frame has a position the
+        data is treated as tomo: frames are sorted along the normal and the step
+        is the median position difference; otherwise the slice-spacing tags
+        (or 1 mm) are used.
+
+        Examples
+        --------
+        >>> reader._setup_frames()
+        >>> reader.is_tomo, reader._slice_dz
+        (True, 1.0)
+        """
         if self.number_of_frames == 1:
             self._slice_dz = 1.0
             return
@@ -1585,13 +2254,30 @@ class ReadXRay:
         self._slice_dz = dz
 
     def _shared_group(self):
-        """Return the shared functional-group item when available."""
+        """
+        Shared functional-group item, or None.
+
+        Examples
+        --------
+        >>> reader._shared_group() is None   # plain 2D DX
+        True
+        """
         seq = self.ds.get('SharedFunctionalGroupsSequence')
 
         return seq[0] if seq else None
 
     def _slice_spacing(self):
-        """Return the best available through-plane spacing estimate."""
+        """
+        Best through-plane spacing from the tags, or None.
+
+        Tries SpacingBetweenSlices (functional groups, then top level), then
+        SliceThickness.
+
+        Examples
+        --------
+        >>> reader._slice_spacing()
+        1.0
+        """
         for value in (self._pixel_measures('SpacingBetweenSlices'),
                       self.ds.get('SpacingBetweenSlices'),
                       self._pixel_measures('SliceThickness')):
@@ -1601,13 +2287,23 @@ class ReadXRay:
         return None
 
     def compute_array(self):
-        """Load the X-ray pixel data, normalize it, and arrange frames consistently.
-        
+        """
+        Decode pixels, invert MONOCHROME1, and stack as (frames, rows, cols).
+
+        The final (z, y, x) reordering happens in `compute_geometry`.
+
+        Returns
+        -------
+        None
+
         Examples
         --------
-        >>> from medicalimageanalysis.read.dicom import ReadXRay
-        >>> reader = ReadXRay(image_set=xray_dataset, only_tags=False)
+        A MONOCHROME1 CR is inverted so bone is bright:
+
+        >>> reader = ReadXRay(cr_ds, only_tags=True)
         >>> reader.compute_array()
+        >>> reader.array.shape, reader.array.dtype
+        ((1, 2140, 1760), dtype('int16'))
         """
         ds = self.ds
         arr = ds.pixel_array
@@ -1633,16 +2329,27 @@ class ReadXRay:
         self.array = arr  # (frames, rows, cols); compute_geometry reorders
 
     def compute_geometry(self):
-        """Reorders and flips the grid so array axes (0, 1, 2) run along +z, +y, +x.
-        
-        Works from tags alone, so it is valid with only_tags=True; the array
-        is transformed alongside when it has been loaded.
-        
+        """
+        Reorder and flip the grid so array axes (0, 1, 2) run along +z, +y, +x.
+
+        Works from tags alone, so it is valid with only_tags=True; the array is
+        transformed alongside when it has been loaded.
+
+        Returns
+        -------
+        None
+
         Examples
         --------
-        >>> from medicalimageanalysis.read.dicom import ReadXRay
-        >>> reader = ReadXRay(image_set=xray_dataset, only_tags=False)
+        AP chest (row = L, column = F): rows become z and are flipped so +z
+        points to the head, the single frame becomes y:
+
+        >>> reader.orientation = np.array([1.0, 0, 0, 0, 0, -1.0])
         >>> reader.compute_geometry()
+        >>> tuple(reader.dimensions), reader.image_matrix
+        ((2500, 1, 2048), array([[1., 0., 0.],
+               [0., 1., 0.],
+               [0., 0., 1.]], dtype=float32))
         """
         row = np.asarray(self.orientation[:3], dtype=float)
         col = np.asarray(self.orientation[3:], dtype=float)
@@ -1694,26 +2401,51 @@ class ReadXRay:
         self.image_matrix = np.stack([dirs[2], dirs[1], dirs[0]]).astype(np.float32)
 
     def compute_plane(self):
-        """Acquisition plane from the stored slice normal.
-        
+        """
+        Plane of the stored image from the row x column normal.
+
+        Returns
+        -------
+        str
+            'Axial', 'Coronal' or 'Sagittal'.
+
         Examples
         --------
-        >>> from medicalimageanalysis.read.dicom import ReadXRay
-        >>> reader = ReadXRay(image_set=xray_dataset, only_tags=False)
+        >>> reader.orientation = np.array([1.0, 0, 0, 0, 0, -1.0])   # AP
         >>> reader.compute_plane()
+        'Coronal'
+        >>> reader.orientation = np.array([0, 1.0, 0, 0, 0, -1.0])   # lateral
+        >>> reader.compute_plane()
+        'Sagittal'
         """
         normal = np.cross(self.orientation[:3], self.orientation[3:])
 
         return ('Sagittal', 'Coronal', 'Axial')[int(np.argmax(np.abs(normal)))]
 
     def initial_orientation(self):
-        """Determine the best available initial in-plane orientation.
-        
+        """
+        Best available (row, column) direction cosines of the stored image.
+
+        Uses ImageOrientationPatient, else PatientOrientation letters, else
+        ViewPosition, else identity. Letter-derived columns are made orthogonal
+        to the row.
+
+        Returns
+        -------
+        list[float]
+            Six direction cosines.
+
         Examples
         --------
-        >>> from medicalimageanalysis.read.dicom import ReadXRay
-        >>> reader = ReadXRay(image_set=xray_dataset, only_tags=False)
+        PatientOrientation ['L', 'F'] on an AP film:
+
         >>> reader.initial_orientation()
+        [1.0, 0.0, 0.0, 0.0, 0.0, -1.0]
+
+        No orientation information at all:
+
+        >>> reader.initial_orientation()
+        [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
         """
         ds = self.ds
 
@@ -1743,62 +2475,75 @@ class ReadXRay:
 
 class ReadRF:
     """
-    Reads and constructs Radio Fluoroscopy (RF) DICOM images.
+    Read radio-fluoroscopy (RF) DICOM into a (z, y, x) array and register it.
 
-    This class converts RF DICOM data into a standardized internal representation,
-    including:
-    - Pixel data extraction (single-frame, multi-frame cine, grayscale or RGB)
-    - Orientation inference
-    - Spatial spacing computation
-    - Integration into the global `Data` structure
+    Single-frame and cine (multi-frame) data, grayscale or RGB. The plane is
+    inferred from PatientOrientation and, for cine, the frame axis is put on
+    the through-plane axis so scrolling slices steps through frames. No
+    volumetric reconstruction is performed.
 
     Notes
     -----
-    - Arrays are stored in z-y-x order. For multi-frame (cine) data, the frame
-      axis is placed on the through-plane axis for the inferred plane, so
-      scrolling through slices steps through frames.
-    - Frame spacing is nominal (1 mm). Real frame timing is kept in
-      `frame_times` when the DICOM provides it.
-    - No full volumetric reconstruction is performed.
+    - Frame spacing is nominal (1 mm); real timing is in `frame_times`.
+    - Without PatientOrientation the image is assumed to be a frontal
+      (coronal) projection.
 
     Parameters
     ----------
     image_set : list or pydicom.Dataset
-        RF DICOM dataset(s).
+        RF dataset(s); only the first is read.
+
     only_tags : bool
-        If True, only metadata is loaded (no pixel data).
+        If True, only metadata is loaded.
 
     Attributes
     ----------
-    array : np.ndarray
-        Pixel array in z-y-x order (with a trailing channel axis if RGB).
+    array : np.ndarray or None
+        (z, y, x[, 3]) array.
+
     spacing : np.ndarray
-        Physical spacing (x, y, z) in mm.
+        (x, y, z) spacing in mm.
+
     dimensions : tuple
-        Spatial shape (z, y, x) of the image. Available even when only_tags=True.
-    orientation : list
-        Default orientation vector.
+        (z, y, x) shape, also available with only_tags=True.
+
     frame_times : np.ndarray or None
-        Per-frame time offsets in ms, if available.
+        Per-frame time offsets in ms.
+
+    rgb : bool
+        True for 3-sample (color) data.
+
     image_name : str
-        Internal identifier for global registration.
+        Name the image was registered under.
 
     Examples
     --------
-    Basic usage::
+    A 30-frame barium swallow, 1024 x 1024, PatientOrientation ['L', 'F']:
 
-        reader = ReadRF(dicom_rf, only_tags=False)
-        print(reader.image_name)
+    >>> import pydicom
+    >>> from medicalimageanalysis.read.dicom import ReadRF
+    >>> reader = ReadRF(pydicom.dcmread('C:/Data/swallow.dcm'), only_tags=False)
+    >>> reader.plane, reader.array.shape
+    ('Coronal', (1024, 30, 1024))
+    >>> reader.frame_times[:3]
+    array([  0. ,  66.7, 133.4])
+
+    Headers only still gives the shape:
+
+    >>> ReadRF(ds, only_tags=True).dimensions
+    (1024, 30, 1024)
     """
 
     def __init__(self, image_set, only_tags):
-        """Initialize RF reader and construct image representation.
-        
+        """
+        Infer plane and timing, optionally decode pixels, then register.
+
         Examples
         --------
         >>> from medicalimageanalysis.read.dicom import ReadRF
-        >>> reader = ReadRF(image_set=rf_dataset, only_tags=False)
-        >>> reader.__init__()
+        >>> reader = ReadRF(ds, only_tags=True)
+        >>> reader.image_name, reader.array
+        ('RF 01', None)
         """
 
         self.image_set = (
@@ -1838,8 +2583,12 @@ class ReadRF:
     @staticmethod
     def _functional_group_spacing(img):
         """
-        Look for PixelSpacing in enhanced multi-frame functional groups,
-        shared group first since that is where it usually lives.
+        PixelSpacing from enhanced functional groups (shared first), or None.
+
+        Examples
+        --------
+        >>> ReadRF._functional_group_spacing(enhanced_xrf)
+        [0.308, 0.308]
         """
         for group_name in ('SharedFunctionalGroupsSequence',
                            'PerFrameFunctionalGroupsSequence'):
@@ -1860,7 +2609,13 @@ class ReadRF:
 
     def _orientation_string(self):
         """
-        Return PatientOrientation joined into one string, e.g. 'LF' or 'LPFL'.
+        PatientOrientation joined into one string, e.g. 'LF'.
+
+        Examples
+        --------
+        >>> ds.PatientOrientation = ['L', 'F']
+        >>> reader._orientation_string()
+        'LF'
         """
         orient = self.image_set[0].get('PatientOrientation', None)
         if not orient:
@@ -1873,8 +2628,13 @@ class ReadRF:
 
     def _rows_toward_feet(self):
         """
-        True if the column direction (second PatientOrientation value)
-        points toward the feet, i.e. increasing row index = inferior.
+        True if increasing row index points to the feet (column letter has 'F').
+
+        Examples
+        --------
+        >>> ds.PatientOrientation = ['L', 'F']
+        >>> reader._rows_toward_feet()
+        True
         """
         orient = self.image_set[0].get('PatientOrientation', None)
         if not orient or isinstance(orient, str) or len(orient) < 2:
@@ -1884,8 +2644,13 @@ class ReadRF:
 
     def _target_dtype(self):
         """
-        int16 unless the data is unsigned with more than 15 bits stored,
-        in which case int16 would wrap and int32 is used instead.
+        int16, or int32 for unsigned data with more than 15 bits stored.
+
+        Examples
+        --------
+        >>> ds.PixelRepresentation, ds.BitsStored = 0, 16
+        >>> reader._target_dtype()
+        <class 'numpy.int32'>
         """
         ds = self.image_set[0]
         unsigned = int(ds.get('PixelRepresentation', 0)) == 0
@@ -1896,22 +2661,26 @@ class ReadRF:
         return np.int16
 
     def compute_array(self):
-        """Load RF pixel data into a z-y-x NumPy array.
-        
-        Steps
-        -----
-        - Normalize to (frames, rows, cols[, 3])
-        - Cast grayscale data to a safe integer type
-        - Move the frame axis onto the through-plane axis for the plane
-        - Optionally flip so +z points superior
-        - Remove raw PixelData for memory efficiency
-        - Store spatial shape in `self.dimensions`
-        
+        """
+        Decode RF pixels into a (z, y, x[, 3]) array.
+
+        Steps:
+            - normalize to (frames, rows, cols[, 3])
+            - cast grayscale to a safe integer type
+            - move the frame axis onto the through-plane axis for the plane
+            - flip so +z points superior when rows run toward the feet
+            - free PixelData and set `dimensions`
+
+        Returns
+        -------
+        None
+
         Examples
         --------
-        >>> from medicalimageanalysis.read.dicom import ReadRF
-        >>> reader = ReadRF(image_set=rf_dataset, only_tags=False)
+        >>> reader = ReadRF(ds, only_tags=True)
         >>> reader.compute_array()
+        >>> reader.array.shape, reader.dimensions
+        ((1024, 30, 1024), (1024, 30, 1024))
         """
         ds = self.image_set[0]
         arr = ds.pixel_array
@@ -1945,17 +2714,25 @@ class ReadRF:
         del ds.PixelData
 
     def compute_frame_times(self):
-        """Per-frame time offsets in ms from FrameTimeVector or FrameTime.
-        
+        """
+        Per-frame time offsets in ms from FrameTimeVector or FrameTime.
+
         Returns
         -------
         np.ndarray or None
-        
+            None for single-frame data or when no timing tag is present.
+
         Examples
         --------
-        >>> from medicalimageanalysis.read.dicom import ReadRF
-        >>> reader = ReadRF(image_set=rf_dataset, only_tags=False)
+        FrameTime of 33.3 ms over 4 frames:
+
         >>> reader.compute_frame_times()
+        array([ 0. , 33.3, 66.6, 99.9])
+
+        FrameTimeVector [0, 33, 33, 34] is accumulated:
+
+        >>> reader.compute_frame_times()
+        array([  0.,  33.,  66., 100.])
         """
         ds = self.image_set[0]
         n_frames = int(ds.get('NumberOfFrames', 1) or 1)
@@ -1971,21 +2748,28 @@ class ReadRF:
         return None
 
     def compute_plane(self):
-        """Infer anatomical plane from PatientOrientation.
-        
-        The H/F letter marks the vertical axis: with L/R it is coronal,
-        with A/P it is sagittal. No H/F means axial.
-        
+        """
+        Plane from PatientOrientation letters.
+
+        H/F marks the vertical axis: with L/R it is coronal, with A/P sagittal.
+        No H/F means axial; no PatientOrientation means coronal (frontal fluoro).
+
         Returns
         -------
         str
-            'Axial', 'Coronal', or 'Sagittal'
-        
+            'Axial', 'Coronal' or 'Sagittal'.
+
         Examples
         --------
-        >>> from medicalimageanalysis.read.dicom import ReadRF
-        >>> reader = ReadRF(image_set=rf_dataset, only_tags=False)
+        >>> ds.PatientOrientation = ['L', 'F']
         >>> reader.compute_plane()
+        'Coronal'
+        >>> ds.PatientOrientation = ['P', 'F']
+        >>> reader.compute_plane()
+        'Sagittal'
+        >>> ds.PatientOrientation = ['L', 'P']
+        >>> reader.compute_plane()
+        'Axial'
         """
         orient = self._orientation_string()
 
@@ -2004,24 +2788,24 @@ class ReadRF:
         return 'Axial'
 
     def compute_spacing(self):
-        """Compute voxel spacing for RF imaging.
-        
-        Uses, in order:
-        - PixelSpacing
-        - ImagerPixelSpacing (corrected by EstimatedRadiographicMagnificationFactor)
-        - Shared / per-frame functional group PixelMeasuresSequence
-        - DetectorElementSpacing
-        
+        """
+        Voxel spacing (x, y, z) matched to the plane-dependent array layout.
+
+        In-plane spacing comes from PixelSpacing, ImagerPixelSpacing (corrected
+        by magnification), functional groups, then DetectorElementSpacing
+        (1 mm if none). The frame axis gets 1 mm.
+
         Returns
         -------
         np.ndarray
-            Spacing in (x, y, z) order, matched to the z-y-x array layout.
-        
+            (x, y, z) spacing in mm.
+
         Examples
         --------
-        >>> from medicalimageanalysis.read.dicom import ReadRF
-        >>> reader = ReadRF(image_set=rf_dataset, only_tags=False)
+        Coronal with PixelSpacing [0.3, 0.3] (frames are y):
+
         >>> reader.compute_spacing()
+        array([0.3, 1. , 0.3])
         """
         img = self.image_set[0]
 
@@ -2060,14 +2844,15 @@ class ReadRF:
             return np.array([slice_thickness, col_sp, row_sp], dtype=float)
 
     def dimensions_from_tags(self):
-        """Compute the z-y-x spatial shape from header tags without decoding
-        pixel data (used when only_tags=True).
-        
+        """
+        (z, y, x) shape from Rows / Columns / NumberOfFrames, without pixels.
+
         Examples
         --------
-        >>> from medicalimageanalysis.read.dicom import ReadRF
-        >>> reader = ReadRF(image_set=rf_dataset, only_tags=False)
+        Coronal, 1024 rows x 1024 columns, 30 frames:
+
         >>> reader.dimensions_from_tags()
+        (1024, 30, 1024)
         """
         ds = self.image_set[0]
         rows = int(ds.get('Rows', 0))
@@ -2084,39 +2869,78 @@ class ReadRF:
 
 
 class ReadUS:
-    """Reads ultrasound DICOM into a standardized array and registers it in `Data`.
-    
-    Output array layout
-    -------------------
-    grayscale (default)   : (frames, rows, cols) uint8
-    keep_color=True       : (frames, rows, cols, 3) uint8, self.rgb = True
-    
+    """
+    Read ultrasound DICOM into a standardized array and register it in `Data`.
+
+    Output array layout:
+        grayscale (default)   : (frames, rows, cols) uint8
+        keep_color=True       : (frames, rows, cols, 3) uint8, `rgb` = True
+
+    By default color overlays (Doppler, annotations) are removed: pixels
+    whose RGB channels differ by more than `color_tolerance` are set to 0.
+    Frames are time, not depth, so the z spacing is 1.0.
+
     Parameters
     ----------
     image_set : pydicom.Dataset or list
         Ultrasound dataset(s). Only the first is read.
+
     only_tags : bool
         If True, metadata only.
+
     keep_color : bool
         Keep RGB instead of extracting the grayscale B-mode content.
+
     color_tolerance : int
         Max channel spread (0-255) for a pixel to count as gray. Lossy JPEG
         rarely gives exactly equal channels, so 0 is too strict.
-    
+
+    Attributes
+    ----------
+    array : np.ndarray or None
+        uint8 array as described above.
+
+    spacing : np.ndarray
+        (x, y, z) spacing in mm.
+
+    spacing_known : bool
+        False when no spacing source was found and 1 mm was assumed.
+
+    frame_time : float or None
+        Frame interval in ms.
+
+    image_name : str
+        Name the image was registered under.
+
     Examples
     --------
+    A 120-frame liver cine, gray B-mode extracted from RGB:
+
+    >>> import pydicom
     >>> from medicalimageanalysis.read.dicom import ReadUS
-    >>> reader = ReadUS(image_set=us_dataset, only_tags=False)
+    >>> reader = ReadUS(pydicom.dcmread('C:/Data/liver_us.dcm'), only_tags=False)
+    >>> reader.array.shape, reader.array.dtype
+    ((120, 600, 800), dtype('uint8'))
+    >>> reader.spacing, reader.spacing_known
+    (array([0.2 , 0.25, 1.  ]), True)
+
+    Keep the color Doppler overlay:
+
+    >>> reader = ReadUS(ds, only_tags=False, keep_color=True)
+    >>> reader.rgb, reader.array.shape
+    (True, (120, 600, 800, 3))
     """
 
     def __init__(self, image_set, only_tags, keep_color=False, color_tolerance=3):
-        """Initialize an ultrasound reader and register the resulting image.
-        
+        """
+        Read frame/sample counts, optionally decode pixels, then register.
+
         Examples
         --------
         >>> from medicalimageanalysis.read.dicom import ReadUS
-        >>> reader = ReadUS(image_set=us_dataset, only_tags=False)
-        >>> reader.__init__()
+        >>> reader = ReadUS(ds, only_tags=True)
+        >>> reader.image_name, tuple(reader.dimensions)
+        ('US 01', (120, 600, 800))
         """
         self.image_set = image_set if isinstance(image_set, list) else [image_set]
         self.only_tags = only_tags
@@ -2158,7 +2982,14 @@ class ReadUS:
 
     @staticmethod
     def _detector_spacing(ds):
-        """Return detector-element spacing when provided by contributing sources."""
+        """
+        DetectorElementSpacing from ContributingSourcesSequence, or None.
+
+        Examples
+        --------
+        >>> ReadUS._detector_spacing(ds) is None
+        True
+        """
         seq = getattr(ds, 'ContributingSourcesSequence', None)
         if seq and 'DetectorElementSpacing' in seq[0]:
             return [float(v) for v in seq[0].DetectorElementSpacing]
@@ -2167,7 +2998,14 @@ class ReadUS:
 
     @staticmethod
     def _pixel_spacing(ds):
-        """Return ultrasound pixel spacing from top-level or functional-group tags."""
+        """
+        PixelSpacing from top level or functional groups, or None.
+
+        Examples
+        --------
+        >>> ReadUS._pixel_spacing(ds)
+        [0.25, 0.2]
+        """
         if 'PixelSpacing' in ds:
             return [float(v) for v in ds.PixelSpacing]
 
@@ -2183,12 +3021,17 @@ class ReadUS:
     @staticmethod
     def _region_spacing(ds):
         """
-        First 2D region with cm units in both directions, converted to mm.
+        [row, col] spacing in mm from the first 2D cm region, or None.
 
-        SequenceOfUltrasoundRegions codes (PS3.3 C.8.5.5.1)
-        _REGION_SPATIAL_2D = 1
-        _UNITS_CM = 3
+        Uses SequenceOfUltrasoundRegions items with RegionSpatialFormat 1 (2D)
+        and physical units 3 (cm) in both directions.
 
+        Examples
+        --------
+        PhysicalDeltaX 0.02 cm, PhysicalDeltaY 0.025 cm:
+
+        >>> ReadUS._region_spacing(ds)
+        [0.25, 0.2]
         """
         for r in getattr(ds, 'SequenceOfUltrasoundRegions', []):
             if (int(getattr(r, 'RegionSpatialFormat', -1)) == 1
@@ -2201,20 +3044,43 @@ class ReadUS:
 
     @staticmethod
     def _to_uint8(arr, bits):
-        """Scale an ultrasound array down to 8-bit display range."""
+        """
+        Scale an array down to 8 bits by dropping the extra low bits.
+
+        Examples
+        --------
+        >>> import numpy as np
+        >>> from medicalimageanalysis.read.dicom import ReadUS
+        >>> ReadUS._to_uint8(np.array([0, 1024, 4095], dtype=np.uint16), bits=12)
+        array([  0,  64, 255], dtype=uint8)
+        """
         if arr.dtype == np.uint8:
             return arr
         shift = max(int(bits) - 8, 0)
         return np.clip(arr >> shift, 0, 255).astype(np.uint8)
 
     def compute_array(self):
-        """Decode ultrasound pixels and normalize them to grayscale or RGB output.
-        
+        """
+        Decode pixels and normalize to grayscale or RGB uint8.
+
+        PALETTE COLOR is expanded through its LUT first. Layout is decided from
+        SamplesPerPixel, not from the array's ndim.
+
+        Returns
+        -------
+        None
+
+        Raises
+        ------
+        ValueError
+            If the decoded array does not match the expected layout.
+
         Examples
         --------
-        >>> from medicalimageanalysis.read.dicom import ReadUS
-        >>> reader = ReadUS(image_set=us_dataset, only_tags=False)
+        >>> reader = ReadUS(ds, only_tags=True)
         >>> reader.compute_array()
+        >>> reader.array.shape, reader.rgb
+        ((120, 600, 800), False)
         """
         ds = self.image_set[0]
         arr = ds.pixel_array
@@ -2256,15 +3122,28 @@ class ReadUS:
         self.dimensions = np.array(self.array.shape[:3])
 
     def compute_spacing(self):
-        """Returns (x, y, z). Priority: PixelSpacing / functional groups,
-        then the 2D tissue region in cm, then DetectorElementSpacing.
-        z is 1.0: US frames are time, not depth.
-        
+        """
+        (x, y, z) spacing; z is 1.0 because frames are time.
+
+        Priority: PixelSpacing / functional groups, then the 2D tissue region in
+        cm, then DetectorElementSpacing. Sets `spacing_known`.
+
+        Returns
+        -------
+        np.ndarray
+            (x, y, z) spacing in mm.
+
         Examples
         --------
-        >>> from medicalimageanalysis.read.dicom import ReadUS
-        >>> reader = ReadUS(image_set=us_dataset, only_tags=False)
+        Region spacing [0.25, 0.2] (row, col):
+
         >>> reader.compute_spacing()
+        array([0.2 , 0.25, 1.  ])
+
+        No spacing information at all:
+
+        >>> reader.compute_spacing(), reader.spacing_known
+        (array([1., 1., 1.]), False)
         """
         ds = self.image_set[0]
         inplane = self._pixel_spacing(ds) or self._region_spacing(ds) or self._detector_spacing(ds)
@@ -2277,33 +3156,84 @@ class ReadUS:
 
 
 class ReadRTStruct:
-    """Reads RTSTRUCT datasets: closed-planar ROIs, POINT POIs, and the
-    image series they belong to.
-    
+    """
+    Read an RTSTRUCT: planar ROIs, POINT POIs, and the image they belong to.
+
+    ROIs are kept when their first contour is CLOSED_PLANAR, OPEN_PLANAR,
+    OPEN_NONPLANAR or CLOSEDPLANAR_XOR; POINT structures become POIs. ROIs
+    without a display color get a stable color derived from their name. The
+    reader does not attach itself; `DicomReader.image_creation` passes it to
+    `Image.input_rtstruct` of `match_image_name`.
+
     Parameters
     ----------
     image_set : pydicom.Dataset
         RTSTRUCT dataset.
+
     only_tags : bool
-        If True, parse metadata only (no coordinates).
+        If True, parse names/colors only (no coordinates).
+
     images : dict, optional
         name -> image object with `series_uid`, `sops`, and optionally
         `frame_of_reference_uid`. Defaults to the global `Data.image`.
-    
+
+    Attributes
+    ----------
+    roi_names, roi_colors, roi_types : list
+        Per-ROI name, [R, G, B] color and geometric type.
+
+    poi_names, poi_colors : list
+        Per-POI name and color.
+
+    contours : list
+        One list per ROI of (N, 3) contour point arrays in patient mm.
+
+    points : list
+        One (1, 3) array per POI.
+
+    match_image_name : str or None
+        Loaded image the structures belong to.
+
     Examples
     --------
+    Read a structure set against the images already loaded:
+
+    >>> import pydicom
+    >>> from medicalimageanalysis import Data
     >>> from medicalimageanalysis.read.dicom import ReadRTStruct
-    >>> rtstruct = ReadRTStruct(image_set=rtstruct_dataset, only_tags=False)
+    >>> rs = ReadRTStruct(pydicom.dcmread('C:/Data/Patient01/RS.dcm'), only_tags=False)
+    >>> rs.match_image_name
+    'CT 01'
+    >>> rs.roi_names, rs.roi_types
+    (['Liver', 'GTV'], ['CLOSED_PLANAR', 'CLOSED_PLANAR'])
+    >>> len(rs.contours[0]), rs.contours[0][0].shape
+    (61, (184, 3))
+
+    Attach it the way the pipeline does:
+
+    >>> Data.image[rs.match_image_name].input_rtstruct(rs)
+
+    Names only, e.g. to list structures before loading:
+
+    >>> ReadRTStruct(ds, only_tags=True).contours
+    []
     """
 
     def __init__(self, image_set, only_tags, images=None):
-        """Parse an RTSTRUCT and match it to an already loaded image when possible.
-        
+        """
+        Parse structure properties and match the structure set to an image.
+
+        Image matching only runs when the file has at least one ROI or POI;
+        coordinates are parsed as well unless only_tags is True.
+
         Examples
         --------
+        Match against a custom image dictionary instead of `Data.image`:
+
         >>> from medicalimageanalysis.read.dicom import ReadRTStruct
-        >>> rtstruct = ReadRTStruct(image_set=rtstruct_dataset, only_tags=False)
-        >>> rtstruct.__init__()
+        >>> rs = ReadRTStruct(ds, only_tags=True, images={'Planning CT': ct_image})
+        >>> rs.match_image_name
+        'Planning CT'
         """
         self.image_set = image_set
         self.only_tags = only_tags
@@ -2337,7 +3267,18 @@ class ReadRTStruct:
 
     @staticmethod
     def _contour_values(raw):
-        """Return ContourData as a flat float array, whether pydicom decoded it or not."""
+        """
+        ContourData as a flat float array, whether pydicom decoded it or not.
+
+        Accepts decoded multi-values, lists of strings, or the raw backslash-
+        separated string/bytes.
+
+        Examples
+        --------
+        >>> from medicalimageanalysis.read.dicom import ReadRTStruct
+        >>> ReadRTStruct._contour_values(['10.5', '-20.0', '35.25'])
+        array([ 10.5 , -20.  ,  35.25])
+        """
         if isinstance(raw, (bytes, bytearray)):
             raw = raw.decode("ascii", errors="ignore")
         if isinstance(raw, str):
@@ -2348,20 +3289,37 @@ class ReadRTStruct:
     @staticmethod
     def _stable_color(name):
         """
-        Deterministic fallback color derived from the ROI name.
+        Deterministic fallback [R, G, B] color derived from the ROI name.
+
+        The same name always gets the same color, across sessions and machines.
+
+        Examples
+        --------
+        >>> from medicalimageanalysis.read.dicom import ReadRTStruct
+        >>> ReadRTStruct._stable_color('GTV')
+        [112, 143, 216]
+        >>> ReadRTStruct._stable_color('Liver')
+        [241, 163, 203]
         """
         h = hashlib.md5(name.encode("utf-8")).digest()
 
         return [int(h[0]), int(h[1]), int(h[2])]
 
     def get_frame_of_reference_uid(self):
-        """Return the referenced frame-of-reference UID declared by the RTSTRUCT.
-        
+        """
+        Frame of Reference UID the structures are defined in, or None.
+
+        Checks StructureSetROISequence first, then
+        ReferencedFrameOfReferenceSequence.
+
+        Returns
+        -------
+        str or None
+
         Examples
         --------
-        >>> from medicalimageanalysis.read.dicom import ReadRTStruct
-        >>> rtstruct = ReadRTStruct(image_set=rtstruct_dataset, only_tags=False)
-        >>> rtstruct.get_frame_of_reference_uid()
+        >>> rs.get_frame_of_reference_uid()
+        '1.2.840.113619.2.55.3.2831164355.12'
         """
         ds = self.image_set
         for roi in getattr(ds, "StructureSetROISequence", []):
@@ -2377,13 +3335,24 @@ class ReadRTStruct:
         return None
 
     def get_properties(self):
-        """Extract ROI names, colors, geometry types, and referenced SOPs.
-        
+        """
+        Extract name, color, geometric type and referenced SOPs for each structure.
+
+        Structures without a name, without any usable contour, or with an
+        unsupported geometric type are skipped.
+
+        Returns
+        -------
+        list[dict]
+            Keys: 'index', 'number', 'name', 'color', 'type', 'sops'.
+
         Examples
         --------
-        >>> from medicalimageanalysis.read.dicom import ReadRTStruct
-        >>> rtstruct = ReadRTStruct(image_set=rtstruct_dataset, only_tags=False)
-        >>> rtstruct.get_properties()
+        >>> props = rs.get_properties()
+        >>> [(p['name'], p['type'], p['color']) for p in props]
+        [('Liver', 'CLOSED_PLANAR', [0, 150, 255]), ('GTV', 'CLOSED_PLANAR', [255, 0, 0])]
+        >>> len(props[0]['sops'])
+        61
         """
         ds = self.image_set
         roi_by_number = {
@@ -2433,13 +3402,17 @@ class ReadRTStruct:
         return props
 
     def get_referenced_series_uid(self):
-        """Series UID of the referenced image series (not the RTSTRUCT's own).
-        
+        """
+        SeriesInstanceUID of the referenced image series (not the RTSTRUCT's own).
+
+        Returns
+        -------
+        str or None
+
         Examples
         --------
-        >>> from medicalimageanalysis.read.dicom import ReadRTStruct
-        >>> rtstruct = ReadRTStruct(image_set=rtstruct_dataset, only_tags=False)
-        >>> rtstruct.get_referenced_series_uid()
+        >>> rs.get_referenced_series_uid() == Data.image['CT 01'].series_uid
+        True
         """
         for ref in getattr(self.image_set, "ReferencedFrameOfReferenceSequence", []):
             for study in getattr(ref, "RTReferencedStudySequence", []):
@@ -2451,16 +3424,33 @@ class ReadRTStruct:
         return None
 
     def match_with_image(self, images):
-        """Priority:
-          1. referenced series UID (confirmed by SOP overlap when SOPs exist)
-          2. any image containing referenced SOPs
-          3. same Frame of Reference UID
-        
+        """
+        Find the loaded image the structure set belongs to.
+
+        Priority:
+            1. referenced series UID (confirmed by SOP overlap when SOPs exist)
+            2. any image containing referenced SOPs
+            3. same Frame of Reference UID
+
+        Parameters
+        ----------
+        images : dict
+            name -> image object.
+
+        Returns
+        -------
+        str or None
+            Name of the matching image.
+
         Examples
         --------
-        >>> from medicalimageanalysis.read.dicom import ReadRTStruct
-        >>> rtstruct = ReadRTStruct(image_set=rtstruct_dataset, only_tags=False)
-        >>> rtstruct.match_with_image()
+        >>> rs.match_with_image(Data.image)
+        'CT 01'
+
+        A structure set for a series that is not loaded:
+
+        >>> rs.match_with_image({}) is None
+        True
         """
         all_sops = {s for p in self._properties for s in p["sops"]}
 
@@ -2486,15 +3476,23 @@ class ReadRTStruct:
         return None
 
     def structure_positions(self):
-        """contours : one list per ROI (aligned with roi_names / roi_types),
-                   each an (N, 3) array per contour item
-        points   : one (1, 3) array per POI, aligned with poi_names
-        
+        """
+        Fill `contours` (per ROI, list of (N, 3) arrays) and `points` (per POI).
+
+        Contour items whose type differs from the ROI's type, or whose value
+        count is not a multiple of 3, are skipped.
+
+        Returns
+        -------
+        None
+
         Examples
         --------
-        >>> from medicalimageanalysis.read.dicom import ReadRTStruct
-        >>> rtstruct = ReadRTStruct(image_set=rtstruct_dataset, only_tags=False)
-        >>> rtstruct.structure_positions()
+        >>> rs.structure_positions()
+        >>> rs.roi_names[1], len(rs.contours[1])
+        ('GTV', 9)
+        >>> rs.poi_names, rs.points[0]
+        (['Isocenter'], array([[ 12.4, -35.1, 102.5]]))
         """
         seqs = self.image_set.ROIContourSequence
         for p in self._properties:
@@ -2516,51 +3514,118 @@ class ReadRTStruct:
 
 
 class ReadREG:
-    """Reads a DICOM Spatial Registration (rigid) or Deformable Spatial Registration.
+    """
+    Read a DICOM Spatial Registration (rigid) or Deformable Spatial Registration.
 
     Reference vs. moving is resolved per registration item:
-    1. Distinct FoRs -> item matching the REG FrameOfReferenceUID is the reference.
-    2. Shared FoR    -> identity-transform item is the reference.
-    3. Ambiguous     -> first item is the reference.
+        1. Distinct FoRs -> item matching the REG FrameOfReferenceUID is the
+           reference.
+        2. Shared FoR    -> identity-transform item is the reference.
+        3. Ambiguous     -> first item is the reference.
 
-    The reference is the Registered RCS (the REG's own FrameOfReferenceUID), the moving image is the Source RCS.
+    The reference is the Registered RCS (the REG's own FrameOfReferenceUID),
+    the moving image is the Source RCS. Both images must already be loaded;
+    they are found by SOP Instance UID.
 
-    Rigid: ``moving_matrix`` is reference -> moving (for pull-resampling the moving image), passed to ``Rigid`` as
-    ``matrix``.
+    Rigid: `moving_matrix` is reference -> moving (for pull-resampling the
+    moving image) and is passed to `Rigid` as `matrix`.
 
-    Deformable: DICOM maps a registered (reference) point r to the source (moving) point
+    Deformable: DICOM maps a registered (reference) point r to the source
+    (moving) point
+
         m = Post @ (Pre @ r + V(r))
-    which is the Deformable convention  m = rigid_matrix @ (r + dvf(r))  with
-        rigid_matrix = Post,   dvf(r) = V(r) + (Pre - I) @ r
-    so the vector grid is stored as is (no inversion, no name swap). A non-identity Pre is folded into the field;
-    that assumes V is sampled at the registered point r, which is where the standard places the grid. NaN vectors
-    (undefined points) are stored as zero displacement.
 
-    dvf is (z, y, x, 3) float32 in (dx, dy, dz) mm; dimensions are (z, y, x); spacing/origin are (x, y, z);
-    dvf_matrix rows are the grid's index axes in world (as Deformable expects).
+    which is the Deformable convention  m = rigid_matrix @ (r + dvf(r))  with
+
+        rigid_matrix = Post,   dvf(r) = V(r) + (Pre - I) @ r
+
+    so the vector grid is stored as is (no inversion, no name swap). A
+    non-identity Pre is folded into the field; that assumes V is sampled at
+    the registered point r, which is where the standard places the grid. NaN
+    vectors (undefined points) are stored as zero displacement.
+
+    dvf is (z, y, x, 3) float32 in (dx, dy, dz) mm; dimensions are
+    (z, y, x); spacing/origin are (x, y, z); dvf_matrix rows are the grid's
+    index axes in world (as Deformable expects).
+
+    Parameters
+    ----------
+    image_set : pydicom.Dataset or list of pydicom.Dataset
+        The REG dataset (first one used for a list).
+
+    only_tags : bool, default False
+        Only resolve the referenced images and the name.
+
+    Attributes
+    ----------
+    deformable : bool
+        True for a Deformable Spatial Registration.
+
+    reference_name, moving_name : str or None
+        Loaded images the registration connects.
+
+    registration_name : str
+        'CT 01_MR 02' (rigid) or 'DVF_CT 01_CBCT 02' (deformable), with
+        '_1', '_2', ... added on collision.
+
+    moving_matrix : np.ndarray or None
+        Rigid: reference -> moving 4x4. Deformable: the Post matrix.
+
+    dvf : np.ndarray or None
+        (z, y, x, 3) displacement field in mm (deformable only).
+
+    registration : Rigid or Deformable or None
+        The created object (None when an image is missing or with only_tags).
 
     Examples
     --------
+    A rigid CT-MR fusion:
+
+    >>> import pydicom
+    >>> from medicalimageanalysis import Data
     >>> from medicalimageanalysis.read.dicom import ReadREG
-    >>> reg = ReadREG(image_set=reg_dataset, only_tags=False)
-    >>> reg.registration
+    >>> Data.image_list()
+    ['CT 01', 'MR 02']
+    >>> reg = ReadREG(pydicom.dcmread('C:/Data/Patient01/REG.dcm'))
+    >>> reg.registration_name, Data.rigid_list()
+    ('CT 01_MR 02', ['CT 01_MR 02'])
+    >>> np.round(reg.moving_matrix[:3, 3], 1)
+    array([-10. ,   2.5,   0. ])
+
+    A deformable CT-CBCT registration:
+
+    >>> reg = ReadREG(pydicom.dcmread('C:/Data/Patient01/DREG.dcm'))
+    >>> reg.deformable, reg.dvf.shape
+    (True, (88, 128, 128, 3))
+    >>> Data.deformable_list()
+    ['DVF_CT 01_CBCT 03']
+
+    Peek at which images a REG links without building anything:
+
+    >>> reg = ReadREG(ds, only_tags=True)
+    >>> reg.reference_name, reg.moving_name, reg.registration
+    ('CT 01', 'MR 02', None)
     """
 
     def __init__(self, image_set, only_tags=False):
-        """Parse a spatial registration object and instantiate the corresponding registration.
+        """
+        Parse a spatial registration object and create the matching registration.
 
         Parameters
         ----------
         image_set : pydicom.Dataset or list of pydicom.Dataset
             The REG dataset (the first one is used when a list is given).
+
         only_tags : bool, default False
-            Only resolve the referenced images and the name; no matrices, no vector grid, no registration object.
+            Only resolve the referenced images and the name; no matrices, no
+            vector grid, no registration object.
 
         Examples
         --------
         >>> from medicalimageanalysis.read.dicom import ReadREG
-        >>> reg = ReadREG(image_set=reg_dataset, only_tags=True)
+        >>> reg = ReadREG(ds, only_tags=True)
         >>> reg.reference_name, reg.moving_name
+        ('CT 01', 'MR 02')
         """
         self.ds = image_set[0] if isinstance(image_set, (list, tuple)) else image_set
         self.only_tags = only_tags
@@ -2602,7 +3667,17 @@ class ReadREG:
 
     @staticmethod
     def _deform_matrix(item, keyword):
-        """4x4 Pre / Post Deformation matrix of a deformable registration item; identity when absent."""
+        """
+        4x4 Pre / Post Deformation matrix of a deformable item; identity when absent.
+
+        Examples
+        --------
+        >>> ReadREG._deform_matrix(item, 'PreDeformationMatrixRegistrationSequence')
+        array([[1., 0., 0., 0.],
+               [0., 1., 0., 0.],
+               [0., 0., 1., 0.],
+               [0., 0., 0., 1.]])
+        """
         if item is None or keyword not in item:
             return np.eye(4)
 
@@ -2610,7 +3685,16 @@ class ReadREG:
 
     @staticmethod
     def _item_sops(item):
-        """Referenced SOP Instance UIDs of a registration item."""
+        """
+        Referenced SOP Instance UIDs of a registration item ([] for None).
+
+        Examples
+        --------
+        >>> ReadREG._item_sops(None)
+        []
+        >>> len(ReadREG._item_sops(reg._mov_item))
+        88
+        """
         if item is None:
             return []
 
@@ -2618,11 +3702,28 @@ class ReadREG:
 
     @staticmethod
     def _to_4x4(values):
-        """Flat DICOM transform array (16 values, row major) to a 4x4 matrix."""
+        """
+        Flat DICOM transform (16 values, row major) to a 4x4 matrix.
+
+        Examples
+        --------
+        >>> from medicalimageanalysis.read.dicom import ReadREG
+        >>> ReadREG._to_4x4([1, 0, 0, 10, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1])[:3, 3]
+        array([10.,  0.,  0.])
+        """
         return np.asarray(values, dtype=float).reshape(4, 4)
 
     def _is_identity_item(self, item):
-        """True when a registration item is the identity transform (no grid, identity matrices)."""
+        """
+        True when a registration item is the identity transform.
+
+        Deformable items must also have no vector grid.
+
+        Examples
+        --------
+        >>> reg._is_identity_item(reg.ds.RegistrationSequence[0])
+        True
+        """
         if self.deformable:
             return ('DeformableRegistrationGridSequence' not in item
                     and np.allclose(self._deform_matrix(item, 'PreDeformationMatrixRegistrationSequence'), np.eye(4))
@@ -2631,7 +3732,18 @@ class ReadREG:
         return np.allclose(self._rigid_matrix(item), np.eye(4))
 
     def _rigid_matrix(self, item):
-        """Composite rigid transform of a registration item (each matrix in the sequence applied in order)."""
+        """
+        Composite rigid transform of an item (each matrix applied in order).
+
+        Identity for None or an item without MatrixRegistrationSequence.
+
+        Examples
+        --------
+        >>> reg._rigid_matrix(None)[:3, 3]
+        array([0., 0., 0.])
+        >>> np.round(reg._rigid_matrix(reg._mov_item)[:3, 3], 1)
+        array([ 10. ,  -2.5,   0. ])
+        """
         if item is None or 'MatrixRegistrationSequence' not in item:
             return np.eye(4)
 
@@ -2642,17 +3754,28 @@ class ReadREG:
         return m
 
     def compute_deformable(self):
-        """Read the deformation grid into the Deformable convention: dvf (reference -> moving) and rigid = Post.
+        """
+        Read the deformation grid into the Deformable convention.
 
-        The vector grid is copied out of the DICOM buffer and the buffer is deleted right after, so the raw bytes
-        don't stay in RAM next to the field. A non-identity Pre is folded into the field one z slab at a time.
+        Sets `dvf` (reference -> moving), `moving_matrix` (= Post), `dvf_matrix`,
+        `origin`, `spacing`, `dimensions`, `pre_matrix` and `post_matrix`.
+
+        The vector grid is copied out of the DICOM buffer and the buffer is
+        deleted right after, so the raw bytes don't stay in RAM next to the
+        field. A non-identity Pre is folded into the field one z slab at a time.
+
+        Returns
+        -------
+        None
 
         Examples
         --------
-        >>> from medicalimageanalysis.read.dicom import ReadREG
-        >>> reg = ReadREG(image_set=reg_dataset, only_tags=True)
+        >>> reg = ReadREG(ds, only_tags=True)
         >>> reg.compute_deformable()
-        >>> reg.dvf.shape, reg.moving_matrix
+        >>> reg.dvf.shape, reg.dvf.dtype
+        ((88, 128, 128, 3), dtype('float32'))
+        >>> reg.spacing
+        array([4., 4., 4.])
         """
         item = self._mov_item
         if item is None or 'DeformableRegistrationGridSequence' not in item:
@@ -2693,28 +3816,50 @@ class ReadREG:
         self.moving_matrix = self.post_matrix                           # rigid step after the deformation
 
     def compute_rigid(self):
-        """Compute the rigid mapping between the reference and moving series (reference -> moving).
+        """
+        Compute the rigid reference -> moving matrix into `moving_matrix`.
+
+        DICOM stores each item's matrix as its own frame -> registered frame;
+        the result is inv(inv(reference) @ moving).
+
+        Returns
+        -------
+        None
 
         Examples
         --------
-        >>> from medicalimageanalysis.read.dicom import ReadREG
-        >>> reg = ReadREG(image_set=reg_dataset, only_tags=True)
+        A moving item that shifts +10 mm in x gives a -10 mm pull:
+
+        >>> reg = ReadREG(ds, only_tags=True)
         >>> reg.compute_rigid()
-        >>> reg.moving_matrix
+        >>> reg.moving_matrix[:3, 3]
+        array([-10.,   0.,   0.])
         """
         self.reference_matrix = self._rigid_matrix(self._ref_item)
         moving_to_ref = np.linalg.inv(self.reference_matrix) @ self._rigid_matrix(self._mov_item)
         self.moving_matrix = np.linalg.inv(moving_to_ref)
 
     def create_name(self):
-        """Find the loaded reference / moving images by SOP and build a unique registration name.
+        """
+        Find the loaded reference / moving images by SOP and build a unique name.
+
+        Missing images are named 'Unknown'.
+
+        Returns
+        -------
+        None
 
         Examples
         --------
-        >>> from medicalimageanalysis.read.dicom import ReadREG
-        >>> reg = ReadREG(image_set=reg_dataset, only_tags=True)
+        >>> reg.create_name()
         >>> reg.registration_name
-        'DVF_CT 01_CBCT 01'
+        'DVF_CT 01_CBCT 03'
+
+        Loading the same REG twice:
+
+        >>> reg.create_name()
+        >>> reg.registration_name
+        'DVF_CT 01_CBCT 03_1'
         """
         ref_first = self.reference_sops[0] if self.reference_sops else None
         mov_first = self.moving_sops[0] if self.moving_sops else None
@@ -2739,16 +3884,23 @@ class ReadREG:
         self.registration_name = name
 
     def create_registration(self):
-        """Instantiate and register a :class:`Rigid` or :class:`Deformable` object.
+        """
+        Instantiate and register a `Rigid` or `Deformable` object.
 
-        Skipped when either image isn't loaded, or when a deformable REG has no vector grid.
+        Skipped when either image isn't loaded, or when a deformable REG has no
+        vector grid.
+
+        Returns
+        -------
+        None
 
         Examples
         --------
-        >>> from medicalimageanalysis.read.dicom import ReadREG
-        >>> reg = ReadREG(image_set=reg_dataset, only_tags=True)
-        >>> reg.compute_deformable()
+        >>> reg = ReadREG(ds, only_tags=True)
+        >>> reg.compute_rigid()
         >>> reg.create_registration()
+        >>> Data.rigid_list()
+        ['CT 01_MR 02']
         """
         if not (self.reference_name and self.moving_name):
             return
@@ -2768,13 +3920,21 @@ class ReadREG:
                                       matrix=self.moving_matrix)
 
     def order_items(self):
-        """Determine which registration item is the reference (registered RCS) and which is the moving (source RCS).
+        """
+        Decide which item is the reference (registered RCS) and which is moving.
+
+        A single identity item is the reference only; a single non-identity
+        item is the moving one.
+
+        Returns
+        -------
+        None
 
         Examples
         --------
-        >>> from medicalimageanalysis.read.dicom import ReadREG
-        >>> reg = ReadREG(image_set=reg_dataset, only_tags=True)
         >>> reg.order_items()
+        >>> reg._is_identity_item(reg._ref_item), reg._mov_item is not None
+        (True, True)
         """
         if self.deformable:
             items, uid_attr = self.ds.DeformableRegistrationSequence, 'SourceFrameOfReferenceUID'
@@ -2803,13 +3963,22 @@ class ReadREG:
             self._ref_item, self._mov_item = a, b
 
     def resolve_series(self):
-        """Resolve the referenced series UIDs and SOP lists of the reference and moving images.
+        """
+        Resolve series UIDs and SOP lists of the reference and moving images.
+
+        Looks in ReferencedSeriesSequence and
+        StudiesContainingOtherReferencedInstancesSequence; leftover series fill
+        whichever side could not be matched by SOP.
+
+        Returns
+        -------
+        None
 
         Examples
         --------
-        >>> from medicalimageanalysis.read.dicom import ReadREG
-        >>> reg = ReadREG(image_set=reg_dataset, only_tags=True)
         >>> reg.resolve_series()
+        >>> len(reg.reference_sops), len(reg.moving_sops)
+        (142, 88)
         """
         series = {}
         seqs = list(self.ds.get('ReferencedSeriesSequence', []))
@@ -2846,27 +4015,63 @@ class ReadREG:
 
 
 class ReadRTDose:
-    """Reads an RTDOSE object into a canonical grid.
-    
-    After loading, the array is indexed [z, y, x] with every axis increasing in
-    patient coordinates, and origin is the patient position of voxel [0, 0, 0].
-    spacing and origin are (x, y, z); dimensions match array.shape (z, y, x).
-    plane describes the grid as stored in the file, before reorientation.
-    
+    """
+    Read an RTDOSE grid into canonical (z, y, x) Gy and register it.
+
+    After loading, `array` is indexed [z, y, x] with every axis increasing
+    in patient coordinates, and `origin` is the patient position of voxel
+    [0, 0, 0]. `spacing` and `origin` are (x, y, z); `dimensions` matches
+    `array.shape`. `plane` describes the grid as stored in the file, before
+    reorientation. DoseGridScaling is applied, so values are in the file's
+    DoseUnits (normally Gy).
+
+    Parameters
+    ----------
+    image_set : pydicom.Dataset or list
+        RTDOSE dataset (first used for a list).
+
+    only_tags : bool, default False
+        Geometry only, no dose values.
+
+    Attributes
+    ----------
+    array : np.ndarray or None
+        float32 dose grid (z, y, x).
+
+    dose_name : str
+        Name registered in `Data.dose`, e.g. 'RTDOSE 01'.
+
     Examples
     --------
+    Load a plan dose:
+
+    >>> import pydicom
+    >>> from medicalimageanalysis import Data
     >>> from medicalimageanalysis.read.dicom import ReadRTDose
-    >>> dose = ReadRTDose(image_set=rtdose_dataset, only_tags=False)
+    >>> dose = ReadRTDose(pydicom.dcmread('C:/Data/Patient01/RD.dcm'))
+    >>> dose.dose_name, Data.dose_list()
+    ('RTDOSE 01', ['RTDOSE 01'])
+    >>> dose.array.shape, float(dose.array.max())
+    ((96, 120, 150), 54.12)
+    >>> dose.spacing
+    array([2.5, 2.5, 2.5])
+
+    Geometry only:
+
+    >>> ReadRTDose(ds, only_tags=True).array is None
+    True
     """
 
     def __init__(self, image_set, only_tags=False):
-        """Initialize an RTDOSE reader and register the dose grid.
-        
+        """
+        Decode (optionally), compute geometry, and register the dose grid.
+
         Examples
         --------
         >>> from medicalimageanalysis.read.dicom import ReadRTDose
-        >>> dose = ReadRTDose(image_set=rtdose_dataset, only_tags=False)
-        >>> dose.__init__()
+        >>> dose = ReadRTDose([ds])
+        >>> dose.modality, dose.plane
+        ('RTDOSE', 'Axial')
         """
         self.ds = image_set[0] if isinstance(image_set, (list, tuple)) else image_set
         self.image_set = [self.ds]
@@ -2897,11 +4102,30 @@ class ReadRTDose:
         Data.dose[self.dose_name] = Dose(self)
 
     def _num_frames(self):
-        """Return the number of dose planes encoded in the dataset."""
+        """
+        Number of dose planes in the dataset (1 when NumberOfFrames is absent).
+
+        Examples
+        --------
+        >>> dose._num_frames()
+        96
+        """
         return int(self.ds.get('NumberOfFrames') or 1)
 
     def _slice_step(self):
-        """Signed distance between frames along the plane normal."""
+        """
+        Signed distance between frames, from GridFrameOffsetVector.
+
+        Falls back to SliceThickness (then 1.0) when the vector is missing or
+        has a single entry.
+
+        Examples
+        --------
+        >>> ds.GridFrameOffsetVector[:3]
+        [0.0, -2.5, -5.0]
+        >>> dose._slice_step()
+        -2.5
+        """
         offsets = self.ds.get('GridFrameOffsetVector')
         if offsets is not None and not isinstance(offsets, (str, float)) and len(offsets) > 1:
             step = float(offsets[1]) - float(offsets[0])
@@ -2911,13 +4135,19 @@ class ReadRTDose:
         return float(self.ds.get('SliceThickness') or 1.0)
 
     def compute_array(self):
-        """Decode the dose grid and apply the DICOM dose scaling factor.
-        
+        """
+        Decode the grid as (frames, rows, cols) float32 times DoseGridScaling.
+
+        Returns
+        -------
+        None
+
         Examples
         --------
-        >>> from medicalimageanalysis.read.dicom import ReadRTDose
-        >>> dose = ReadRTDose(image_set=rtdose_dataset, only_tags=False)
+        >>> dose = ReadRTDose(ds, only_tags=True)
         >>> dose.compute_array()
+        >>> dose.array.dtype, dose.array.shape
+        (dtype('float32'), (96, 120, 150))
         """
         scaling = float(self.ds.get('DoseGridScaling') or 1.0)
         shape = (self._num_frames(), int(self.ds.Rows), int(self.ds.Columns))
@@ -2926,16 +4156,29 @@ class ReadRTDose:
         del self.ds.PixelData
 
     def compute_geometry(self):
-        """Reorders and flips the grid so array axes (0, 1, 2) run along +z, +y, +x.
-        
-        Works from tags alone, so it is valid with only_tags=True; the array
-        is transformed alongside when it has been loaded.
-        
+        """
+        Reorder and flip the grid so array axes (0, 1, 2) run along +z, +y, +x.
+
+        Works from tags alone, so it is valid with only_tags=True; the array is
+        transformed alongside when it has been loaded. A decreasing
+        GridFrameOffsetVector flips the frame axis and moves the origin to the
+        most inferior plane.
+
+        Returns
+        -------
+        None
+
         Examples
         --------
-        >>> from medicalimageanalysis.read.dicom import ReadRTDose
-        >>> dose = ReadRTDose(image_set=rtdose_dataset, only_tags=False)
+        Offsets [0, -2.5, -5, ...] with the first plane at z = 100 mm:
+
         >>> dose.compute_geometry()
+        >>> float(dose.origin[2])
+        -137.5
+        >>> dose.image_matrix
+        array([[1., 0., 0.],
+               [0., 1., 0.],
+               [0., 0., 1.]], dtype=float32)
         """
         row = self.orientation[:3]
         col = self.orientation[3:]
@@ -2978,13 +4221,18 @@ class ReadRTDose:
         self.image_matrix = np.stack([dirs[2], dirs[1], dirs[0]]).astype(np.float32)
 
     def compute_orientation(self):
-        """Return the dose-grid orientation, defaulting to identity when absent.
-        
+        """
+        Dose-grid ImageOrientationPatient; identity (flagged) when absent.
+
+        Returns
+        -------
+        np.ndarray
+            Six direction cosines.
+
         Examples
         --------
-        >>> from medicalimageanalysis.read.dicom import ReadRTDose
-        >>> dose = ReadRTDose(image_set=rtdose_dataset, only_tags=False)
         >>> dose.compute_orientation()
+        array([1., 0., 0., 0., 1., 0.])
         """
         if 'ImageOrientationPatient' in self.ds:
             return np.asarray(self.ds.ImageOrientationPatient, dtype=float)
@@ -2992,13 +4240,18 @@ class ReadRTDose:
         return np.array([1, 0, 0, 0, 1, 0], dtype=float)
 
     def compute_plane(self):
-        """Infer the dominant anatomical plane from the dose orientation.
-        
+        """
+        Plane of the stored grid from its orientation.
+
+        Returns
+        -------
+        str
+            'Axial', 'Coronal' or 'Sagittal'.
+
         Examples
         --------
-        >>> from medicalimageanalysis.read.dicom import ReadRTDose
-        >>> dose = ReadRTDose(image_set=rtdose_dataset, only_tags=False)
         >>> dose.compute_plane()
+        'Axial'
         """
         normal = np.cross(self.orientation[:3], self.orientation[3:])
         return ('Sagittal', 'Coronal', 'Axial')[int(np.argmax(np.abs(normal)))]
@@ -3006,29 +4259,41 @@ class ReadRTDose:
 
 def create_image_name(modality):
     """
-    Generate a unique, sequential name for an image based on its modality.
+    Generate the next sequential image name for a modality.
 
-    This function checks the current number of images in the global data list
-    and appends a zero-padded index to the modality string to create a
-    standardized identifier.
+    The index is the number of images already in `Data`, plus one, and is
+    zero-padded to two digits. The index is shared across modalities, so a
+    CT followed by an MR gives 'CT 01' and 'MR 02'.
 
     Parameters
     ----------
     modality : str
-        The imaging modality (e.g., 'CT', 'MR', 'PET').
+        Imaging modality (e.g. 'CT', 'MR', 'PT').
 
     Returns
     -------
     str
-        A formatted string containing the modality and a two-digit index
-        (e.g., 'CT 01').
+        Name such as 'CT 01'.
 
     Examples
     --------
-    >>> # Assuming Data.image_list() is empty
+    >>> from medicalimageanalysis import Data
+    >>> from medicalimageanalysis.read.dicom import create_image_name
+    >>> Data.clear()
     >>> create_image_name('CT')
     'CT 01'
-    >>> # Assuming Data.image_list() has 9 items
+
+    With two images already loaded:
+
+    >>> Data.image_list()
+    ['CT 01', 'MR 02']
+    >>> create_image_name('PT')
+    'PT 03'
+
+    Past nine images the padding stops:
+
+    >>> len(Data.image_list())
+    9
     >>> create_image_name('MR')
     'MR 10'
     """
@@ -3043,27 +4308,35 @@ def create_image_name(modality):
 
 def create_dose_name(modality):
     """
-    Generate a unique, sequential name for a dose based on its modality.
+    Generate the next sequential dose name.
 
-    This function calculates the next available index for a dose object
-    and returns a formatted string identifier.
+    Same scheme as `create_image_name`, counted over `Data.dose`.
 
     Parameters
     ----------
     modality : str
-        The type of dose or modality associated with it (e.g., 'RTDOSE').
+        Label for the dose (the RTDOSE reader passes 'RTDOSE').
 
     Returns
     -------
     str
-        A formatted string containing the modality and a two-digit index
-        (e.g., 'RTDOSE 01').
+        Name such as 'RTDOSE 01'.
 
     Examples
     --------
-    >>> # Assuming Data.dose_list() has 2 items
-    >>> create_dose_name('Dose')
-    'Dose 03'
+    >>> from medicalimageanalysis import Data
+    >>> from medicalimageanalysis.read.dicom import create_dose_name
+    >>> Data.dose_list()
+    []
+    >>> create_dose_name('RTDOSE')
+    'RTDOSE 01'
+
+    A second plan's dose:
+
+    >>> Data.dose_list()
+    ['RTDOSE 01']
+    >>> create_dose_name('RTDOSE')
+    'RTDOSE 02'
     """
     idx = len(Data.dose_list())
     if idx < 9:

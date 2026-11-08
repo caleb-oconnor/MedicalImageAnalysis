@@ -604,7 +604,6 @@ class Refinement(object):
         return self._count_defects(self.mesh)
 
 
-
 def component_overlap(components_1, components_2, min_distance=0):
     """Matches connected components from two meshes by overlap or proximity.
 
