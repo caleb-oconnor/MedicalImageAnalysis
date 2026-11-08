@@ -2517,29 +2517,50 @@ class ReadRTStruct:
 
 class ReadREG:
     """Reads a DICOM Spatial Registration (rigid) or Deformable Spatial Registration.
-    
+
     Reference vs. moving is resolved per registration item:
     1. Distinct FoRs -> item matching the REG FrameOfReferenceUID is the reference.
     2. Shared FoR    -> identity-transform item is the reference.
     3. Ambiguous     -> first item is the reference.
-    
-    moving_matrix is reference -> moving (for pull-resampling the moving image).
-    dvf is (z, y, x, 3); dimensions are (z, y, x); spacing/origin are (x, y, z).
-    
+
+    The reference is the Registered RCS (the REG's own FrameOfReferenceUID), the moving image is the Source RCS.
+
+    Rigid: ``moving_matrix`` is reference -> moving (for pull-resampling the moving image), passed to ``Rigid`` as
+    ``matrix``.
+
+    Deformable: DICOM maps a registered (reference) point r to the source (moving) point
+        m = Post @ (Pre @ r + V(r))
+    which is the Deformable convention  m = rigid_matrix @ (r + dvf(r))  with
+        rigid_matrix = Post,   dvf(r) = V(r) + (Pre - I) @ r
+    so the vector grid is stored as is (no inversion, no name swap). A non-identity Pre is folded into the field;
+    that assumes V is sampled at the registered point r, which is where the standard places the grid. NaN vectors
+    (undefined points) are stored as zero displacement.
+
+    dvf is (z, y, x, 3) float32 in (dx, dy, dz) mm; dimensions are (z, y, x); spacing/origin are (x, y, z);
+    dvf_matrix rows are the grid's index axes in world (as Deformable expects).
+
     Examples
     --------
     >>> from medicalimageanalysis.read.dicom import ReadREG
     >>> reg = ReadREG(image_set=reg_dataset, only_tags=False)
+    >>> reg.registration
     """
 
     def __init__(self, image_set, only_tags=False):
         """Parse a spatial registration object and instantiate the corresponding registration.
-        
+
+        Parameters
+        ----------
+        image_set : pydicom.Dataset or list of pydicom.Dataset
+            The REG dataset (the first one is used when a list is given).
+        only_tags : bool, default False
+            Only resolve the referenced images and the name; no matrices, no vector grid, no registration object.
+
         Examples
         --------
         >>> from medicalimageanalysis.read.dicom import ReadREG
-        >>> reg = ReadREG(image_set=reg_dataset, only_tags=False)
-        >>> reg.__init__()
+        >>> reg = ReadREG(image_set=reg_dataset, only_tags=True)
+        >>> reg.reference_name, reg.moving_name
         """
         self.ds = image_set[0] if isinstance(image_set, (list, tuple)) else image_set
         self.only_tags = only_tags
@@ -2556,6 +2577,7 @@ class ReadREG:
 
         self.reference_matrix = None
         self.moving_matrix = None
+        self.pre_matrix = None
         self.post_matrix = None
         self.dvf_matrix = None
         self.dvf = None
@@ -2579,15 +2601,28 @@ class ReadREG:
         self.create_registration()
 
     @staticmethod
-    def _deform_matrix(self, item, keyword):
-        """Return a 4x4 deformable registration matrix for a sequence item."""
+    def _deform_matrix(item, keyword):
+        """4x4 Pre / Post Deformation matrix of a deformable registration item; identity when absent."""
         if item is None or keyword not in item:
             return np.eye(4)
 
-        return np.asarray(item[keyword][0].FrameOfReferenceTransformationMatrix, dtype=float).reshape(4, 4)
+        return ReadREG._to_4x4(item[keyword][0].FrameOfReferenceTransformationMatrix)
+
+    @staticmethod
+    def _item_sops(item):
+        """Referenced SOP Instance UIDs of a registration item."""
+        if item is None:
+            return []
+
+        return [ref.ReferencedSOPInstanceUID for ref in item.get('ReferencedImageSequence', [])]
+
+    @staticmethod
+    def _to_4x4(values):
+        """Flat DICOM transform array (16 values, row major) to a 4x4 matrix."""
+        return np.asarray(values, dtype=float).reshape(4, 4)
 
     def _is_identity_item(self, item):
-        """Determine whether a registration item represents the identity transform."""
+        """True when a registration item is the identity transform (no grid, identity matrices)."""
         if self.deformable:
             return ('DeformableRegistrationGridSequence' not in item
                     and np.allclose(self._deform_matrix(item, 'PreDeformationMatrixRegistrationSequence'), np.eye(4))
@@ -2595,81 +2630,91 @@ class ReadREG:
 
         return np.allclose(self._rigid_matrix(item), np.eye(4))
 
-    @staticmethod
-    def _item_sops(item):
-        """Collect referenced SOP Instance UIDs from a registration item."""
-        if item is None:
-            return []
-
-        return [ref.ReferencedSOPInstanceUID for ref in item.get('ReferencedImageSequence', [])]
-
     def _rigid_matrix(self, item):
-        """Assemble the composite rigid transform stored in a registration item."""
+        """Composite rigid transform of a registration item (each matrix in the sequence applied in order)."""
         if item is None or 'MatrixRegistrationSequence' not in item:
             return np.eye(4)
 
         m = np.eye(4)
         for mat in item.MatrixRegistrationSequence[0].MatrixSequence:
             m = self._to_4x4(mat.FrameOfReferenceTransformationMatrix) @ m
-            m = np.asarray(mat.FrameOfReferenceTransformationMatrix, dtype=float).reshape(4, 4) @ m
 
         return m
 
-    @staticmethod
-    def _to_4x4(values):
-        """Reshape a flat DICOM transform array into a 4x4 matrix."""
-        return np.asarray(values, dtype=float).reshape(4, 4)
-
-    def compute_rigid(self):
-        """Compute the rigid mapping between the reference and moving series.
-        
-        Examples
-        --------
-        >>> from medicalimageanalysis.read.dicom import ReadREG
-        >>> reg = ReadREG(image_set=reg_dataset, only_tags=False)
-        >>> reg.compute_rigid()
-        """
-        self.reference_matrix = self._rigid_matrix(self._ref_item)
-        moving_to_ref = np.linalg.inv(self.reference_matrix) @ self._rigid_matrix(self._mov_item)
-        self.moving_matrix = np.linalg.inv(moving_to_ref)
-
     def compute_deformable(self):
-        """Read deformable registration grid metadata and vector data.
-        
+        """Read the deformation grid into the Deformable convention: dvf (reference -> moving) and rigid = Post.
+
+        The vector grid is copied out of the DICOM buffer and the buffer is deleted right after, so the raw bytes
+        don't stay in RAM next to the field. A non-identity Pre is folded into the field one z slab at a time.
+
         Examples
         --------
         >>> from medicalimageanalysis.read.dicom import ReadREG
-        >>> reg = ReadREG(image_set=reg_dataset, only_tags=False)
+        >>> reg = ReadREG(image_set=reg_dataset, only_tags=True)
         >>> reg.compute_deformable()
+        >>> reg.dvf.shape, reg.moving_matrix
         """
         item = self._mov_item
-        pre = self._deform_matrix(item, 'PreDeformationMatrixRegistrationSequence')
+        if item is None or 'DeformableRegistrationGridSequence' not in item:
+            return
+
+        self.pre_matrix = self._deform_matrix(item, 'PreDeformationMatrixRegistrationSequence')
         self.post_matrix = self._deform_matrix(item, 'PostDeformationMatrixRegistrationSequence')
-        self.moving_matrix = np.linalg.inv(pre)
 
         grid = item.DeformableRegistrationGridSequence[0]
 
-        row = np.asarray(grid.ImageOrientationPatient[:3], dtype=np.float32)
-        col = np.asarray(grid.ImageOrientationPatient[3:], dtype=np.float32)
-        self.dvf_matrix = np.stack([row, col, np.cross(row, col)])
+        row = np.asarray(grid.ImageOrientationPatient[:3], dtype=float)
+        col = np.asarray(grid.ImageOrientationPatient[3:], dtype=float)
+        self.dvf_matrix = np.stack([row, col, np.cross(row, col)])      # rows = index axes in world
 
         self.origin = np.asarray(grid.ImagePositionPatient, dtype=float)
         self.dimensions = np.flip(np.asarray(grid.GridDimensions, dtype=int))
         self.spacing = np.asarray(grid.GridResolution, dtype=float)
 
-        # read-only view of the buffer; add .copy() if Deformable writes into it
-        self.dvf = np.frombuffer(grid.VectorGridData, dtype='<f4').reshape(*self.dimensions, 3)
-
+        # Copy out of the read-only DICOM buffer (Pre is folded into it below), then free the buffer
+        dvf = np.frombuffer(grid.VectorGridData, dtype='<f4').reshape(*self.dimensions, 3).copy()
         del grid.VectorGridData
 
-    def create_name(self):
-        """Create a stable, human-readable registration identifier.
-        
+        # NaN marks grid points where the transformation is undefined: no displacement there
+        np.nan_to_num(dvf, copy=False, nan=0.0)
+
+        # source = Post @ (Pre @ r + V(r)) = Post @ (r + V(r) + (Pre - I) @ r)
+        if not np.allclose(self.pre_matrix, np.eye(4)):
+            nz, ny, nx = (int(v) for v in self.dimensions)
+            rotation = self.pre_matrix[:3, :3] - np.eye(3)
+            translation = self.pre_matrix[:3, 3]
+            jj, ii = np.mgrid[:ny, :nx]
+            for k in range(nz):                                         # one slab at a time keeps memory low
+                index = np.stack([ii, jj, np.full_like(ii, k)], axis=-1) * self.spacing
+                r = self.origin + index @ self.dvf_matrix               # world point of each grid voxel
+                dvf[k] += (r @ rotation.T + translation).astype(np.float32)
+
+        self.dvf = dvf
+        self.moving_matrix = self.post_matrix                           # rigid step after the deformation
+
+    def compute_rigid(self):
+        """Compute the rigid mapping between the reference and moving series (reference -> moving).
+
         Examples
         --------
         >>> from medicalimageanalysis.read.dicom import ReadREG
-        >>> reg = ReadREG(image_set=reg_dataset, only_tags=False)
-        >>> reg.create_name()
+        >>> reg = ReadREG(image_set=reg_dataset, only_tags=True)
+        >>> reg.compute_rigid()
+        >>> reg.moving_matrix
+        """
+        self.reference_matrix = self._rigid_matrix(self._ref_item)
+        moving_to_ref = np.linalg.inv(self.reference_matrix) @ self._rigid_matrix(self._mov_item)
+        self.moving_matrix = np.linalg.inv(moving_to_ref)
+
+    def create_name(self):
+        """Find the loaded reference / moving images by SOP and build a unique registration name.
+
+        Examples
+        --------
+        >>> from medicalimageanalysis.read.dicom import ReadREG
+        >>> reg = ReadREG(image_set=reg_dataset, only_tags=True)
+        >>> reg.registration_name
+        'DVF_CT 01_CBCT 01'
         """
         ref_first = self.reference_sops[0] if self.reference_sops else None
         mov_first = self.moving_sops[0] if self.moving_sops else None
@@ -2695,48 +2740,40 @@ class ReadREG:
 
     def create_registration(self):
         """Instantiate and register a :class:`Rigid` or :class:`Deformable` object.
-        
+
+        Skipped when either image isn't loaded, or when a deformable REG has no vector grid.
+
         Examples
         --------
         >>> from medicalimageanalysis.read.dicom import ReadREG
-        >>> reg = ReadREG(image_set=reg_dataset, only_tags=False)
+        >>> reg = ReadREG(image_set=reg_dataset, only_tags=True)
+        >>> reg.compute_deformable()
         >>> reg.create_registration()
         """
         if not (self.reference_name and self.moving_name):
             return
 
         if self.deformable:
-            self.registration = Deformable(
-                self.dvf,
-                self.origin,
-                self.spacing,
-                self.dimensions,
-                rigid_matrix=self.moving_matrix,
-                dvf_matrix=self.dvf_matrix,
-                registration_name=self.registration_name,
-                reference_name=self.reference_name,
-                moving_name=self.moving_name,
-                reference_sops=self.reference_sops,
-                moving_sops=self.moving_sops,
-            )
+            if self.dvf is None:
+                return
+
+            self.registration = Deformable(dvf=self.dvf, origin=self.origin, spacing=self.spacing,
+                                           dimensions=tuple(int(v) for v in self.dimensions),
+                                           rigid_matrix=self.moving_matrix, dvf_matrix=self.dvf_matrix,
+                                           registration_name=self.registration_name,
+                                           reference_name=self.reference_name, moving_name=self.moving_name)
+
         else:
-            self.registration = Rigid(
-                self.reference_name,
-                self.moving_name,
-                rigid_name=self.registration_name,
-                reference_sops=self.reference_sops,
-                moving_sops=self.moving_sops,
-                reference_matrix=self.reference_matrix,
-                matrix=self.moving_matrix,
-            )
+            self.registration = Rigid(self.reference_name, self.moving_name, rigid_name=self.registration_name,
+                                      matrix=self.moving_matrix)
 
     def order_items(self):
-        """Determine which registration item acts as reference and which as moving.
-        
+        """Determine which registration item is the reference (registered RCS) and which is the moving (source RCS).
+
         Examples
         --------
         >>> from medicalimageanalysis.read.dicom import ReadREG
-        >>> reg = ReadREG(image_set=reg_dataset, only_tags=False)
+        >>> reg = ReadREG(image_set=reg_dataset, only_tags=True)
         >>> reg.order_items()
         """
         if self.deformable:
@@ -2766,12 +2803,12 @@ class ReadREG:
             self._ref_item, self._mov_item = a, b
 
     def resolve_series(self):
-        """Resolve referenced series UIDs and SOP lists from the registration object.
-        
+        """Resolve the referenced series UIDs and SOP lists of the reference and moving images.
+
         Examples
         --------
         >>> from medicalimageanalysis.read.dicom import ReadREG
-        >>> reg = ReadREG(image_set=reg_dataset, only_tags=False)
+        >>> reg = ReadREG(image_set=reg_dataset, only_tags=True)
         >>> reg.resolve_series()
         """
         series = {}
