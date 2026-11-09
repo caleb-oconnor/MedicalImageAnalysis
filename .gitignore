@@ -1,3 +1,6 @@
 /tester.py
 /tester_correspondence.py
 /__tracked_surface.stl
+/docs/_build/
+__pycache__/
+*.pyc

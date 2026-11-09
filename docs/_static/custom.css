@@ -1,0 +1,55 @@
+html[data-theme="light"] {
+  --pst-color-primary: #005f99;
+  --pst-color-secondary: #0077b6;
+  --pst-color-accent: #00b4d8;
+}
+
+html[data-theme="dark"] {
+  --pst-color-primary: #74c0fc;
+  --pst-color-secondary: #4dabf7;
+  --pst-color-accent: #22b8cf;
+}
+
+.bd-main .bd-content .bd-article-container {
+  max-width: 72rem;
+}
+
+.hero-block {
+  padding: 1rem 0 1.5rem;
+}
+
+.hero-kicker {
+  margin-bottom: 0.35rem;
+  color: var(--pst-color-primary);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-size: 0.82rem;
+}
+
+.hero-block h1 {
+  font-size: clamp(2.2rem, 4vw, 3.4rem);
+  line-height: 1.08;
+  margin-bottom: 0.75rem;
+}
+
+.hero-lead {
+  font-size: 1.1rem;
+  max-width: 52rem;
+  color: var(--pst-color-text-muted);
+}
+
+.sd-card {
+  border-radius: 0.9rem;
+  box-shadow: 0 0.4rem 1.4rem rgba(15, 23, 42, 0.08);
+  border: 1px solid var(--pst-color-border);
+}
+
+.sd-card:hover {
+  transform: translateY(-2px);
+  transition: transform 0.15s ease-in-out;
+}
+
+.bd-header-announcement {
+  font-weight: 600;
+}
