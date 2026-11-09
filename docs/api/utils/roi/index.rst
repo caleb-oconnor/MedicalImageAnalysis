@@ -6,7 +6,6 @@ The ``roi`` subpackage contains contour, mask, mesh, and ROI statistics tools.
 .. toctree::
    :maxdepth: 1
 
-   contour
    discrete_converters
    operations
    statistics
