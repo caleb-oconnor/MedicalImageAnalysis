@@ -117,6 +117,6 @@ https://caleb-oconnor.github.io/MedicalImageAnalysis/
 
 ## License
 
-Licensed under the GNU Affero General Public License v3.
+Licensed under the BSD 3-Clause License.
 
 See [LICENSE.txt](LICENSE.txt) for details.
