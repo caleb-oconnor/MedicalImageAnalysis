@@ -46,7 +46,6 @@ print(mask.shape)
 
 - `mask_to_contours`
 - `contours_to_mask`
-- `contours_to_mask_direct`
 - `mesh_to_mask`
 
 This area is a good candidate for richer tutorials later.

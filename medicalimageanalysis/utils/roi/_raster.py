@@ -62,9 +62,20 @@ def normalize_direction(direction, direction_rows=True):
 
 
 # =============================================================================== contours -> field volumes
-def _group(contours, origin, spacing, direction):
-    """list of (n,3) world rings -> (slices dict, contour frame, contour slice spacing)."""
-    return group_contours(contours, direction, origin, spacing)
+def _group(contours, origin, spacing, direction, interpolate=False):
+    """list of (n,3) world rings -> (slices dict, contour frame, contour slice spacing).
+
+    interpolate=False: slice spacing is the image spacing along the contour axis, so only
+    contours on adjacent image slices are linked and missing slices stay empty.
+    interpolate=True: slice spacing is the median spacing between contoured slices, so
+    sparse or different-grid contours are interpolated.
+    """
+    slices, frame, dz = group_contours(contours, direction, origin, spacing)
+    if not interpolate:
+        D = np.asarray(direction, float)
+        a = int(np.argmax(np.abs(D.T @ frame.n)))
+        dz = float(spacing[a])
+    return slices, frame, dz
 
 
 def _region_volumes(slices, frame, slice_spacing, m=1, c=None, gap_factor=1.5, pad=0.5,
@@ -309,12 +320,13 @@ def rings_to_mask(rings_by_slice, shape_zyx, origin, spacing, direction, ramp=No
     # band = 8-connected dilation of the pixels the boundary passes through
     ti = np.clip(np.rint(Q[:, 0] / sp[0]).astype(np.int64), 0, nx - 1)
     tj = np.clip(np.rint(Q[:, 1] / sp[1]).astype(np.int64), 0, ny - 1)
+    r = max(1, int(np.ceil(0.5 * w / min(sp[0], sp[1]))))
     k0, k1 = qk.min(), qk.max() + 1
-    j0, j1 = max(tj.min() - 1, 0), min(tj.max() + 2, ny)
-    i0, i1 = max(ti.min() - 1, 0), min(ti.max() + 2, nx)
+    j0, j1 = max(tj.min() - r, 0), min(tj.max() + r + 1, ny)
+    i0, i1 = max(ti.min() - r, 0), min(ti.max() + r + 1, nx)
     band = np.zeros((k1 - k0, j1 - j0, i1 - i0), bool)
     band[qk - k0, tj - j0, ti - i0] = True
-    band = ndimage.binary_dilation(band, structure=_S2D)
+    band = ndimage.binary_dilation(band, structure=_S2D, iterations=r)
     bk, bj, bi = np.nonzero(band)
     bk += k0; bj += j0; bi += i0
 
@@ -325,3 +337,45 @@ def rings_to_mask(rings_by_slice, shape_zyx, origin, spacing, direction, ramp=No
     f = np.where(inside[bk, bj, bi] > 0, -d, d)
     out[bk, bj, bi] = _to_u8(f, w)
     return out
+
+
+def rings_by_slice(contours, origin, spacing, direction, tol=0.05):
+    """
+    Assign each ring to an image slice, if every ring lies on one.
+
+    Parameters
+    ----------
+    contours : list[np.ndarray]
+        World-space (n, 3) rings.
+
+    origin : tuple[float, float, float]
+        World (x, y, z) of voxel (0, 0, 0).
+
+    spacing : tuple[float, float, float]
+        Voxel spacing (sx, sy, sz) in mm.
+
+    direction : np.ndarray
+        3x3 column-oriented direction matrix (already normalized).
+
+    tol : float
+        Allowed distance from a slice plane, as a fraction of the slice
+        spacing.
+
+    Returns
+    -------
+    dict[int, list[np.ndarray]] | None
+        Rings grouped by slice index, or None if any ring is tilted
+        relative to the slices or lies between two slices.
+    """
+    n = np.asarray(direction, float)[:, 2]
+    O = np.asarray(origin, float)
+    sz = float(spacing[2])
+    by_k = {}
+    for r in contours:
+        r = np.asarray(r, float)
+        d = (r - O) @ n / sz
+        k = float(d.mean())
+        if np.ptp(d) > tol or abs(k - np.rint(k)) > tol:
+            return None
+        by_k.setdefault(int(np.rint(k)), []).append(r)
+    return by_k

@@ -63,12 +63,13 @@ def _empty_mesh():
 
 
 def contours_to_mesh(contours, origin, spacing, direction, reduction=0.5,
-                     as_polydata=True, direction_rows=True, **kw):
+                     interpolate=False, as_polydata=True, direction_rows=True, **kw):
     """
     Build a closed surface mesh from contours.
 
     Each separate region gets its own field (and its own h); the combined
-    mesh is decimated once at the end.
+    mesh is decimated once at the end. By default only contours on adjacent
+    image slices are joined, so missing slices leave gaps.
 
     Parameters
     ----------
@@ -76,17 +77,32 @@ def contours_to_mesh(contours, origin, spacing, direction, reduction=0.5,
         World-space (n, 3) rings.
 
     origin : tuple[float, float, float]
-        World (x, y, z) of voxel (0, 0, 0).
+        World (x, y, z) of voxel (0, 0, 0) of the grid the contours were
+        drawn on.
 
     spacing : tuple[float, float, float]
-        Voxel spacing (sx, sy, sz) in mm.
+        Voxel spacing (sx, sy, sz) in mm of the grid the contours were
+        drawn on.
 
     direction : np.ndarray
-        3x3 image direction matrix.
+        3x3 image direction matrix of the grid the contours were drawn on.
 
     reduction : float
         Target decimation fraction (0 = no decimation, 0.5 = remove ~half
         the triangles).
+
+    interpolate : bool
+        How far apart contour planes can be and still be joined.
+        False (default): only contours on adjacent image slices are joined,
+        using the slice spacing from `spacing` and `direction`. A missing
+        slice leaves a gap, and each side is capped half a slice past its
+        last contour. `origin`, `spacing` and `direction` must describe the
+        grid the contours were drawn on (for RTSTRUCT, the referenced image).
+        True: the slice spacing is the median spacing between contoured
+        slices, so missing slices are filled by shape interpolation. Use this
+        for deliberately sparse contours, contours drawn on a different grid,
+        or sagittal / coronal contours. Gaps larger than 1.5x that spacing
+        are still left open.
 
     as_polydata : bool
         If True, return vtkPolyData. If False, return (points, triangles)
@@ -120,6 +136,20 @@ def contours_to_mesh(contours, origin, spacing, direction, reduction=0.5,
     >>> mesh.is_manifold
     True
 
+    Missing slices are left as gaps by default; interpolate=True fills them:
+
+    >>> box = np.zeros((8, 32, 32), dtype=np.uint8)
+    >>> box[2:7, 8:24, 8:24] = 1
+    >>> by_slice = mask_to_contours(box, origin, spacing, direction)
+    >>> sparse = by_slice[2] + by_slice[4]
+    >>> gapped = pv.wrap(contours_to_mesh(sparse, origin, spacing, direction))
+    >>> filled = pv.wrap(contours_to_mesh(sparse, origin, spacing, direction,
+    ...                                   interpolate=True))
+    >>> len(np.unique(gapped.connectivity().point_data['RegionId']))
+    2
+    >>> len(np.unique(filled.connectivity().point_data['RegionId']))
+    1
+
     Keep every triangle (no decimation) and get raw arrays:
 
     >>> points, triangles = contours_to_mesh(
@@ -135,18 +165,20 @@ def contours_to_mesh(contours, origin, spacing, direction, reduction=0.5,
     >>> mesh = contours_to_mesh(rings, origin, spacing, direction, workers=8)
     """
     direction = normalize_direction(direction, direction_rows=direction_rows)
-    slices, frame, dz = _group(contours, origin, spacing, direction)
+    slices, frame, dz = _group(contours, origin, spacing, direction, interpolate=interpolate)
     return _mesh_regions(slices, frame, dz, reduction=reduction, as_polydata=as_polydata, **kw)
 
 
 def contours_to_mask_and_mesh(contours, shape_zyx, origin, spacing, direction,
-                              reduction=0.5, ramp=None, as_polydata=True,
+                              reduction=0.5, ramp=None, interpolate=False, as_polydata=True,
                               direction_rows=True, **kw):
     """
     Build a mask and a surface mesh from one field build per region.
 
     Cheaper than calling `contours_to_mask` and `contours_to_mesh`
-    separately, and the two outputs come from the same field.
+    separately, and the two outputs come from the same field. By default
+    only contours on adjacent image slices are joined, so missing slices
+    leave gaps in both outputs.
 
     Parameters
     ----------
@@ -170,6 +202,20 @@ def contours_to_mask_and_mesh(contours, shape_zyx, origin, spacing, direction,
 
     ramp : float | None
         Width in mm of the mask's 0..255 boundary ramp. None uses the default.
+
+    interpolate : bool
+        How far apart contour planes can be and still be joined. Applies to
+        both the mask and the mesh, which come from the same field.
+        False (default): only contours on adjacent image slices are joined,
+        using the slice spacing from `spacing` and `direction`. A missing
+        slice leaves a gap in both outputs. `origin`, `spacing` and
+        `direction` must describe the grid the contours were drawn on (for
+        RTSTRUCT, the referenced image).
+        True: the slice spacing is the median spacing between contoured
+        slices, so missing slices are filled by shape interpolation. Use this
+        for deliberately sparse contours, contours drawn on a different grid,
+        or sagittal / coronal contours. Gaps larger than 1.5x that spacing
+        are still left open.
 
     as_polydata : bool
         If True, the mesh is vtkPolyData. If False, (points, triangles).
@@ -202,6 +248,22 @@ def contours_to_mask_and_mesh(contours, shape_zyx, origin, spacing, direction,
     >>> mask.dtype, mask.shape
     (dtype('uint8'), (8, 32, 32))
 
+    Missing slices stay empty by default; interpolate=True fills them:
+
+    >>> box = np.zeros((8, 32, 32), dtype=np.uint8)
+    >>> box[2:7, 8:24, 8:24] = 1
+    >>> by_slice = mask_to_contours(box, origin, spacing, direction)
+    >>> sparse = by_slice[2] + by_slice[4]
+    >>> gapped, _ = contours_to_mask_and_mesh(
+    ...     sparse, (8, 32, 32), origin, spacing, direction,
+    ... )
+    >>> filled, _ = contours_to_mask_and_mesh(
+    ...     sparse, (8, 32, 32), origin, spacing, direction,
+    ...     interpolate=True,
+    ... )
+    >>> bool(gapped[3, 16, 16] >= 128), bool(filled[3, 16, 16] >= 128)
+    (False, True)
+
     Undecimated mesh as raw arrays:
 
     >>> mask, (points, triangles) = contours_to_mask_and_mesh(
@@ -211,7 +273,7 @@ def contours_to_mask_and_mesh(contours, shape_zyx, origin, spacing, direction,
     ... )
     """
     direction = normalize_direction(direction, direction_rows=direction_rows)
-    slices, frame, dz = _group(contours, origin, spacing, direction)
+    slices, frame, dz = _group(contours, origin, spacing, direction, interpolate=interpolate)
     mask = np.zeros(shape_zyx, np.uint8)
     Ps, Ts, n = [], [], 0
     for vol in _region_volumes(slices, frame, dz, **kw):

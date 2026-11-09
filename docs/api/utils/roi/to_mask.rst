@@ -7,5 +7,4 @@ to_mask
    :toctree: ../../generated
 
    contours_to_mask
-   contours_to_mask_direct
    mesh_to_mask

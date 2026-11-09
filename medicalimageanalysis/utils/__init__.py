@@ -14,7 +14,7 @@ Examples
 
 from .roi.discrete_converters import ContourToDiscreteMesh, ContourToMask, MaskToContour, ModelToMask
 from .roi.to_contours import mask_to_contours, mesh_to_contours
-from .roi.to_mask import contours_to_mask, contours_to_mask_direct, mesh_to_mask
+from .roi.to_mask import contours_to_mask, mesh_to_mask
 from .roi.to_mesh import contours_to_mesh, contours_to_mask_and_mesh
 
 from .mesh.volume import Volume

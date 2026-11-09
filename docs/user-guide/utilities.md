@@ -15,7 +15,6 @@ operations, especially around ROI conversion and mesh workflows.
 - `mask_to_contours`
 - `mesh_to_contours`
 - `contours_to_mask`
-- `contours_to_mask_direct`
 - `mesh_to_mask`
 - `contours_to_mesh`
 - `contours_to_mask_and_mesh`
