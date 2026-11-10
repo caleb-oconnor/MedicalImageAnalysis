@@ -493,7 +493,7 @@ class Roi(object):
 
         return position
 
-    def create_mesh(self, reduction=0):
+    def create_mesh(self, reduction=0, interpolate=False):
         """
         Build a smooth closed surface mesh from the world contours.
 
@@ -505,6 +505,19 @@ class Roi(object):
         reduction : float
             Decimation fraction applied once at the end, 0 to 1. 0 keeps
             every triangle; 0.5 removes about half.
+
+        interpolate : bool
+            How far apart contour planes can be and still be joined.
+            False (default): only contours on adjacent image slices are joined,
+            using the slice spacing from `spacing` and `direction`. A missing
+            slice leaves a gap, and each side is capped half a slice past its
+            last contour. `origin`, `spacing` and `direction` must describe the
+            grid the contours were drawn on (for RTSTRUCT, the referenced image).
+            True: the slice spacing is the median spacing between contoured
+            slices, so missing slices are filled by shape interpolation. Use this
+            for deliberately sparse contours, contours drawn on a different grid,
+            or sagittal / coronal contours. Gaps larger than 1.5x that spacing
+            are still left open.
 
         Returns
         -------
@@ -529,7 +542,8 @@ class Roi(object):
                                      self.image.origin,
                                      self.image.spacing,
                                      np.asarray(self.image.matrix, float),
-                                     reduction=reduction)
+                                     reduction=reduction,
+                                     interpolate=interpolate)
 
         if self.mesh is not None:
             self.volume = self.mesh.volume
