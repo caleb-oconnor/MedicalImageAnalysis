@@ -1912,13 +1912,24 @@ class ReadXRay:
     Array axes (0, 1, 2) always run along patient +z, +y, +x (LPS), and
     `image_matrix`, `orientation`, `origin` and `spacing` describe that
     array. A frontal projection therefore becomes a one-voxel-thick coronal
-    "slab".
+    "slab", a lateral a sagittal one.
 
     Orientation source, in priority order:
         1. ImageOrientationPatient (top level or functional groups; tomo has it)
         2. PatientOrientation letters
         3. ViewPosition (+ laterality for mammography)
-        4. identity (row +x, column +y)
+        4. assumed frontal (row +x, column -z, a coronal slab), with
+           `orientation_known` False
+
+    The stored-axis -> patient-axis mapping is the best of the six axis
+    permutations, so oblique views (e.g. MLO) are placed on their nearest
+    patient axes. On an exact tie (a 45 degree MLO) the beam axis goes to x,
+    then y, before z, so an MLO reads as a sagittal slab like an ML.
+
+    The permutation and flips are worked out from the tags and kept, so the
+    array is reoriented the same way whether the pixels are decoded before
+    `compute_geometry` (normal read) or after it (only_tags=True, then
+    `compute_array`). `compute_geometry` can be called any number of times.
 
     Tomo frames are sorted along the slice normal and the origin is the
     first frame's ImagePositionPatient. 2D images without a position get
@@ -1942,12 +1953,16 @@ class ReadXRay:
     is_tomo : bool
         True when per-frame positions were found.
 
+    orientation_known : bool
+        False when no orientation tag was present and a frontal (coronal)
+        film was assumed.
+
     spacing_known : bool
         False when no spacing tag was present and 1 mm was assumed.
 
     plane : str
         Plane of the stored image ('Coronal' for AP/PA, 'Sagittal' for
-        laterals).
+        laterals and MLO).
 
     image_name : str
         Name the image was registered under.
@@ -1962,6 +1977,21 @@ class ReadXRay:
     >>> reader = ReadXRay(ds, only_tags=False)
     >>> reader.image_name, reader.plane
     ('DX 01', 'Coronal')
+    >>> reader.array.shape
+    (2500, 1, 2048)
+
+    A lateral keeps its single frame on x:
+
+    >>> ReadXRay(pydicom.dcmread('C:/Data/chest_lat.dcm'), only_tags=False).array.shape
+    (2500, 2048, 1)
+
+    Tags first, pixels later: the late array is reoriented to match the
+    geometry already computed:
+
+    >>> reader = ReadXRay(ds, only_tags=True)
+    >>> reader.dimensions
+    array([2500,    1, 2048])
+    >>> reader.compute_array()
     >>> reader.array.shape
     (2500, 1, 2048)
 
@@ -2012,19 +2042,26 @@ class ReadXRay:
 
         self.number_of_frames = int(ds.get('NumberOfFrames', 1) or 1)
         self.is_tomo = False
+        self.orientation_known = True
         self.spacing_known = False
         self._frame_order = None
         self._frame_origin = None
         self._slice_dz = 1.0
 
+        # (frames, rows, cols) -> (z, y, x): set by compute_geometry, applied by _reorient_array
+        self._perm = None
+        self._flip_axes = []
+        self._array_oriented = False
+
         self.origin = [0, 0, 0]
         self.spacing = None
         self.dimensions = None
-        self.orientation = [1, 0, 0, 0, 1, 0]
         self.image_matrix = np.identity(3)
 
-        # Stored (pre-reorientation) row / column directions
-        self.orientation = np.asarray(self.initial_orientation(), dtype=float)
+        # Stored (pre-reorientation) row / column directions. Kept apart from self.orientation, which
+        # compute_geometry replaces with the reoriented array's directions, so recomputing never permutes twice.
+        self._stored_orientation = np.asarray(self.initial_orientation(), dtype=float)
+        self.orientation = self._stored_orientation.copy()
         self.plane = self.compute_plane()
         self._setup_frames()
 
@@ -2061,33 +2098,6 @@ class ReadXRay:
 
         return None
 
-    def _frame_positions(self):
-        """
-        (F, 3) ImagePositionPatient per frame, or None if any frame lacks one.
-
-        Examples
-        --------
-        >>> reader._frame_positions().shape
-        (61, 3)
-        >>> ReadXRay(chest_ds, only_tags=True)._frame_positions() is None
-        True
-        """
-        per = self.ds.get('PerFrameFunctionalGroupsSequence')
-        if not per or len(per) != self.number_of_frames:
-            return None
-
-        shared = self._shared_group()
-
-        positions = []
-        for frame in per:
-            ipp = self._fg_value(frame, shared, 'PlanePositionSequence', 'ImagePositionPatient')
-            if ipp is None:
-                return None
-
-            positions.append([float(v) for v in ipp])
-
-        return np.array(positions)
-
     @staticmethod
     def _letters_to_dir(value):
         """
@@ -2120,6 +2130,33 @@ class ReadXRay:
         norm = np.linalg.norm(vec)
 
         return vec / norm if norm > 0 else None
+
+    def _frame_positions(self):
+        """
+        (F, 3) ImagePositionPatient per frame, or None if any frame lacks one.
+
+        Examples
+        --------
+        >>> reader._frame_positions().shape
+        (61, 3)
+        >>> ReadXRay(chest_ds, only_tags=True)._frame_positions() is None
+        True
+        """
+        per = self.ds.get('PerFrameFunctionalGroupsSequence')
+        if not per or len(per) != self.number_of_frames:
+            return None
+
+        shared = self._shared_group()
+
+        positions = []
+        for frame in per:
+            ipp = self._fg_value(frame, shared, 'PlanePositionSequence', 'ImagePositionPatient')
+            if ipp is None:
+                return None
+
+            positions.append([float(v) for v in ipp])
+
+        return np.array(positions)
 
     def _inplane_spacing(self):
         """
@@ -2216,6 +2253,28 @@ class ReadXRay:
 
         return self._fg_value(frame, self._shared_group(), 'PixelMeasuresSequence', attr)
 
+    def _reorient_array(self):
+        """
+        Apply the permutation and flips found by `compute_geometry` to a
+        (frames, rows, cols) array, giving the (z, y, x) array its geometry
+        describes.
+
+        Examples
+        --------
+        >>> reader._perm, reader._flip_axes          # AP film
+        ([1, 0, 2], [0])
+        >>> reader.array = np.zeros((1, 2500, 2048))
+        >>> reader._reorient_array()
+        >>> reader.array.shape
+        (2500, 1, 2048)
+        """
+        array = self.array.transpose(self._perm)
+        for k in self._flip_axes:
+            array = np.flip(array, axis=k)
+
+        self.array = np.ascontiguousarray(array)
+        self._array_oriented = True
+
     def _setup_frames(self):
         """
         Work out frame order, slice step and first-frame origin for multi-frame data.
@@ -2238,7 +2297,7 @@ class ReadXRay:
         dz = 0.0
         positions = self._frame_positions()
         if positions is not None:
-            normal = np.cross(self.orientation[:3], self.orientation[3:])
+            normal = np.cross(self._stored_orientation[:3], self._stored_orientation[3:])
             proj = positions @ normal
             order = np.argsort(proj)
 
@@ -2288,9 +2347,12 @@ class ReadXRay:
 
     def compute_array(self):
         """
-        Decode pixels, invert MONOCHROME1, and stack as (frames, rows, cols).
+        Decode pixels, invert MONOCHROME1, sort tomo frames and reorient to (z, y, x).
 
-        The final (z, y, x) reordering happens in `compute_geometry`.
+        When `compute_geometry` has already run (only_tags=True read), the
+        array is reoriented here with the same permutation and flips, so it
+        always matches `dimensions`, `origin` and `image_matrix`. On a normal
+        read `compute_geometry` runs afterwards and reorients it instead.
 
         Returns
         -------
@@ -2298,12 +2360,12 @@ class ReadXRay:
 
         Examples
         --------
-        A MONOCHROME1 CR is inverted so bone is bright:
+        A MONOCHROME1 CR read tags-only, pixels decoded afterwards:
 
         >>> reader = ReadXRay(cr_ds, only_tags=True)
         >>> reader.compute_array()
         >>> reader.array.shape, reader.array.dtype
-        ((1, 2140, 1760), dtype('int16'))
+        ((2140, 1, 1760), dtype('int16'))
         """
         ds = self.ds
         arr = ds.pixel_array
@@ -2326,14 +2388,24 @@ class ReadXRay:
         if self._frame_order is not None:
             arr = arr[self._frame_order]
 
-        self.array = arr  # (frames, rows, cols); compute_geometry reorders
+        self.array = arr  # (frames, rows, cols)
+        self._array_oriented = False
+        if self._perm is not None:
+            self._reorient_array()
 
     def compute_geometry(self):
         """
-        Reorder and flip the grid so array axes (0, 1, 2) run along +z, +y, +x.
+        Find the permutation and flips that make array axes (0, 1, 2) run along
+        +z, +y, +x, and set origin, spacing, dimensions and directions from them.
 
-        Works from tags alone, so it is valid with only_tags=True; the array is
-        transformed alongside when it has been loaded.
+        Works from tags alone, so it is valid with only_tags=True; a loaded
+        (still unoriented) array is reoriented alongside. Always starts from the
+        stored orientation, so calling it again gives the same result.
+
+        The axis mapping is the permutation with the largest total alignment
+        between each stored axis and its patient axis (not a per-axis argmax),
+        so oblique views still get a full mapping. Exact ties put the beam
+        (frame) axis on x, then y, then z.
 
         Returns
         -------
@@ -2344,15 +2416,14 @@ class ReadXRay:
         AP chest (row = L, column = F): rows become z and are flipped so +z
         points to the head, the single frame becomes y:
 
-        >>> reader.orientation = np.array([1.0, 0, 0, 0, 0, -1.0])
         >>> reader.compute_geometry()
         >>> tuple(reader.dimensions), reader.image_matrix
         ((2500, 1, 2048), array([[1., 0., 0.],
                [0., 1., 0.],
                [0., 0., 1.]], dtype=float32))
         """
-        row = np.asarray(self.orientation[:3], dtype=float)
-        col = np.asarray(self.orientation[3:], dtype=float)
+        row = np.asarray(self._stored_orientation[:3], dtype=float)
+        col = np.asarray(self._stored_orientation[3:], dtype=float)
         dz = self._slice_dz
 
         inplane = self._inplane_spacing()
@@ -2367,32 +2438,33 @@ class ReadXRay:
         else:
             origin = np.zeros(3)
 
-        # patient direction, step size and length of each stored array axis
+        # patient direction, step size and length of each stored axis (frames, rows, cols)
         dirs = np.stack([np.cross(row, col) * np.sign(dz), col, row])
         steps = np.array([abs(dz), float(inplane[0]), float(inplane[1])])
         shape = np.array([self.number_of_frames, int(self.ds.Rows), int(self.ds.Columns)])
 
-        # permute so array axes map to patient z, y, x
-        dominant = np.argmax(np.abs(dirs), axis=1)
-        if len(set(dominant)) == 3:
-            perm = [int(np.where(dominant == a)[0][0]) for a in (2, 1, 0)]
-        else:
-            perm = [0, 1, 2]
+        # perm[k] = stored axis that becomes array axis k (patient z, y, x), chosen for the best total alignment.
+        # p.index(0) is the array axis the beam (stored axis 0) lands on (0 = z, 1 = y, 2 = x); the tiny bias breaks
+        # exact ties (45 degree MLO) by putting the beam on x, then y, before z.
+        def score(p):
+            return sum(abs(dirs[p[k], a]) for k, a in enumerate((2, 1, 0))) + 1e-6 * p.index(0)
+
+        perm = list(max(itertools.permutations(range(3)), key=score))
 
         dirs, steps, shape = dirs[perm], steps[perm], shape[perm]
-        if self.array is not None:
-            self.array = self.array.transpose(perm)
 
         # flip any axis that runs against its patient axis
+        flip_axes = []
         for k, a in enumerate((2, 1, 0)):
             if dirs[k, a] < 0:
                 origin = origin + (shape[k] - 1) * steps[k] * dirs[k]
                 dirs[k] = -dirs[k]
-                if self.array is not None:
-                    self.array = np.flip(self.array, axis=k)
+                flip_axes.append(k)
 
-        if self.array is not None:
-            self.array = np.ascontiguousarray(self.array)
+        self._perm = perm
+        self._flip_axes = flip_axes
+        if self.array is not None and not self._array_oriented:
+            self._reorient_array()
 
         self.origin = origin
         self.spacing = steps[::-1].copy()
@@ -2402,7 +2474,8 @@ class ReadXRay:
 
     def compute_plane(self):
         """
-        Plane of the stored image from the row x column normal.
+        Plane of the stored image from the stored row x column normal (the beam
+        direction), so it does not change after reorientation.
 
         Returns
         -------
@@ -2411,24 +2484,26 @@ class ReadXRay:
 
         Examples
         --------
-        >>> reader.orientation = np.array([1.0, 0, 0, 0, 0, -1.0])   # AP
+        >>> reader._stored_orientation = np.array([1.0, 0, 0, 0, 0, -1.0])   # AP
         >>> reader.compute_plane()
         'Coronal'
-        >>> reader.orientation = np.array([0, 1.0, 0, 0, 0, -1.0])   # lateral
+        >>> reader._stored_orientation = np.array([0, 1.0, 0, 0, 0, -1.0])   # lateral
         >>> reader.compute_plane()
         'Sagittal'
         """
-        normal = np.cross(self.orientation[:3], self.orientation[3:])
+        normal = np.abs(np.cross(self._stored_orientation[:3], self._stored_orientation[3:]))
 
-        return ('Sagittal', 'Coronal', 'Axial')[int(np.argmax(np.abs(normal)))]
+        # same tie rule as compute_geometry: x before y before z
+        return ('Sagittal', 'Coronal', 'Axial')[int(np.argmax(normal + 1e-6 * np.array([2.0, 1.0, 0.0])))]
 
     def initial_orientation(self):
         """
         Best available (row, column) direction cosines of the stored image.
 
         Uses ImageOrientationPatient, else PatientOrientation letters, else
-        ViewPosition, else identity. Letter-derived columns are made orthogonal
-        to the row.
+        ViewPosition, else assumes a frontal film (row +x, column -z, a coronal
+        slab) and sets `orientation_known` to False. Letter-derived columns are
+        made orthogonal to the row.
 
         Returns
         -------
@@ -2442,10 +2517,12 @@ class ReadXRay:
         >>> reader.initial_orientation()
         [1.0, 0.0, 0.0, 0.0, 0.0, -1.0]
 
-        No orientation information at all:
+        No orientation information at all (assumed frontal):
 
         >>> reader.initial_orientation()
-        [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+        [1.0, 0.0, 0.0, 0.0, 0.0, -1.0]
+        >>> reader.orientation_known
+        False
         """
         ds = self.ds
 
@@ -2470,7 +2547,9 @@ class ReadXRay:
                 if norm > 1e-6:
                     return [*row, *(col / norm)]
 
-        return [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+        self.orientation_known = False
+
+        return [1.0, 0.0, 0.0, 0.0, 0.0, -1.0]
 
 
 class ReadRF:
