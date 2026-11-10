@@ -45,8 +45,9 @@ Description:
       the image deformed onto it. Each view is its own call, so any number of views (in either direction) can share
       one registration. Leaving both out shows the moving image deformed onto the reference image.
     * Any image in either frame can be displayed (e.g. an RTDose in the moving image's frame shown deformed on the
-      reference). An image with no usable Frame of Reference UID is its own frame. Two images on the same side are in
-      the same world and are shown with no deformation.
+      reference). Display paths look images up with ``Data.volume`` (image or dose); registration and ROI warping use
+      ``Data.image`` only. An image with no usable Frame of Reference UID is its own frame. Two images on the same side
+      are in the same world and are shown with no deformation.
     * Display follows the same contract as Image.Display / Rigid: the caller passes (plane, position), where position
       is the widget's position on the base image's view. The output grid comes from the base image's Display (so its
       shared oblique rotation, wheel scrolling and crosshair all just work), and the deformed image is sampled
@@ -476,8 +477,12 @@ class Deformable(object):
 
         A placeholder (e.g. '00000.00000' from Image) must never make unrelated images share a frame.
         """
-        image = Data.image.get(image_name)
-        frame = None if image is None else getattr(image, 'frame_ref', None)
+        try:
+            volume = Data.volume(image_name)
+        except KeyError:
+            volume = None
+
+        frame = None if volume is None else getattr(volume, 'frame_ref', None)
         if frame is None or not str(frame).strip(' .0'):
             return image_name
 
@@ -764,7 +769,7 @@ class Deformable(object):
             pre = self._rigid_inv(rigid)
             post = np.identity(4)
 
-        image = Data.image[image_name]
+        image = Data.volume(image_name)
         M = np.asarray(image.matrix, dtype=float)              # rows = index axes in world (same as Image.Display)
         o = np.asarray(image.origin, dtype=float)
         s = np.asarray(image.spacing, dtype=float)
@@ -871,7 +876,7 @@ class Deformable(object):
 
     def _view_grid(self, plane, position, base_name, image_name, spacing=None):
         """(base_grid, grid): the base image's own grid for this view and the grid to sample on (see _view_spacing)."""
-        base = Data.image[base_name].display
+        base = Data.volume(base_name).display
         base_grid = base.get_grid(plane, position)
         if spacing is None:
             return base_grid, base_grid
@@ -884,7 +889,7 @@ class Deformable(object):
         if spacing is None or isinstance(spacing, str):
             if spacing not in (None, 'native'):
                 raise ValueError(f"spacing must be None, 'native', a number or (sx, sy); got {spacing!r}")
-            display = Data.image[base_name if spacing is None else image_name].display
+            display = Data.volume(base_name if spacing is None else image_name).display
             xi, yi, _ = display.AXES[plane]
             return float(display.spacing[xi]), float(display.spacing[yi])
 
@@ -949,7 +954,7 @@ class Deformable(object):
             del caches[key]
 
     def compute_array(self, plane, position, base_name=None, image_name=None, spacing=None, percent=None,
-                      background=-3001.0):
+                      background=None):
         """image_name rigidly + deformably mapped onto base_name's view. Same call as Rigid.compute_array.
 
         Parameters
@@ -969,8 +974,9 @@ class Deformable(object):
         percent : float, optional
             Deformation level (0 = rigid only, 100 = full). None = ``self.visual.percent``. Scales ``dvf`` the same
             way in both directions, so the image and the contours (:meth:`compute_mesh_slice`) agree at any level.
-        background : float, default -3001.0
-            Value for pixels that fall outside image_name.
+        background : float, optional
+            Value for pixels that fall outside image_name. None = image_name's ``background`` (-3001 for images,
+            0 Gy for a dose).
 
         Returns
         -------
@@ -987,14 +993,17 @@ class Deformable(object):
         >>> res = deform.compute_array('Axial', ct_position, percent=0)              # rigid only
         >>> res = deform.compute_array('Axial', cbct_position, base_name='CBCT 01', image_name='CT 01')
         >>> res = deform.compute_array('Sagittal', ct_position, spacing='native')    # at the CBCT's spacing
+        >>> res = deform.compute_array('Axial', ct_position, image_name='Dose 01')   # moving-frame dose on the CT
         """
         percent = self.visual.percent if percent is None else percent
         base_name, image_name, base_side, moved_side = self._sides(base_name, image_name)
+        volume = Data.volume(image_name)
+        background = volume.background if background is None else background
         base_grid, grid = self._view_grid(plane, position, base_name, image_name, spacing)
         scale = (grid['sx'] / base_grid['sx'], grid['sy'] / base_grid['sy'])
 
         if base_side is moved_side:
-            res = Data.image[image_name].display.compute_array(plane, position, grid=grid, background=background)
+            res = volume.display.compute_array(plane, position, grid=grid, background=background)
             res['scale'] = scale
             res['pixel_offset'] = (0.0, 0.0)
             return res
@@ -1002,7 +1011,7 @@ class Deformable(object):
         if self.dvf is None:
             return None
 
-        volume, pre, post_index, solve = self._sampling_setup(image_name, to_reference=moved_side is self.moving)
+        array, pre, post_index, solve = self._sampling_setup(image_name, to_reference=moved_side is self.moving)
         field_origin, field_spacing = self._field_grid()
 
         x_axis = np.asarray(grid['x_axis'], dtype=np.float32)
@@ -1010,14 +1019,14 @@ class Deformable(object):
         origin = np.asarray(grid['origin'], dtype=np.float32)
         h, w = grid['shape']
 
-        arr = _deformable_sample_kernel(volume, self._get_field(), h, w, np.float32(grid['sx']),
+        arr = _deformable_sample_kernel(array, self._get_field(), h, w, np.float32(grid['sx']),
                                         np.float32(grid['sy']), origin, x_axis, y_axis, pre, field_origin,
                                         field_spacing, np.float32(percent / 100), post_index, np.float32(background),
                                         solve, self.INVERT_ITERATIONS, np.float32(self.INVERT_TOLERANCE))
 
         return {'array': arr,
                 'dimensions': (w, h),
-                'spacing': Data.image[image_name].display.spacing,
+                'spacing': volume.display.spacing,
                 'pixel_spacing': (float(grid['sx']), float(grid['sy'])),
                 'x_axis': x_axis, 'y_axis': y_axis, 'normal': grid['normal'], 'origin': origin, 'grid': grid,
                 'scale': scale,
@@ -1399,7 +1408,7 @@ class Deformable(object):
         Returns
         -------
         SimpleITK.Image
-            Float32 image with the reference image's geometry; -3001 outside the moving image.
+            Float32 image with the reference image's geometry; the moving image's ``background`` (-3001) outside it.
 
         Examples
         --------
@@ -1424,7 +1433,8 @@ class Deformable(object):
             slice_origin = (origin + k * sz * M[2]).astype(np.float32)
             array[k] = _deformable_sample_kernel(volume, field, ny, nx, np.float32(sx), np.float32(sy), slice_origin,
                                                  x_axis, y_axis, pre, field_origin, field_spacing, np.float32(ratio),
-                                                 post_index, np.float32(-3001.0), False, self.INVERT_ITERATIONS,
+                                                 post_index, np.float32(Data.image[self.moving.image_name].background),
+                                                 False, self.INVERT_ITERATIONS,
                                                  np.float32(self.INVERT_TOLERANCE))
 
         image = sitk.GetImageFromArray(array)
@@ -1518,7 +1528,7 @@ class Deformable(object):
         percent = self.visual.percent if percent is None else percent
         base_name, image_name, base_side, moved_side = self._sides(base_name, image_name)
 
-        source = Data.image[image_name].roi.get(roi_name)
+        source = Data.volume(image_name).roi.get(roi_name)     # a dose has no ROIs -> None
         if source is None or source.mesh is None:
             return None
 
@@ -1551,7 +1561,7 @@ class Deformable(object):
         >>> col, row = mia.Data.deformable['DVF_CT 01_CBCT 01'].get_view_center('Axial', ct_position)
         """
         base_name = self.reference.image_name if base_name is None else base_name
-        base = Data.image[base_name].display
+        base = Data.volume(base_name).display
         grid = base.get_grid(plane, position)
         d = base.crosshair - grid['origin']
 

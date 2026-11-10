@@ -16,7 +16,8 @@ Description:
     * ``get_combined_matrix() = matrix @ base`` maps a reference-world point to the matching moving-world point.
       ``matrix`` is this registration's own step; ``base`` is the parent's result (identity without a parent).
     * The registration maps the reference image's frame of reference to the moving image's. Any image in either frame
-      can be displayed through it (e.g. an RTDose in the planning CT's frame shown on the MR).
+      can be displayed through it (e.g. an RTDose in the planning CT's frame shown on the MR). Display paths look
+      images up with ``Data.volume`` (image or dose); registration paths use ``Data.image`` only.
     * Display calls name their own images: ``base_name`` is the image whose view is shown, ``image_name`` the image
       resliced onto it. Each view (and each overlay in a view) is its own call, so any number of views can share one
       registration. Leaving both out shows the registered moving image on the registered reference image.
@@ -173,9 +174,6 @@ class Rigid(object):
 
         self.rigid_name = self.add_rigid(rigid_name)
 
-    # ------------------------------------------------------------------------------------------------------------
-    # Static methods
-    # ------------------------------------------------------------------------------------------------------------
     @staticmethod
     def _as_list(names):
         """None stays None, a single name becomes a one-item list, anything else becomes a list."""
@@ -189,8 +187,12 @@ class Rigid(object):
 
         A placeholder (e.g. '00000.00000' from Image.get_frame_ref) must never make unrelated images share a frame.
         """
-        image = Data.image.get(image_name)
-        frame = None if image is None else getattr(image, 'frame_ref', None)
+        try:
+            volume = Data.volume(image_name)
+        except KeyError:
+            volume = None
+
+        frame = None if volume is None else getattr(volume, 'frame_ref', None)
         if frame is None or not str(frame).strip(' .0'):
             return image_name
 
@@ -377,7 +379,7 @@ class Rigid(object):
         relative to the original grid's top-left pixel.
         """
         A = self.get_display_matrix(base_name, image_name)
-        corners = Data.image[image_name].compute_corner_positions() @ A[:3, :3].T + A[:3, 3]
+        corners = Data.volume(image_name).compute_corner_positions() @ A[:3, :3].T + A[:3, 3]
         rel = corners - grid['origin']
         u = rel @ grid['x_axis'] / grid['sx']
         v = rel @ grid['y_axis'] / grid['sy']
@@ -496,19 +498,19 @@ class Rigid(object):
 
     def _view_grid(self, plane, position, base_name, image_name, spacing=None):
         """(grid, base_grid): the grid to sample on and the base image's own grid for this view."""
-        base_grid = Data.image[base_name].display.get_grid(plane, position)
+        base_grid = Data.volume(base_name).display.get_grid(plane, position)
         if spacing is None:
             return base_grid, base_grid
 
         sx, sy = self._view_spacing(plane, base_name, image_name, spacing)
-        return Data.image[image_name].display.grid_with_spacing(base_grid, sx, sy), base_grid
+        return Data.volume(image_name).display.grid_with_spacing(base_grid, sx, sy), base_grid
 
     def _view_spacing(self, plane, base_name, image_name, spacing=None):
         """In-plane (sx, sy): None = base image, 'native' = moved image, float or (sx, sy)."""
         if spacing is None or isinstance(spacing, str):
             if spacing not in (None, 'native'):
                 raise ValueError(f"spacing must be None, 'native', a number or (sx, sy); got {spacing!r}")
-            display = Data.image[base_name if spacing is None else image_name].display
+            display = Data.volume(base_name if spacing is None else image_name).display
             xi, yi, _ = display.AXES[plane]
             return float(display.spacing[xi]), float(display.spacing[yi])
 
@@ -595,9 +597,9 @@ class Rigid(object):
         if extend:
             grid, (col0, row0) = self._extend_grid(grid, base_name, image_name)
 
-        res = Data.image[image_name].display.compute_array(plane, position,
-                                                           rigid_matrix=self.get_display_matrix(base_name, image_name),
-                                                           grid=grid)
+        res = Data.volume(image_name).display.compute_array(plane, position,
+                                                            rigid_matrix=self.get_display_matrix(base_name, image_name),
+                                                            grid=grid)
         res['scale'] = (grid['sx'] / base_grid['sx'], grid['sy'] / base_grid['sy'])
         res['pixel_offset'] = (col0 * res['scale'][0], row0 * res['scale'][1])
 
@@ -633,7 +635,7 @@ class Rigid(object):
         image_name = self.moving.image_name if image_name is None else image_name
         _, moved_side = self._sides(base_name, image_name)
 
-        roi = Data.image[image_name].roi[self._roi_on_image(roi_name, image_name, moved_side)]
+        roi = Data.volume(image_name).roi[self._roi_on_image(roi_name, image_name, moved_side)]
         grid, _ = self._view_grid(plane, position, base_name, image_name, spacing)
 
         return roi.compute_mesh_slice(origin=position, plane=plane, offset=offset,
@@ -750,7 +752,8 @@ class Rigid(object):
         return side_a is not None and side_b is not None and side_a is not side_b
 
     def create_image(self, base_name=None, image_name=None):
-        """Resample image_name onto base_name's world (same convention as the display). Color keeps channels.
+        """Resample image_name onto base_name's world (same convention as the display). Color keeps channels; outside
+        image_name is its ``background`` (0 for color).
 
         Examples
         --------
@@ -760,7 +763,7 @@ class Rigid(object):
         base_name = self.reference.image_name if base_name is None else base_name
         image_name = self.moving.image_name if image_name is None else image_name
 
-        mov = Data.image[image_name]
+        mov = Data.volume(image_name)
         array = np.ascontiguousarray(mov.array)
         components = array.shape[3] if array.ndim == 4 else 1
 
@@ -783,10 +786,10 @@ class Rigid(object):
         reslice.SetInputData(vtk_image)
         reslice.SetResliceTransform(transform)
         reslice.SetInterpolationModeToLinear()
-        reslice.SetOutputSpacing(Data.image[base_name].spacing)
+        reslice.SetOutputSpacing(Data.volume(base_name).spacing)
         reslice.SetOutputDirection(1, 0, 0, 0, 1, 0, 0, 0, 1)
         reslice.AutoCropOutputOn()
-        reslice.SetBackgroundLevel(0 if components > 1 else -3001)
+        reslice.SetBackgroundLevel(0 if components > 1 else mov.background)
         reslice.Update()
 
         return reslice.GetOutput()
@@ -822,13 +825,13 @@ class Rigid(object):
         image_name = self.moving.image_name if image_name is None else image_name
 
         A = self.get_display_matrix(base_name, image_name)
-        native_center = np.asarray(Data.image[image_name].get_center(), dtype=float)
+        native_center = np.asarray(Data.volume(image_name).get_center(), dtype=float)
         center = A[:3, :3] @ native_center + A[:3, 3]
 
         if plane is None or position is None:
             return center
 
-        normal = Data.image[base_name].display.compute_plane_geometry(plane, position)['normal']
+        normal = Data.volume(base_name).display.compute_plane_geometry(plane, position)['normal']
         n_hat = normal / np.linalg.norm(normal)
         return center - np.dot(center - np.asarray(position, dtype=float), n_hat) * n_hat
 
@@ -899,7 +902,7 @@ class Rigid(object):
         """Center in the base widget's view coords (pixel centers at integers, matching the -0.5 placement)."""
         base_name = self.reference.image_name if base_name is None else base_name
 
-        grid = Data.image[base_name].display.get_grid(plane, position)
+        grid = Data.volume(base_name).display.get_grid(plane, position)
         d = self.get_center(base_name, image_name, plane, position) - grid['origin']
 
         return float(d @ grid['x_axis']) / grid['sx'], float(d @ grid['y_axis']) / grid['sy']

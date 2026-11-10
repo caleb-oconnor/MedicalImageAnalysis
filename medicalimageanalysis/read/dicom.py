@@ -4021,9 +4021,14 @@ class ReadRTDose:
     After loading, `array` is indexed [z, y, x] with every axis increasing
     in patient coordinates, and `origin` is the patient position of voxel
     [0, 0, 0]. `spacing` and `origin` are (x, y, z); `dimensions` matches
-    `array.shape`. `plane` describes the grid as stored in the file, before
-    reorientation. DoseGridScaling is applied, so values are in the file's
-    DoseUnits (normally Gy).
+    `array.shape`. `image_matrix` rows are the x, y, z index axes in patient
+    coordinates (the same convention as Image). `plane` describes the grid as
+    stored in the file, before reorientation.
+
+    DoseGridScaling is applied and cGy is converted, so values are always Gy.
+    Frames with uneven GridFrameOffsetVector spacing are linearly resampled
+    onto an even grid at the smallest step. Anything the reader had to assume
+    or change is named in `unverified`.
 
     Parameters
     ----------
@@ -4036,10 +4041,24 @@ class ReadRTDose:
     Attributes
     ----------
     array : np.ndarray or None
-        float32 dose grid (z, y, x).
+        float32 dose grid (z, y, x) in Gy.
 
     dose_name : str
         Name registered in `Data.dose`, e.g. 'RTDOSE 01'.
+
+    dose_units : str
+        Units of `array`: 'GY', or the file's DoseUnits when they are not a dose
+        (e.g. 'RELATIVE', flagged in `unverified`).
+
+    frame_count : int
+        Number of z planes after any frame resampling.
+
+    frame_step : float
+        Signed distance between z planes along the stored frame normal (mm).
+
+    unverified : str or None
+        Comma-separated list of what was assumed or changed: 'Orientation',
+        'PixelSpacing', 'FrameSpacing', 'DoseUnits'. None when nothing was.
 
     Examples
     --------
@@ -4055,6 +4074,11 @@ class ReadRTDose:
     ((96, 120, 150), 54.12)
     >>> dose.spacing
     array([2.5, 2.5, 2.5])
+
+    Check what the reader had to fix:
+
+    >>> dose.unverified
+    'FrameSpacing'
 
     Geometry only:
 
@@ -4090,7 +4114,13 @@ class ReadRTDose:
         self.spacing = None
         self.dimensions = None
         self.image_matrix = None
+        self.dose_units = None
 
+        self.frame_offsets = None
+        self.frame_step = None
+        self.frame_count = None
+
+        self.compute_frames()
         if not only_tags:
             self.compute_array()
 
@@ -4101,9 +4131,24 @@ class ReadRTDose:
         self.dose_name = create_dose_name(self.modality)
         Data.dose[self.dose_name] = Dose(self)
 
+    def _flag_unverified(self, name):
+        """
+        Add a name to `unverified` (comma-separated, each name once).
+
+        Examples
+        --------
+        >>> dose._flag_unverified('PixelSpacing')
+        >>> dose.unverified
+        'FrameSpacing, PixelSpacing'
+        """
+        names = [] if self.unverified is None else self.unverified.split(', ')
+        if name not in names:
+            names.append(name)
+        self.unverified = ', '.join(names)
+
     def _num_frames(self):
         """
-        Number of dose planes in the dataset (1 when NumberOfFrames is absent).
+        Number of dose planes stored in the dataset (1 when NumberOfFrames is absent).
 
         Examples
         --------
@@ -4112,31 +4157,37 @@ class ReadRTDose:
         """
         return int(self.ds.get('NumberOfFrames') or 1)
 
-    def _slice_step(self):
+    def _resample_frames(self, array):
         """
-        Signed distance between frames, from GridFrameOffsetVector.
-
-        Falls back to SliceThickness (then 1.0) when the vector is missing or
-        has a single entry.
+        Linearly resample stored frames (frames, rows, cols) from the uneven
+        `frame_offsets` onto `frame_count` planes `frame_step` apart.
 
         Examples
         --------
-        >>> ds.GridFrameOffsetVector[:3]
-        [0.0, -2.5, -5.0]
-        >>> dose._slice_step()
-        -2.5
+        >>> dose.frame_offsets[:4], dose.frame_step
+        (array([0., -2.5, -5., -10.]), -2.5)
+        >>> dose._resample_frames(raw).shape[0] == dose.frame_count
+        True
         """
-        offsets = self.ds.get('GridFrameOffsetVector')
-        if offsets is not None and not isinstance(offsets, (str, float)) and len(offsets) > 1:
-            step = float(offsets[1]) - float(offsets[0])
-            if step != 0:
-                return step
+        offsets = self.frame_offsets
+        targets = offsets[0] + self.frame_step * np.arange(self.frame_count)
 
-        return float(self.ds.get('SliceThickness') or 1.0)
+        # np.interp needs increasing sample positions: negate a decreasing vector
+        sign = 1.0 if offsets[-1] > offsets[0] else -1.0
+        index = np.interp(sign * targets, sign * offsets, np.arange(len(offsets)))
+
+        lower = np.clip(np.floor(index).astype(int), 0, len(offsets) - 2)
+        fraction = (index - lower).astype(np.float32)[:, None, None]
+
+        return array[lower] * (1 - fraction) + array[lower + 1] * fraction
 
     def compute_array(self):
         """
-        Decode the grid as (frames, rows, cols) float32 times DoseGridScaling.
+        Decode the grid as (frames, rows, cols) float32 Gy.
+
+        Applies DoseGridScaling, converts cGy to Gy, and resamples uneven
+        frames onto the even grid set by :meth:`compute_frames`. Dose units
+        that are not GY or CGY (e.g. RELATIVE) are kept as stored and flagged.
 
         Returns
         -------
@@ -4146,23 +4197,81 @@ class ReadRTDose:
         --------
         >>> dose = ReadRTDose(ds, only_tags=True)
         >>> dose.compute_array()
-        >>> dose.array.dtype, dose.array.shape
-        (dtype('float32'), (96, 120, 150))
+        >>> dose.array.dtype, dose.array.shape, dose.dose_units
+        (dtype('float32'), (96, 120, 150), 'GY')
         """
         scaling = float(self.ds.get('DoseGridScaling') or 1.0)
+        units = str(self.ds.get('DoseUnits') or 'GY').strip().upper()
+        if units == 'CGY':
+            scaling *= 0.01
+            units = 'GY'
+        elif units != 'GY':
+            self._flag_unverified('DoseUnits')
+        self.dose_units = units
+
         shape = (self._num_frames(), int(self.ds.Rows), int(self.ds.Columns))
-        self.array = (self.ds.pixel_array.astype(np.float32) * scaling).reshape(shape)
+        array = (self.ds.pixel_array.astype(np.float32) * np.float32(scaling)).reshape(shape)
+
+        if self.frame_count != shape[0]:
+            array = self._resample_frames(array)
+
+        self.array = np.ascontiguousarray(array, dtype=np.float32)
 
         del self.ds.PixelData
+
+    def compute_frames(self):
+        """
+        Set `frame_step` and `frame_count` from GridFrameOffsetVector.
+
+        Even offsets keep the stored frames. Uneven offsets (flagged as
+        'FrameSpacing') use the smallest step, with the sign of the overall
+        direction, and as many planes as fit between the first and last frame.
+        Without a usable vector the step is SliceThickness, then 1.0 mm.
+
+        Returns
+        -------
+        None
+
+        Examples
+        --------
+        Offsets [0, -2.5, -5, -10, -15] (one 5 mm gap):
+
+        >>> dose.compute_frames()
+        >>> dose.frame_step, dose.frame_count
+        (-2.5, 7)
+        """
+        n = self._num_frames()
+        self.frame_count = n
+
+        offsets = self.ds.get('GridFrameOffsetVector')
+        if offsets is not None and not isinstance(offsets, (str, float, int)) and len(offsets) == n and n > 1:
+            offsets = np.asarray([float(v) for v in offsets])
+            gaps = np.diff(offsets)
+            if np.all(gaps > 0) or np.all(gaps < 0):
+                self.frame_offsets = offsets
+                if np.allclose(gaps, gaps[0], atol=1e-3):
+                    self.frame_step = float(gaps[0])
+                else:
+                    self.frame_step = float(np.sign(gaps[0]) * np.min(np.abs(gaps)))
+                    self.frame_count = int(np.floor(abs(offsets[-1] - offsets[0]) / abs(self.frame_step) + 1e-6)) + 1
+                    self._flag_unverified('FrameSpacing')
+                return
+
+            self._flag_unverified('FrameSpacing')     # not monotonic: fall back to SliceThickness
+
+        elif n > 1:
+            self._flag_unverified('FrameSpacing')     # missing or wrong length: fall back to SliceThickness
+
+        self.frame_step = float(self.ds.get('SliceThickness') or 1.0)
 
     def compute_geometry(self):
         """
         Reorder and flip the grid so array axes (0, 1, 2) run along +z, +y, +x.
 
         Works from tags alone, so it is valid with only_tags=True; the array is
-        transformed alongside when it has been loaded. A decreasing
-        GridFrameOffsetVector flips the frame axis and moves the origin to the
-        most inferior plane.
+        transformed alongside when it has been loaded. A decreasing frame step
+        flips the frame axis and moves the origin to the most inferior plane.
+        `image_matrix` rows are the x, y, z index axes in patient coordinates.
 
         Returns
         -------
@@ -4178,19 +4287,22 @@ class ReadRTDose:
         >>> dose.image_matrix
         array([[1., 0., 0.],
                [0., 1., 0.],
-               [0., 0., 1.]], dtype=float32)
+               [0., 0., 1.]])
         """
         row = self.orientation[:3]
         col = self.orientation[3:]
-        dz = self._slice_step()
+        dz = self.frame_step
 
-        pixel_spacing = self.ds.get('PixelSpacing') or [1.0, 1.0]
+        pixel_spacing = self.ds.get('PixelSpacing')
+        if not pixel_spacing:
+            pixel_spacing = [1.0, 1.0]
+            self._flag_unverified('PixelSpacing')
         origin = np.asarray(self.ds.ImagePositionPatient, dtype=float)
 
         # patient direction, step size and length of each stored array axis
         dirs = np.stack([np.cross(row, col) * np.sign(dz), col, row])
         steps = np.array([abs(dz), float(pixel_spacing[0]), float(pixel_spacing[1])])
-        shape = np.array([self._num_frames(), int(self.ds.Rows), int(self.ds.Columns)])
+        shape = np.array([self.frame_count, int(self.ds.Rows), int(self.ds.Columns)])
 
         # permute so array axes map to patient z, y, x
         dominant = np.argmax(np.abs(dirs), axis=1)
@@ -4218,7 +4330,7 @@ class ReadRTDose:
         self.spacing = steps[::-1].copy()
         self.dimensions = shape
         self.orientation = np.concatenate([dirs[2], dirs[1]])
-        self.image_matrix = np.stack([dirs[2], dirs[1], dirs[0]]).astype(np.float32)
+        self.image_matrix = np.stack([dirs[2], dirs[1], dirs[0]])   # float64, rows = x, y, z axes
 
     def compute_orientation(self):
         """
@@ -4236,7 +4348,8 @@ class ReadRTDose:
         """
         if 'ImageOrientationPatient' in self.ds:
             return np.asarray(self.ds.ImageOrientationPatient, dtype=float)
-        self.unverified = 'Orientation'
+
+        self._flag_unverified('Orientation')
         return np.array([1, 0, 0, 0, 1, 0], dtype=float)
 
     def compute_plane(self):

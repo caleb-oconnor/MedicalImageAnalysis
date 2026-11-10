@@ -1,1363 +1,537 @@
-"""Morfeus Lab
-The University of Texas
+"""The University of Texas
 MD Anderson Cancer Center
 Author - Caleb O'Connor
 Email - csoconnor@mdanderson.org
 
 Description:
-    Radiation dose volume management, off-axis VTK reslicing, and multi-planar
-    display handling. This module manages coordinate translations between pixel indexes
-    and physical space for 3D dose matrices, alongside Dose-Volume Histogram (DVH) computation.
+    Radiation dose volumes (RTDOSE). A Dose is an :class:`Image` subclass, so it shares the image display (reslicing,
+    oblique views, crosshairs), geometry, encrypted saving and the Rigid / Deformable display paths. What it adds is
+    dose scaling (Gy), a 0 Gy background, a dose window, dose resampled onto any image grid (optionally through a
+    Rigid) and partial-volume dose-volume histogram metrics for many ROIs at once. Doses live in
+    ``Data.dose`` (not ``Data.image``), so they are never registered, contoured on or given synced ROIs/POIs.
+
+    Conventions
+    -----------
+    * Same as :mod:`image`: the array is (z, y, x); origin, spacing and world points are (x, y, z); ``dose.matrix``
+      rows are the dose grid axes.
+    * The array is float32 in Gy (stored pixel values times DoseGridScaling).
+    * Outside the dose grid the display returns ``Dose.background`` (0 Gy).
+    * ``dose_name`` is the key in ``Data.dose``; ``image_name`` is the same name, so inherited Image code works.
+    * DVH metrics are named as strings (see :meth:`Dose.compute_roi_metrics`): 'Volume', 'Dmin', 'Dmax', 'Dmean',
+      'Dmedian', 'Dstd', 'D95' (dose to the hottest 95 % of the volume), 'D0.03cc' (hottest 0.03 cc), 'V20Gy' (% of the
+      volume receiving at least 20 Gy), 'V20Gy_cc', 'VS20Gy' / 'VS20Gy_cc' (volume receiving less than 20 Gy), and with
+      a prescription 'V95%' / 'V95%_cc' (at least 95 % of the prescription).
 
 Structure:
-    * Display: Controls orthogonal and off-axis reslice extraction using VTK pipelines.
-    * Dose: Holds 3D dose arrays, handles pydicom metadata harvesting, and calculates ROI-specific metrics.
+    - Dose: Image subclass with dose scaling, a dose window, dose resampling, DVH metrics and annotation methods
+      disabled.
 
 Examples
 --------
 >>> import medicalimageanalysis as mia
->>> mia.read_mhd(file='C:/Data/scan.mhd', modality='CT')
->>> image = mia.Data.image[mia.Data.image_list()[0]]
+>>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
+>>> res = dose.display.compute_array('Axial', dose.display.position['Axial'])
+
+Dose on its planning CT (same frame of reference, no registration)
+
+>>> ct = mia.Data.image['CT 01']
+>>> grid = ct.display.get_grid('Axial', ct.display.position['Axial'])
+>>> res = dose.display.compute_array('Axial', ct.display.position['Axial'], grid=grid)
+
+Dose on a registered MR, or deformed onto another CT
+
+>>> res = mia.Data.rigid['CT 01_MR 01'].compute_array('Axial', mr_position, base_name='MR 01', image_name='Dose_0')
+>>> res = mia.Data.deformable['DVF_CT 02_CT 01'].compute_array('Axial', ct2_position, image_name='Dose_0')
+
+DVH metrics for several ROIs in one pass (the dose is resampled once)
+
+>>> table = dose.compute_roi_metrics('CT 01', roi_names=['Parotid_L', 'Parotid_R'],
+...                                  metrics=['Dmean', 'D2', 'D0.03cc', 'V26Gy', 'V30Gy_cc'])
+
+The same on a CBCT registered to the planning CT
+
+>>> table = dose.compute_roi_metrics('CBCT 01', roi_names=['Parotid_L', 'Parotid_R'], rigid_name='CT 01_CBCT 01')
 """
 
-import os
-import copy
+import re
 
 import numpy as np
 import pandas as pd
-import pyvista as pv
-import SimpleITK as sitk
 
 from pydicom.uid import generate_uid
-from scipy.spatial.transform import Rotation
 
-import vtk
-from vtkmodules.util import numpy_support
-
+from .image import Display, Image
 from ..data import Data
+from ..utils import contours_to_mask
 
 
-class Display(object):
-    """Handles coordinate mapping, orthogonal slice extractions, and off-axis image reslicing.
-    
-    This class decouples volumetric properties from active viewports, providing support
-    for linear coordinate matrices and real-time VTK dataset transformations.
-    
+class Dose(Image):
+    """One RTDOSE volume: an :class:`Image` with dose scaling, a 0 Gy background and DVH statistics.
+
+    Parameters
+    ----------
+    dose : object
+        Reader output providing image_set, array, dose_name, modality, filepaths, sops, plane, spacing, orientation,
+        origin and image_matrix.
+
     Attributes
     ----------
-    dose : Dose
-        Parent Dose instance owning raw data matrices and patient parameters.
-    matrix : np.ndarray
-        Active 3x3 orientation direction matrix mapping voxel axes to world coordinates.
-    spacing : list or tuple
-        Voxel grid sizes in millimeters across X, Y, and Z axes.
-    origin : list or tuple
-        Physical coordinates matching the current spatial index origin foundation.
-    slice_location : list of int
-        Active viewing plane indices [Z, Y, X] across orthogonal matrices.
-    scroll_max : list of int
-        Maximum index offsets allowed for bounded dimension updates.
-    secondary_array : np.ndarray
-        Cached off-axis array volume processed through VTK reslice filters.
-    misc : dict
-        Arbitrary configuration store tracking UI window configurations.
-    
-    Examples
-    --------
-    >>> import medicalimageanalysis as mia
-    >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-    >>> display = dose.display
-    """
-
-    def __init__(self, dose):
-        """Initializes a Display viewport tracking manager for an active Dose volume.
-        
-        Parameters
-        ----------
-        dose : Dose
-            Parent dose dataset container object.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-        >>> display = dose.display
-        >>> display.__init__(...)
-        """
-        self.dose = dose
-
-        self.matrix = copy.deepcopy(self.dose.matrix)
-        self.spacing = copy.deepcopy(self.dose.spacing)
-        self.origin = copy.deepcopy(self.dose.origin)
-
-        self.slice_location = self.dose.compute_center(position=False, zyx=True)
-        self.scroll_max = [self.dose.dimensions[0] - 1,
-                           self.dose.dimensions[1] - 1,
-                           self.dose.dimensions[2] - 1]
-        self.secondary_array = None
-        self.misc = {}
-
-    def compute_matrix_pixel_to_position(self):
-        """Calculates a 4x4 homogeneous matrix mapping discrete pixel indexes to continuous world coordinates.
-        
-        Returns
-        -------
-        np.ndarray
-            Homogeneous 4x4 coordinate transformation array (float32).
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-        >>> display = dose.display
-        >>> display.compute_matrix_pixel_to_position(...)
-        """
-        matrix = copy.deepcopy(self.matrix)
-        spacing = self.spacing
-
-        pixel_to_position_matrix = np.identity(4, dtype=np.float32)
-        pixel_to_position_matrix[:3, 0] = matrix[0, :] * spacing[0]
-        pixel_to_position_matrix[:3, 1] = matrix[1, :] * spacing[1]
-        pixel_to_position_matrix[:3, 2] = matrix[2, :] * spacing[2]
-        pixel_to_position_matrix[:3, 3] = self.origin
-
-        return pixel_to_position_matrix
-
-    def compute_matrix_position_to_pixel(self):
-        """Calculates a 4x4 homogeneous transform matrix mapping continuous physical spaces to matrix voxel indexes.
-        
-        Returns
-        -------
-        np.ndarray
-            Homogeneous 4x4 mapping array (float32) handling spatial index inversions.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-        >>> display = dose.display
-        >>> display.compute_matrix_position_to_pixel(...)
-        """
-        matrix = copy.deepcopy(self.matrix)
-        spacing = self.spacing
-
-        hold_matrix = np.identity(3, dtype=np.float32)
-        hold_matrix[0, :] = matrix[0, :] / spacing[0]
-        hold_matrix[1, :] = matrix[1, :] / spacing[1]
-        hold_matrix[2, :] = matrix[2, :] / spacing[2]
-
-        position_to_pixel_matrix = np.identity(4, dtype=np.float32)
-        position_to_pixel_matrix[:3, :3] = hold_matrix
-        position_to_pixel_matrix[:3, 3] = np.asarray(self.origin).dot(-hold_matrix.T)
-
-        return position_to_pixel_matrix
-
-    def compute_array(self, slice_plane):
-        """Extracts a 2D intensity cross-section matching the specified orientation path.
-        
-        Parameters
-        ----------
-        slice_plane : str
-            The slicing orientation targeting dataset profiles. Must be 'Axial', 'Coronal', or 'Sagittal'.
-        
-        Returns
-        -------
-        np.ndarray
-            Floating-point 2D matrix representing dose or image values across the selected viewport plane.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-        >>> display = dose.display
-        >>> display.compute_array(...)
-        """
-        if self.secondary_array is None:
-            if slice_plane == 'Axial':
-                array = self.dose.array[self.slice_location[0], :, :]
-            elif slice_plane == 'Coronal':
-                array = self.dose.array[:, self.slice_location[1], :]
-            else:
-                array = self.dose.array[:, :, self.slice_location[2]]
-        else:
-            if slice_plane == 'Axial':
-                array = self.secondary_array[self.slice_location[0], :, :]
-            elif slice_plane == 'Coronal':
-                array = self.secondary_array[:, self.slice_location[1], :]
-            else:
-                array = self.secondary_array[:, :, self.slice_location[2]]
-
-        return array.astype(np.float32)
-
-    def compute_index_positions(self, xyz):
-        """Translates explicit discrete matrix indexes into continuous spatial points.
-        
-        Parameters
-        ----------
-        xyz : list or np.ndarray
-            Voxel grid pixel indexes along the primary dimensions.
-        
-        Returns
-        -------
-        np.ndarray
-            Continuous 3D spatial world coordinate point (float32).
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-        >>> display = dose.display
-        >>> display.compute_index_positions(...)
-        """
-        pixel_to_position_matrix = self.compute_matrix_pixel_to_position()
-        location = np.asarray([xyz[0], xyz[1], xyz[2], 1])
-
-        return location.dot(pixel_to_position_matrix.T)[:3]
-
-    def compute_offaxis_array(self):
-        """Executes an off-axis volumetric reslicing routine using an interactive VTK image reslice pipeline.
-        
-        Extracts transformed slice arrays, mutates active internal orientation attributes,
-        and dynamically fits tracking steps inside bounding constraints.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-        >>> display = dose.display
-        >>> display.compute_offaxis_array(...)
-        """
-        loc = np.flip(self.slice_location)
-        base_position_matrix = self.compute_matrix_pixel_to_position()
-        slice_position = np.asarray([loc[0], loc[1], loc[2], 1]).dot(base_position_matrix.T)[:3]
-
-        matrix_reshape = self.dose.matrix.reshape(1, 9)[0]
-        vtk_image = vtk.vtkImageData()
-        vtk_image.SetSpacing(self.dose.spacing)
-        vtk_image.SetDirectionMatrix(matrix_reshape)
-        vtk_image.SetDimensions(np.flip(self.dose.array.shape))
-        vtk_image.SetOrigin(self.dose.origin)
-        vtk_image.GetPointData().SetScalars(numpy_support.numpy_to_vtk(self.dose.array.flatten(order="C")))
-
-        matrix = vtk.vtkMatrix4x4()
-        for i in range(3):
-            for j in range(3):
-                matrix.SetElement(i, j, self.matrix[i, j])
-
-        transform = vtk.vtkTransform()
-        transform.SetMatrix(matrix)
-        transform.Inverse()
-
-        vtk_reslice = vtk.vtkImageReslice()
-        vtk_reslice.SetInputData(vtk_image)
-        vtk_reslice.SetResliceTransform(transform)
-        vtk_reslice.SetInterpolationModeToLinear()
-        vtk_reslice.SetOutputSpacing(self.dose.spacing)
-        vtk_reslice.AutoCropOutputOn()
-        vtk_reslice.SetBackgroundLevel(-3001)
-        vtk_reslice.Update()
-
-        reslice_data = vtk_reslice.GetOutput()
-        new_origin = reslice_data.GetOrigin()
-        self.origin = transform.TransformPoint(new_origin)
-        dimensions = reslice_data.GetDimensions()
-
-        position_to_pixel_matrix = self.compute_matrix_position_to_pixel()
-        location = np.asarray([slice_position[0], slice_position[1], slice_position[2], 1])
-        self.slice_location = list(np.flip(np.round(location.dot(position_to_pixel_matrix.T)[:3])).astype(np.int32))
-        self.scroll_max = [dimensions[2] - 1, dimensions[1] - 1, dimensions[0] - 1]
-        if self.slice_location[0] > dimensions[2] - 1:
-            self.slice_location[0] = dimensions[2] - 1
-        if self.slice_location[1] > dimensions[1] - 1:
-            self.slice_location[1] = dimensions[1] - 1
-        if self.slice_location[2] > dimensions[0] - 1:
-            self.slice_location[2] = dimensions[0] - 1
-
-        scalars = reslice_data.GetPointData().GetScalars()
-        self.secondary_array = numpy_support.vtk_to_numpy(scalars).reshape(dimensions[2], dimensions[1], dimensions[0])
-
-    def compute_scroll_max(self):
-        """Recalculates discrete coordinate layout limiters to bound viewport sliders appropriately.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-        >>> display = dose.display
-        >>> display.compute_scroll_max(...)
-        """
-        if self.secondary_array is not None:
-            self.scroll_max = [self.secondary_array.shape[0] - 1,
-                               self.secondary_array.shape[1] - 1,
-                               self.secondary_array.shape[2] - 1]
-        else:
-            self.scroll_max = [self.dose.dimensions[0] - 1,
-                               self.dose.dimensions[1] - 1,
-                               self.dose.dimensions[2] - 1]
-
-    def compute_vtk_slice(self, slice_plane):
-        """Constructs a standalone vtkImageData slice wrapper instance matching target viewports.
-        
-        Parameters
-        ----------
-        slice_plane : str
-            Target viewing matrix. Must be 'Axial', 'Coronal', or 'Sagittal'.
-        
-        Returns
-        -------
-        vtk.vtkImageData
-            Independent single-slice VTK structure formatted with appropriate geometric properties.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-        >>> display = dose.display
-        >>> display.compute_vtk_slice(...)
-        """
-        matrix_reshape = np.linalg.inv(self.matrix).reshape(1, 9)[0]
-        pixel_to_position_matrix = self.compute_matrix_pixel_to_position()
-        if slice_plane == 'Axial':
-            location = np.asarray([0, 0, self.slice_location[0], 1])
-            if self.secondary_array is None:
-                array_slice = self.dose.array[self.slice_location[0], :, :]
-            else:
-                array_slice = self.secondary_array[self.slice_location[0], :, :]
-            array_shape = array_slice.shape
-            dim = [array_shape[1], array_shape[0], 1]
-        elif slice_plane == 'Coronal':
-            location = np.asarray([0, self.slice_location[1], 0, 1])
-            if self.secondary_array is None:
-                array_slice = self.dose.array[:, self.slice_location[1], :]
-            else:
-                array_slice = self.secondary_array[:, self.slice_location[1], :]
-            array_shape = array_slice.shape
-            dim = [array_shape[1], 1, array_shape[0]]
-        else:
-            location = np.asarray([self.slice_location[2], 0, 0, 1])
-            if self.secondary_array is None:
-                array_slice = self.dose.array[:, :, self.slice_location[2]]
-            else:
-                array_slice = self.secondary_array[:, :, self.slice_location[2]]
-            array_shape = array_slice.shape
-            dim = [1, array_shape[1], array_shape[0]]
-
-        slice_origin = location.dot(pixel_to_position_matrix.T)[:3]
-
-        vtk_test = vtk.vtkImageData()
-        vtk_test.SetSpacing(self.dose.spacing)
-        vtk_test.SetDirectionMatrix(matrix_reshape)
-        vtk_test.SetDimensions(dim)
-        vtk_test.SetOrigin(slice_origin)
-        vtk_test.GetPointData().SetScalars(numpy_support.numpy_to_vtk(array_slice.flatten(order="C")))
-
-        return vtk_test
-
-    def update_slice_location(self, scroll, slice_plane):
-        """Manually forces a new tracking row or column viewing index step for internal displays.
-        
-        Parameters
-        ----------
-        scroll : int
-            The target index step level parameter to pass.
-        slice_plane : str
-            Orientation target key identifier. Must be 'Axial', 'Coronal', or 'Sagittal'.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-        >>> display = dose.display
-        >>> display.update_slice_location(...)
-        """
-        if slice_plane == 'Axial':
-            self.slice_location[0] = scroll
-        elif slice_plane == 'Coronal':
-            self.slice_location[1] = scroll
-        else:
-            self.slice_location[2] = scroll
-
-
-class Dose(object):
-    """Manages 3D medical radiation dose distribution grids and maps spatial DICOM attributes.
-    
-    Provides core tracking indicators for patient identification, image grid geometries,
-    and implements parsing utilities to process regions of interest (ROI) alongside dose arrays.
-    
-    Attributes
-    ----------
-    tags : list
-        Collection of raw pydicom dataset instances harvesting DICOM block elements.
-    array : np.ndarray
-        3D tensor holding floating-point radiation dose entry indicators.
+    background : float
+        Class attribute: 0 Gy outside the dose grid.
+    DEFAULT_METRICS : list of str
+        Class attribute: metrics :meth:`compute_roi_metrics` reports when none are named: Volume, Dmin, Dmax, Dmean,
+        Dmedian, Dstd, D1, D2, D5 ... D95, D98, D99, and V0Gy ... V150Gy in % and cc.
     dose_name : str
-        Registry name ID assigned to identify the active record.
-    modality : str
-        DICOM medical scanning metadata modality (e.g., 'RTDOSE').
-    patient_name : str or list
-        Extracted patient naming metrics parsed from metadata tags.
-    mrn : str
-        Patient Medical Record Number identification string.
-    birthdate : str
-        Patient birthdate attribute registry token string.
-    date : str
-        DICOM series capturing chronological date token entries.
-    time : str
-        DICOM collection timestamp registry tracker.
-    local_uid : str
-        Internal execution token key generated for identification pipelines.
-    series_uid : str
-        Unique identifier tagging the source image series context.
-    acq_number : str or int
-        DICOM scan sequence acquisition cycle tracking number.
-    frame_ref : str
-        Frame of Reference identification identifier linking datasets spatially.
-    window : list
-        Contrast presentation levels containing standard window minimum and maximum pairs.
-    filepaths : list of str
-        Source directory paths providing raw files.
-    sops : list of str
-        Service-Object Pair Instance UIDs identifying individual items.
-    plane : str
-        Primary image orientation definition name.
-    spacing : list or tuple
-        Physical metric distance between voxel nodes in millimeters.
-    dimensions : tuple or list
-        Matrix voxel limits representing tensor boundaries.
-    orientation : str
-        Spatial position layout definitions.
-    origin : list or tuple
-        Continuous world coordinate point representing index foundations.
-    matrix : np.ndarray
-        Direction mapping orientation configurations relating matrices to real space.
-    camera_position : list or None
-        Cached perspective camera spatial coordinates for visualization scenes.
-    misc : dict
-        Arbitrary configuration store tracking analytical parameter sets.
-    roi : dict
-        Collection tracking regions of interest linked to the dataset module.
-    display : Display
-        Active view reconstruction component parsing orthogonal mapping matrices.
-    
+        Key in ``Data.dose`` (``image_name`` holds the same name).
+    display : Display or None
+        None for a tag-only read (no array).
+
     Examples
     --------
     >>> import medicalimageanalysis as mia
     >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-    >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
+    >>> dose.origin, dose.spacing, dose.array.shape
+    >>> dose.get_window()
+    [0.0, 72.4]
     """
+    background = 0.0
+    DEFAULT_METRICS = (['Volume', 'Dmin', 'Dmax', 'Dmean', 'Dmedian', 'Dstd'] +
+                       [f'D{p}' for p in [1, 2] + list(range(5, 100, 5)) + [98, 99]] +
+                       [f'V{x}Gy' for x in range(0, 155, 5)] +
+                       [f'V{x}Gy_cc' for x in range(0, 155, 5)])
 
     def __init__(self, dose):
-        """Initializes a Dose distribution data record tracking structural arrays and attributes.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-        >>> dose.__init__(...)
-        """
+        self.roi = {}
+        self.poi = {}
+
         self.tags = dose.image_set
-        self.array = dose.array
+        self.array = None if dose.array is None else self._to_gy(dose.array)    # None for a tag-only read
+        self.array_dtype = 'float32'
 
         self.dose_name = dose.dose_name
+        self.image_name = dose.dose_name
         self.modality = dose.modality
 
-        self.patient_name = self.get_patient_name()
-        self.mrn = self.get_mrn()
-        self.birthdate = self.get_birthdate()
-        self.date = self.get_date()
-        self.time = self.get_time()
+        patient_name = self._first_tag(['PatientName'])
+        self.patient_name = 'missing' if patient_name is None else str(patient_name).split('^')[:3]
+        self.mrn = str(self._first_tag(['PatientID'], 'missing'))
+        self.birthdate = str(self._first_tag(['PatientBirthDate'], ''))
+        self.date = self._first_tag(['SeriesDate', 'ContentDate', 'AcquisitionDate', 'StudyDate'], '00000')
+        self.time = self._first_tag(['SeriesTime', 'ContentTime', 'AcquisitionTime', 'StudyTime'], '00000')
         self.local_uid = generate_uid()
-        self.series_uid = self.get_series_uid()
-        self.acq_number = self.get_acq_number()
-        self.frame_ref = self.get_frame_ref()
+        self.study_uid = self._first_tag(['StudyInstanceUID'], '00000.00000')
+        self.series_uid = self._first_tag(['SeriesInstanceUID'], '00000.00000')
+        self.acq_number = self._first_tag(['AcquisitionNumber'], '1')
+        self.frame_ref = self._first_tag(['FrameOfReferenceUID'], '00000.00000')
         self.window = self.get_window()
 
         self.filepaths = dose.filepaths
         self.sops = dose.sops
 
         self.plane = dose.plane
-        self.spacing = dose.spacing
-        self.dimensions = dose.dimensions
         self.orientation = dose.orientation
-        self.origin = dose.origin
-        self.matrix = dose.image_matrix
+        self.spacing = np.asarray(dose.spacing, dtype=float)
+        self.origin = np.asarray(dose.origin, dtype=float)
+        self.matrix = np.asarray(dose.image_matrix, dtype=float)
+        shape = dose.dimensions if self.array is None else self.array.shape[:3]
+        self.dimensions = tuple(int(d) for d in shape)                  # always (z, y, x)
+
+        self.skipped_slice = False
+        self.rgb = False
+
+        self.local_name = None
+        self.serialization_version = 1
 
         self.camera_position = None
+        self.visual = {'colormap': 'jet', 'bounds': None}
         self.misc = {}
 
-        self.roi = {}
-        self.display = Display(self)
+        self.display = None if self.array is None else Display(self)
 
-    def get_patient_name(self):
-        """Extracts structured patient identity strings from parsed DICOM metadata.
-        
-        Returns
-        -------
-        list of str or str
-            Splits text strings into component components, returns 'missing' on failure.
-        
+    # ------------------------------------------------------------------------------------------------------------
+    # Static methods
+    # ------------------------------------------------------------------------------------------------------------
+    @staticmethod
+    def _frame(volume, name):
+        """Frame of Reference UID of an image or dose, or its name when the UID is missing or a placeholder
+        (the same rule as Rigid / Deformable)."""
+        frame = getattr(volume, 'frame_ref', None)
+        if frame is None or not str(frame).strip(' .0'):
+            return name
+
+        return str(frame)
+
+    @staticmethod
+    def _metric_values(dose, weight, metrics, prescription=None):
+        """Metric name -> value for one ROI.
+
+        dose : (N,) dose (Gy) of each voxel touching the ROI.
+        weight : (N,) volume (cc) of each voxel that lies inside the ROI (partial-volume weighted).
+
+        Voxels are sorted hottest first and their volumes accumulated, so 'Dx' is the dose at which the hottest x % (or
+        x cc for 'Dxcc') of the volume is reached, interpolated between voxels. A 'Dxcc' larger than the ROI gives Dmin.
+        """
+        if dose.size == 0 or float(np.sum(weight)) <= 0:
+            return {m: np.nan for m in metrics}
+
+        order = np.argsort(dose)[::-1]
+        d = np.asarray(dose, dtype=np.float64)[order]
+        w = np.asarray(weight, dtype=np.float64)[order]
+
+        cum = np.r_[0.0, np.cumsum(w)]          # volume (cc) of the voxels hotter than each one
+        volume = cum[-1]
+        mean = float(np.dot(w, d) / volume)
+        dose_axis = np.r_[d[0], d]
+
+        def dose_at(cc):
+            return float(np.interp(cc, cum, dose_axis))
+
+        stats = {'Volume': volume, 'Dmin': float(d[-1]), 'Dmax': float(d[0]), 'Dmean': mean,
+                 'Dmedian': dose_at(0.5 * volume), 'Dstd': float(np.sqrt(np.dot(w, (d - mean) ** 2) / volume))}
+
+        values = {}
+        for metric in metrics:
+            kind, x, unit, volume_unit = Dose._parse_metric(metric)
+            if kind == 'stat':
+                values[metric] = stats[x]
+            elif kind == 'D':
+                values[metric] = dose_at(x / 100.0 * volume if unit == '%' else x)
+            else:
+                level = x if unit == 'Gy' else x / 100.0 * prescription
+                received = cum[np.searchsorted(-d, -level, side='right')]     # volume with dose >= level
+                result = received if kind == 'V' else volume - received
+                values[metric] = result if volume_unit == 'cc' else 100.0 * result / volume
+
+        return values
+
+    @staticmethod
+    def _parse_metric(metric):
+        """(kind, value, unit, volume unit) of a metric name; raises ValueError for an unknown name.
+
+        'Dmean' -> ('stat', 'Dmean', None, None); 'D95' -> ('D', 95.0, '%', None); 'D0.03cc' -> ('D', 0.03, 'cc', None);
+        'V20Gy' -> ('V', 20.0, 'Gy', 'percent'); 'VS20Gy_cc' -> ('VS', 20.0, 'Gy', 'cc'); 'V95%' -> ('V', 95.0, '%',
+        'percent').
+        """
+        if metric in ('Volume', 'Dmin', 'Dmax', 'Dmean', 'Dmedian', 'Dstd'):
+            return 'stat', metric, None, None
+
+        match = re.fullmatch(r'D(\d+(?:\.\d+)?)(cc)?', metric)
+        if match:
+            return 'D', float(match[1]), 'cc' if match[2] else '%', None
+
+        match = re.fullmatch(r'(VS|V)(\d+(?:\.\d+)?)(Gy|%)(_cc)?', metric)
+        if match:
+            return match[1], float(match[2]), match[3], 'cc' if match[4] else 'percent'
+
+        raise ValueError(f"Unknown metric {metric!r}: use Volume, Dmin, Dmax, Dmean, Dmedian, Dstd, D<x>, D<x>cc, "
+                         f"V<x>Gy, V<x>Gy_cc, VS<x>Gy, VS<x>Gy_cc, V<x>% or V<x>%_cc.")
+
+    # ------------------------------------------------------------------------------------------------------------
+    # Private methods
+    # ------------------------------------------------------------------------------------------------------------
+    def _raise_no_annotations(self):
+        """Doses carry no ROIs or POIs: contour on the image in the dose's frame of reference instead."""
+        raise TypeError(f"'{self.dose_name}' is a dose; ROIs and POIs belong on an image in its frame of reference.")
+
+    def _register(self):
+        """Store this dose in ``Data.dose`` (used by :meth:`Image.load_metadata`)."""
+        Data.dose[self.dose_name] = self
+
+    def _registration_matrix(self, image_name, rigid_name=None):
+        """4x4 dose native world -> image_name world.
+
+        Without a Rigid the image must be in the dose's frame of reference. With one, the full registration is used
+        (its display animation fraction is ignored), in whichever direction carries the dose onto the image.
+        """
+        image = Data.image[image_name]
+        dose_frame = self._frame(self, self.dose_name)
+
+        if rigid_name is None:
+            if self._frame(image, image_name) != dose_frame:
+                raise ValueError(f"'{image_name}' is not in the frame of reference of '{self.dose_name}'; pass the "
+                                 f"rigid_name of a registration that connects them.")
+            return np.identity(4)
+
+        rigid = Data.rigid[rigid_name]
+        if not rigid.connects(image_name, self.dose_name):
+            raise ValueError(f"'{rigid_name}' does not connect '{image_name}' and '{self.dose_name}'.")
+
+        combined = rigid.get_combined_matrix()      # reference world -> moving world
+        if dose_frame != rigid.moving.frame:
+            return combined
+
+        inverse = np.identity(4)                    # dose on the moving side: moving world -> reference world
+        inverse[:3, :3] = combined[:3, :3].T
+        inverse[:3, 3] = -combined[:3, :3].T @ combined[:3, 3]
+
+        return inverse
+
+    def _roi_weights(self, image, roi_names, partial_volume=True):
+        """Per ROI: (name, box, weight). box is (z0, z1, y0, y1, x0, x1) on the image grid, weight the (z, y, x) volume
+        in cc of each box voxel inside the ROI. box and weight are None for an ROI with no contours or no voxels.
+
+        partial_volume=True weights each voxel by the fraction inside the contour (mask / 255); False counts a voxel
+        fully when at least half of it is inside (mask >= 128).
+        """
+        voxel_cc = float(np.prod(np.asarray(image.spacing, dtype=float))) / 1000.0
+
+        rois = []
+        for name in roi_names:
+            roi = image.roi.get(name)
+            if roi is None or roi.contour_position is None or len(roi.contour_position) == 0:
+                rois.append((name, None, None))
+                continue
+
+            mask = contours_to_mask(roi.contour_position, image.dimensions, image.origin, image.spacing, image.matrix)
+            inside = mask > 0 if partial_volume else mask >= 128
+            if not inside.any():
+                rois.append((name, None, None))
+                continue
+
+            box = []
+            for axes in ((1, 2), (0, 2), (0, 1)):       # z, y, x extents
+                index = np.flatnonzero(inside.any(axis=axes))
+                box += [int(index[0]), int(index[-1]) + 1]
+            z0, z1, y0, y1, x0, x1 = box
+
+            crop = mask[z0:z1, y0:y1, x0:x1]
+            if partial_volume:
+                weight = crop.astype(np.float32) * np.float32(voxel_cc / 255.0)
+            else:
+                weight = (crop >= 128).astype(np.float32) * np.float32(voxel_cc)
+
+            rois.append((name, tuple(box), weight))
+
+        return rois
+
+    def _sample_box(self, image, box, matrix):
+        """(z, y, x) float32 dose on image's own voxel grid inside box (z0, z1, y0, y1, x0, x1), one image slice at a
+        time through the display's trilinear kernel. matrix maps dose native world -> image world."""
+        z0, z1, y0, y1, x0, x1 = box
+        axes = np.asarray(image.matrix, dtype=float)            # rows = x, y, z index axes
+        spacing = np.asarray(image.spacing, dtype=float)
+
+        out = np.empty((z1 - z0, y1 - y0, x1 - x0), dtype=np.float32)
+        for k in range(z0, z1):
+            origin = image.compute_position([x0, y0, k])
+            grid = {'origin': origin, 'x_axis': axes[0], 'y_axis': axes[1], 'normal': axes[2],
+                    'sx': float(spacing[0]), 'sy': float(spacing[1]), 'shape': (y1 - y0, x1 - x0)}
+            out[k - z0] = self.display.compute_array('Axial', origin, rigid_matrix=matrix, grid=grid)['array']
+
+        return out
+
+    def _to_gy(self, array):
+        """Contiguous (z, y, x) float32 dose in Gy.
+
+        Integer arrays are raw stored values and get DoseGridScaling applied. Float arrays are taken as already
+        scaled by the reader, so scaling is never applied twice.
+        """
+        array = np.asarray(array)
+        if np.issubdtype(array.dtype, np.integer):
+            scaling = float(self._first_tag(['DoseGridScaling'], 1.0))
+            array = array.astype(np.float32) * np.float32(scaling)
+
+        return np.ascontiguousarray(array, dtype=np.float32)
+
+    # ------------------------------------------------------------------------------------------------------------
+    # Public methods
+    # ------------------------------------------------------------------------------------------------------------
+    def add_poi(self, poi_name=None, color=None, visible=False, path=None, point=None):
+        """Not available on a dose; raises TypeError. Add the POI to an image in the dose's frame instead.
+
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-        >>> dose.get_patient_name(...)
+        >>> mia.Data.image['CT 01'].add_poi('Iso', point=[0.0, -20.0, 15.5])
         """
-        if 'PatientName' in self.tags[0]:
-            return str(self.tags[0].PatientName).split('^')[:3]
-        else:
-            return 'missing'
+        self._raise_no_annotations()
 
-    def get_mrn(self):
-        """Queries patient Medical Record Numbers from loaded header definitions.
-        
-        Returns
-        -------
-        str
-            Parsed identification index string, or 'missing'.
-        
+    def add_roi(self, roi_name=None, color=None, visible=False, path=None, contour=None, plane='Axial'):
+        """Not available on a dose; raises TypeError. Add the ROI to an image in the dose's frame instead.
+
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-        >>> dose.get_mrn(...)
+        >>> mia.Data.image['CT 01'].add_roi('Liver', contour=contours)
         """
-        if 'PatientID' in self.tags[0]:
-            return str(self.tags[0].PatientID)
-        else:
-            return 'missing'
+        self._raise_no_annotations()
 
-    def get_birthdate(self):
-        """Queries patient birthday sequences from metadata fields.
-        
+    def compute_dose_on_image(self, image_name, rigid_name=None, bounds=None):
+        """Dose (Gy) resampled trilinearly onto an image's voxel grid, 0 outside the dose grid.
+
+        Parameters
+        ----------
+        image_name : str
+            Image in ``Data.image`` whose grid the dose is sampled on.
+        rigid_name : str, optional
+            Registration in ``Data.rigid`` connecting the dose's frame of reference with the image's (e.g. planning CT
+            -> CBCT). None = the image is in the dose's frame of reference.
+        bounds : tuple of int, optional
+            (z0, z1, y0, y1, x0, x1) index box on the image grid (end exclusive). None = the whole image.
+
         Returns
         -------
-        str
-            Chronological date metadata context, or an empty string.
-        
+        (z, y, x) float32 ndarray
+            The image's shape, or the box's shape when bounds is given.
+
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-        >>> dose.get_birthdate(...)
+        >>> dose = mia.Data.dose['RTDOSE 01']
+        >>> on_ct = dose.compute_dose_on_image('CT 01')
+        >>> on_cbct = dose.compute_dose_on_image('CBCT 01', rigid_name='CT 01_CBCT 01')
+        >>> patch = dose.compute_dose_on_image('CT 01', bounds=(40, 60, 200, 300, 150, 260))
         """
-        if 'PatientBirthDate' in self.tags[0]:
-            return str(self.tags[0].PatientBirthDate)
-        else:
-            return ''
+        image = Data.image[image_name]
+        if bounds is None:
+            nz, ny, nx = (int(v) for v in image.dimensions[:3])
+            bounds = (0, nz, 0, ny, 0, nx)
 
-    def get_date(self):
-        """Inspects progressive acquisition dates to establish creation timelines.
-        
+        return self._sample_box(image, tuple(int(v) for v in bounds), self._registration_matrix(image_name, rigid_name))
+
+    def compute_roi_metrics(self, image_name, roi_names=None, metrics=None, rigid_name=None, partial_volume=True,
+                            prescription=None):
+        """DVH metrics for several ROIs on one image, with the dose resampled once.
+
+        The dose is sampled onto the image grid only inside the box that covers every requested ROI, then each ROI's
+        metrics come from its own partial-volume mask. Voxels are weighted by the fraction inside the contour, so small
+        structures (e.g. parotids) get accurate volumes and dose-volume points.
+
+        Parameters
+        ----------
+        image_name : str
+            Image in ``Data.image`` holding the ROIs.
+        roi_names : str or list of str, optional
+            ROIs on that image. None = every ROI on it. ROIs with no contours get NaN.
+        metrics : str or list of str, optional
+            Metric names (see the module conventions), reported in this order. None = ``DEFAULT_METRICS``.
+
+            * 'Volume' (cc), 'Dmin', 'Dmax', 'Dmean', 'Dmedian', 'Dstd' (Gy)
+            * 'D<x>'      : dose (Gy) to the hottest x % of the volume, e.g. 'D95', 'D2'
+            * 'D<x>cc'    : dose (Gy) to the hottest x cc, e.g. 'D0.03cc', 'D2cc'
+            * 'V<x>Gy'    : % of the volume receiving at least x Gy ('V<x>Gy_cc' in cc)
+            * 'VS<x>Gy'   : % of the volume receiving less than x Gy ('VS<x>Gy_cc' in cc)
+            * 'V<x>%'     : % of the volume receiving at least x % of the prescription ('V<x>%_cc' in cc)
+        rigid_name : str, optional
+            Registration in ``Data.rigid`` connecting the dose's frame of reference with the image's. None = the image
+            is in the dose's frame of reference.
+        partial_volume : bool, default True
+            Weight voxels by the fraction inside the contour. False counts a voxel when at least half of it is inside.
+        prescription : float, optional
+            Prescription dose (Gy), needed for 'V<x>%' metrics.
+
         Returns
         -------
-        str
-            Chronological timestamp data string, defaults to '00000'.
-        
+        pandas.DataFrame
+            One row per ROI: 'ROI' then the metrics in the requested order.
+
+        Raises
+        ------
+        ValueError
+            For an unknown metric name, a 'V<x>%' metric without a prescription, or an image in another frame of
+            reference with no (or the wrong) rigid_name.
+
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-        >>> dose.get_date(...)
+        >>> dose = mia.Data.dose['RTDOSE 01']
+        >>> dose.compute_roi_metrics('CT 01')                                                # every ROI, defaults
+        >>> dose.compute_roi_metrics('CT 01', roi_names=['Parotid_L', 'Parotid_R'],
+        ...                          metrics=['Dmean', 'D0.03cc', 'V26Gy', 'V30Gy_cc'])
+        >>> dose.compute_roi_metrics('CT 01', roi_names='PTV', metrics=['D95', 'V95%', 'V107%'], prescription=70)
+        >>> dose.compute_roi_metrics('CBCT 01', roi_names=['Parotid_L'], rigid_name='CT 01_CBCT 01')
         """
-        if 'SeriesDate' in self.tags[0]:
-            return self.tags[0].SeriesDate
-        elif 'ContentDate' in self.tags[0]:
-            return self.tags[0].ContentDate
-        elif 'AcquisitionDate' in self.tags[0]:
-            return self.tags[0].AcquisitionDate
-        elif 'StudyDate' in self.tags[0]:
-            return self.tags[0].StudyDate
-        else:
-            return '00000'
+        image = Data.image[image_name]
+        if roi_names is None:
+            roi_names = list(image.roi)
+        roi_names = [roi_names] if isinstance(roi_names, str) else list(roi_names)
 
-    def get_time(self):
-        """Inspects dataset headers to extract logging time flags.
-        
-        Returns
-        -------
-        str
-            Temporal timestamp registry identifier context string.
-        
+        if metrics is None:
+            metrics = self.DEFAULT_METRICS
+        metrics = [metrics] if isinstance(metrics, str) else list(metrics)
+
+        # check every name before the (slower) mask and sampling work
+        for metric in metrics:
+            kind, _, unit, _ = self._parse_metric(metric)
+            if kind != 'D' and unit == '%' and prescription is None:
+                raise ValueError(f"{metric!r} needs a prescription (Gy).")
+
+        matrix = self._registration_matrix(image_name, rigid_name)
+        rois = self._roi_weights(image, roi_names, partial_volume=partial_volume)
+
+        boxes = np.array([box for _, box, _ in rois if box is not None])
+        if len(boxes):
+            union = (int(boxes[:, 0].min()), int(boxes[:, 1].max()), int(boxes[:, 2].min()), int(boxes[:, 3].max()),
+                     int(boxes[:, 4].min()), int(boxes[:, 5].max()))
+            dose = self._sample_box(image, union, matrix)
+
+        rows = []
+        for name, box, weight in rois:
+            if box is None:
+                values = {m: np.nan for m in metrics}
+            else:
+                z0, z1, y0, y1, x0, x1 = box
+                sub = dose[z0 - union[0]:z1 - union[0], y0 - union[2]:y1 - union[2], x0 - union[4]:x1 - union[4]]
+                inside = weight > 0
+                values = self._metric_values(sub[inside], weight[inside], metrics, prescription)
+
+            rows.append({'ROI': name, **values})
+
+        return pd.DataFrame(rows, columns=['ROI'] + metrics)
+
+    def create_external(self, name='External', color=None, visible=False, filepaths=None, threshold=-250):
+        """Not available on a dose; raises TypeError. Create the external on the planning image instead.
+
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-        >>> dose.get_time(...)
+        >>> mia.Data.image['CT 01'].create_external()
         """
-        if 'SeriesTime' in self.tags[0]:
-            return self.tags[0].SeriesTime
-        elif 'ContentTime' in self.tags[0]:
-            return self.tags[0].ContentTime
-        elif 'AcquisitionTime' in self.tags[0]:
-            return self.tags[0].AcquisitionTime
-        elif 'StudyTime' in self.tags[0]:
-            return self.tags[0].StudyTime
-        else:
-            return '00000'
+        self._raise_no_annotations()
 
-    def get_study_uid(self):
-        """Queries global unique Study Instance UIDs.
-        
-        Returns
-        -------
-        str
-            DICOM study identification context string token.
-        
+    def create_roi(self, name=None, color=None, visible=False, filepath=None):
+        """Not available on a dose; raises TypeError. Create the ROI on an image in the dose's frame instead.
+
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-        >>> dose.get_study_uid(...)
+        >>> mia.Data.image['CT 01'].create_roi('GTV')
         """
-        if 'StudyInstanceUID' in self.tags[0]:
-            return self.tags[0].StudyInstanceUID
-        else:
-            return '00000.00000'
-
-    def get_series_uid(self):
-        """Queries global unique Series Instance UIDs.
-        
-        Returns
-        -------
-        str
-            DICOM series identification context string token.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-        >>> dose.get_series_uid(...)
-        """
-        if 'SeriesInstanceUID' in self.tags[0]:
-            return self.tags[0].SeriesInstanceUID
-        else:
-            return '00000.00000'
-
-    def get_acq_number(self):
-        """Queries metadata blocks to establish dataset acquisition indexes.
-        
-        Returns
-        -------
-        str
-            Sequence location descriptor, or '1'.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-        >>> dose.get_acq_number(...)
-        """
-        if 'AcquisitionNumber' in self.tags[0]:
-            return self.tags[0].AcquisitionNumber
-        else:
-            return '1'
-
-    def get_frame_ref(self):
-        """Queries unique spatial coordinate Frame of Reference tokens.
-        
-        Returns
-        -------
-        str
-            Geometric framework indexing mapping string.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-        >>> dose.get_frame_ref(...)
-        """
-        if 'FrameOfReferenceUID' in self.tags[0]:
-            return self.tags[0].FrameOfReferenceUID
-        else:
-            return '00000.00000'
+        self._raise_no_annotations()
 
     def get_window(self):
-        """Calculates optimal presentation window widths for window/level rendering systems.
-        
-        Returns
-        -------
-        list of int
-            Contains the calculated intensity boundary pair [WindowMin, WindowMax].
-        
+        """[lower, upper] display window from WindowCenter/WindowWidth, else 0 to the maximum dose (Gy).
+
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-        >>> dose.get_window(...)
+        >>> mia.Data.dose['Dose_0'].get_window()
+        [0.0, 72.4]
         """
         if (0x0028, 0x1050) in self.tags[0] and (0x0028, 0x1051) in self.tags[0]:
-            center = self.tags[0].WindowCenter
-            width = self.tags[0].WindowWidth
+            return super().get_window()
 
-            if not isinstance(center, float):
-                center = center[0]
+        if self.array is not None:
+            return [0.0, float(np.max(self.array))]
 
-            if not isinstance(width, float):
-                width = width[0]
+        return [0, 1]
 
-            return [int(center) - int(np.round(width / 2)), int(center) + int(np.round(width / 2))]
+    def input_mhd(self, filename, roi_names, values, plane='Axial'):
+        """Not available on a dose; raises TypeError. Load the label map onto an image in the dose's frame instead.
 
-        elif self.array is not None:
-            return [np.min(self.array), np.max(self.array)]
-
-        else:
-            return [0, 1]
-
-    def get_specific_tag(self, tag):
-        """Queries arbitrary target metadata entries directly from DICOM frames.
-        
-        Parameters
-        ----------
-        tag : str or tuple
-            Target DICOM keyword string or hex identifier tag to evaluate.
-        
-        Returns
-        -------
-        pydicom.dataelem.DataElement or None
-            Raw header attribute data if verified inside dataset records.
-        
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-        >>> dose.get_specific_tag(...)
+        >>> mia.Data.image['CT 01'].input_mhd('C:/Data/labels.mhd', ['Liver'], [1])
         """
-        if tag in self.tags[0]:
-            return self.tags[0][tag]
-        else:
-            return None
+        self._raise_no_annotations()
 
-    def compute_aspect(self, slice_plane):
-        """Extracts directional pixel aspect scaling multipliers for 2D visual projection pipelines.
-        
-        Parameters
-        ----------
-        slice_plane : str
-            Target viewing matrix axis. Must be 'Axial', 'Coronal', or 'Sagittal'.
-        
-        Returns
-        -------
-        float
-            Aspect scaling multiplier ratio.
-        
+    def input_rtstruct(self, rtstruct):
+        """Not available on a dose; raises TypeError. Load the RTSTRUCT onto an image in the dose's frame instead.
+
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-        >>> dose.compute_aspect(...)
+        >>> mia.Data.image['CT 01'].input_rtstruct(rtstruct)
         """
-        if slice_plane == 'Axial':
-            aspect = np.round(self.spacing[0] / self.spacing[1], 2)
-        elif slice_plane == 'Coronal':
-            aspect = np.round(self.spacing[0] / self.spacing[2], 2)
-        else:
-            aspect = np.round(self.spacing[1] / self.spacing[2], 2)
-
-        return aspect
-
-    def compute_bounds(self):
-        """Calculates absolute spatial bounding extents enclosing the image configuration.
-        
-        Returns
-        -------
-        list of float
-            Physical space limits organized as [Xmin, Xmax, Ymin, Ymax, Zmin, Zmax].
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-        >>> dose.compute_bounds(...)
-        """
-        shape = self.array.shape
-        matrix_reshape = self.matrix.reshape(1, 9)[0]
-        vtk_image = vtk.vtkImageData()
-        vtk_image.SetSpacing(self.spacing)
-        vtk_image.SetDirectionMatrix(matrix_reshape)
-        vtk_image.SetDimensions([shape[1], shape[2], shape[0]])
-        vtk_image.SetOrigin(self.origin)
-
-        x_min, x_max, y_min, y_max, z_min, z_max = vtk_image.GetBounds()
-
-        return [x_min, x_max, y_min, y_max, z_min, z_max]
-
-    def compute_center(self, position=True, zyx=False):
-        """Calculates the exact volumetric center voxel or its matching physical point.
-        
-        Parameters
-        ----------
-        position : bool, optional
-            Converts target indexes into continuous physical coordinates if True. Defaults to True.
-        zyx : bool, optional
-            Flips array dimensional tracking layouts to ZYX order if True. Defaults to False.
-        
-        Returns
-        -------
-        list or np.ndarray
-            Calculated 3D center spatial point vector or matrix indices.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-        >>> dose.compute_center(...)
-        """
-        pixel_index = [int(self.dimensions[2] / 2),
-                       int(self.dimensions[1] / 2),
-                       int(self.dimensions[0] / 2)]
-
-        if position:
-            pixel_to_position_matrix = self.display.compute_matrix_pixel_to_position()
-            location = np.asarray([pixel_index[0], pixel_index[1], pixel_index[2], 1])
-
-            center = location.dot(pixel_to_position_matrix.T)[:3]
-            if zyx:
-                return np.flip(center)
-            else:
-                return center
-
-        else:
-            if zyx:
-                return [pixel_index[2], pixel_index[1], pixel_index[0]]
-            else:
-                return pixel_index
-
-    def compute_corner_positions(self):
-        """Extracts coordinates for all eight bounding corners of the continuous image cube.
-        
-        Returns
-        -------
-        list of tuple
-            Collection containing physical 3D spatial points mapping volume apex boundaries.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-        >>> dose.compute_corner_positions(...)
-        """
-        shape = self.array.shape
-        matrix_reshape = self.matrix.reshape(1, 9)[0]
-        vtk_image = vtk.vtkImageData()
-        vtk_image.SetSpacing(self.spacing)
-        vtk_image.SetDirectionMatrix(matrix_reshape)
-        vtk_image.SetDimensions([shape[1], shape[2], shape[0]])
-        vtk_image.SetOrigin(self.origin)
-
-        x_min, x_max, y_min, y_max, z_min, z_max = vtk_image.GetBounds()
-
-        corner_points = [(x_min, y_min, z_min),
-                         (x_max, y_min, z_min),
-                         (x_max, y_max, z_min),
-                         (x_min, y_max, z_min),
-                         (x_min, y_min, z_max),
-                         (x_max, y_min, z_max),
-                         (x_max, y_max, z_max),
-                         (x_min, y_max, z_max)]
-
-        return corner_points
-
-    def compute_corner_sides(self):
-        """Constructs a 3D structural mesh block modeling outer surface bounding walls.
-        
-        Returns
-        -------
-        pyvista.PolyData
-            Unstructured PyVista surface dataset enclosing the volume block profile.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-        >>> dose.compute_corner_sides(...)
-        """
-        corner_points = self.compute_corner_positions()
-        points = [corner_points[0], corner_points[4], corner_points[7], corner_points[3],
-                  corner_points[1], corner_points[2], corner_points[6], corner_points[5]]
-        faces = [4, 0, 1, 2, 3,
-                 4, 4, 5, 6, 7,
-                 4, 0, 4, 7, 1,
-                 4, 3, 2, 6, 5,
-                 4, 0, 3, 5, 4,
-                 4, 1, 7, 6, 2]
-
-        return pv.PolyData(points, faces)
-
-    def compute_dose_statistics(self):
-        """Placeholder method for global radiation dose volumetric data evaluations.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-        >>> dose.compute_dose_statistics(...)
-        """
-        pass
-
-    def compute_roi_dose_array(self, image_name, roi_name):
-        """Isolates structural dose entries bounded inside a regional segmentation mask.
-        
-        Resamples dose matrices onto reference dimensions to align structural points.
-        
-        Parameters
-        ----------
-        image_name : str
-            Label tracking reference structural anatomical volumes.
-        roi_name : str
-            Target structure region identifier key.
-        
-        Returns
-        -------
-        np.ndarray
-            Flattened 1D array collecting floating dose value intersections localized inside masks.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-        >>> dose.compute_roi_dose_array(...)
-        """
-        dose_image = self.create_sitk_image()
-        image = Data.image[image_name].create_sitk_image()
-        roi_image = Data.image[image_name].roi[roi_name].create_sitk_mask()
-
-        resampler = sitk.ResampleImageFilter()
-        resampler.SetReferenceImage(image)
-        resampler.SetInterpolator(sitk.sitkLinear)
-        resampler.SetDefaultPixelValue(0.0)
-        dose_resampled = resampler.Execute(dose_image)
-
-        dose_arr = sitk.GetArrayFromImage(dose_resampled)
-        mask_arr = sitk.GetArrayFromImage(roi_image)
-
-        mask_indices = np.where(mask_arr > 0)
-        dose_in_roi = dose_arr[mask_indices]
-
-        return dose_in_roi
-
-    def compute_roi_dose_statistics(self, image_name, roi_name, max_dose=150, increment=5):
-        """Generates full analytical indicators and cumulative data for Dose-Volume Histograms (DVH).
-        
-        Parameters
-        ----------
-        image_name : str
-            Label tracking references pointing to primary imaging volumes.
-        roi_name : str
-            Target anatomical outline region descriptor name.
-        max_dose : int, optional
-            Upper limit bounding dose tracking arrays (Gy). Defaults to 150.
-        increment : int, optional
-            Step intervals computing structural coverage states. Defaults to 5.
-        
-        Returns
-        -------
-        dict
-            Dose volume metrics tracking volume (cc), min, max, mean, D-percents, and VS parameters.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-        >>> dose.compute_roi_dose_statistics(...)
-        """
-        spacing = Data.image[image_name].spacing
-        dose_in_roi = self.compute_roi_dose_array(image_name, roi_name)
-
-        voxel_vol_cc = np.prod(spacing) / 1000.0
-        roi_volume_cc = dose_in_roi.size * voxel_vol_cc
-
-        dvh = {"ROI": roi_name,
-               "Volume (cc)": roi_volume_cc,
-               "Dmin": np.min(dose_in_roi),
-               "Dmax": np.max(dose_in_roi),
-               "Dmean": np.mean(dose_in_roi),
-               "Dmedian": np.median(dose_in_roi),
-               "Dstd": np.std(dose_in_roi)}
-
-        d_values = [1, 2, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 98, 99]
-        dvh.update({f"D{d}": np.percentile(dose_in_roi, 100 - d) for d in d_values})
-        voxel_vol_cc = np.prod(spacing) / 1000.0
-        for d in range(0, max_dose + increment, 5):
-            mask = dose_in_roi < d
-            dvh[f"VS{d}Gy_percent"] = np.mean(mask) * 100
-            dvh[f"VS{d}Gy_cc"] = np.sum(mask) * voxel_vol_cc
-
-        return dvh
-
-    def compute_pixel(self, position):
-        """Maps continuous 3D physical positions to absolute discrete voxel indices.
-        
-        Parameters
-        ----------
-        position : list or np.ndarray
-            Continuous world coordinate entries mapping spatial points.
-        
-        Returns
-        -------
-        np.ndarray
-            Discrete 3D pixel array coordinates (int32).
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-        >>> dose.compute_pixel(...)
-        """
-        matrix = copy.deepcopy(self.matrix)
-
-        hold_matrix = np.identity(3, dtype=np.float32)
-        hold_matrix[0, :] = matrix[0, :] / self.spacing[0]
-        hold_matrix[1, :] = matrix[1, :] / self.spacing[1]
-        hold_matrix[2, :] = matrix[2, :] / self.spacing[2]
-
-        position_to_pixel_matrix = np.identity(4, dtype=np.float32)
-        position_to_pixel_matrix[:3, :3] = hold_matrix
-        position_to_pixel_matrix[:3, 3] = np.asarray(self.origin).dot(-hold_matrix.T)
-
-        location = np.asarray([position[0], position[1], position[2], 1])
-
-        return (np.round(location.dot(position_to_pixel_matrix.T)[:3])).astype(np.int32)
-
-    def compute_position(self, xyz):
-        """Maps discrete voxel indexes directly back to continuous physical locations.
-        
-        Parameters
-        ----------
-        xyz : list or np.ndarray
-            Discrete matrix coordinates mapping matrix pixel centers.
-        
-        Returns
-        -------
-        np.ndarray
-            Continuous 3D spatial coordinate vector (float32).
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-        >>> dose.compute_position(...)
-        """
-        matrix = copy.deepcopy(self.matrix)
-
-        pixel_to_position_matrix = np.identity(4, dtype=np.float32)
-        pixel_to_position_matrix[:3, 0] = matrix[0, :] * self.spacing[0]
-        pixel_to_position_matrix[:3, 1] = matrix[1, :] * self.spacing[1]
-        pixel_to_position_matrix[:3, 2] = matrix[2, :] * self.spacing[2]
-        pixel_to_position_matrix[:3, 3] = self.origin
-
-        pixel_to_position_matrix = self.compute_matrix_pixel_to_position()
-        location = np.asarray([xyz[0], xyz[1], xyz[2], 1])
-
-        return location.dot(pixel_to_position_matrix.T)[:3]
-
-    def compute_matrix_pixel_to_position(self):
-        """Calculates an intrinsic 4x4 coordinate transform matrix mapping voxel nodes to spatial spaces.
-        
-        Returns
-        -------
-        np.ndarray
-            Homogeneous translation coordinate mapping tensor matrix.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-        >>> dose.compute_matrix_pixel_to_position(...)
-        """
-        matrix = copy.deepcopy(self.matrix)
-        spacing = self.spacing
-
-        pixel_to_position_matrix = np.identity(4, dtype=np.float32)
-        pixel_to_position_matrix[:3, 0] = matrix[0, :] * spacing[0]
-        pixel_to_position_matrix[:3, 1] = matrix[1, :] * spacing[1]
-        pixel_to_position_matrix[:3, 2] = matrix[2, :] * spacing[2]
-        pixel_to_position_matrix[:3, 3] = self.origin
-
-        return pixel_to_position_matrix
-
-    def create_sitk_image(self, empty=False):
-        """Generates an independent SimpleITK image container wrapped with current orientation profiles.
-        
-        Parameters
-        ----------
-        empty : bool, optional
-            Builds a blank 8-bit unsigned integer placeholder image array if True. Defaults to False.
-        
-        Returns
-        -------
-        SimpleITK.Image
-            Configured ITK data object holding metadata alignments.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-        >>> dose.create_sitk_image(...)
-        """
-        if empty:
-            sitk_image = sitk.Image([int(dim) for dim in self.dimensions], sitk.sitkUInt8)
-        else:
-            sitk_image = sitk.GetImageFromArray(self.array)
-
-        matrix_flat = self.matrix.flatten(order='F')
-        sitk_image.SetDirection([float(mat) for mat in matrix_flat])
-        sitk_image.SetOrigin(self.origin)
-        sitk_image.SetSpacing(self.spacing)
-
-        return sitk_image
-
-    def reset_array(self):
-        """Clears secondary off-axis caches, restoring tracking properties back to baseline states.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-        >>> dose.reset_array(...)
-        """
-        self.display.secondary_array = None
-        self.display.matrix = copy.deepcopy(self.matrix)
-        self.display.origin = copy.deepcopy(self.origin)
-        self.display.slice_location = self.compute_center(position=False, zyx=True)
-
-    def retrieve_angles(self, order='ZXY'):
-        """Extracts directional Euler angles representing current viewport rotations.
-        
-        Parameters
-        ----------
-        order : str, optional
-            Target axis sequence constraints formatting outputs. Defaults to 'ZXY'.
-        
-        Returns
-        -------
-        np.ndarray
-            Rotation degrees calculated across coordinate planes.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-        >>> dose.retrieve_angles(...)
-        """
-        rotation = Rotation.from_matrix(self.display.matrix[:3, :3])
-
-        return rotation.as_euler(order, degrees=True)
-
-    def retrieve_array_plane(self, slice_plane):
-        """Queries 2D view arrays along chosen projection slicing cuts.
-        
-        Parameters
-        ----------
-        slice_plane : str
-            Target viewing orientation axis.
-        
-        Returns
-        -------
-        np.ndarray
-            2D scalar distribution matrix data slice.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-        >>> dose.retrieve_array_plane(...)
-        """
-        return self.display.compute_array(slice_plane=slice_plane)
-
-    def retrieve_slice_location(self, slice_plane):
-        """Queries discrete index tracking values currently intersecting active canvases.
-        
-        Parameters
-        ----------
-        slice_plane : str
-            Target orthogonal workspace plane key name.
-        
-        Returns
-        -------
-        int
-            Voxel matrix index tracking step level.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-        >>> dose.retrieve_slice_location(...)
-        """
-        if slice_plane == 'Axial':
-            return self.display.slice_location[0]
-
-        elif slice_plane == 'Coronal':
-            return self.display.slice_location[1]
-
-        else:
-            return self.display.slice_location[2]
-
-    def retrieve_slice_position(self, slice_plane=None):
-        """Maps current slice visualization indexes back into continuous world 3D position spaces.
-        
-        Parameters
-        ----------
-        slice_plane : str, optional
-            Target viewport section plane profile tracker. Defaults to None.
-        
-        Returns
-        -------
-        np.ndarray
-            Continuous 3D world coordinate vector.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-        >>> dose.retrieve_slice_position(...)
-        """
-        pixel_to_position_matrix = self.display.compute_matrix_pixel_to_position()
-
-        if slice_plane is None:
-            location = np.asarray([self.display.slice_location[2],
-                                   self.display.slice_location[1],
-                                   self.display.slice_location[0], 1])
-        else:
-            if slice_plane == 'Axial':
-                location = np.asarray([0, 0, self.display.slice_location[0], 1])
-            elif slice_plane == 'Coronal':
-                location = np.asarray([0, self.display.slice_location[1], 0, 1])
-                print(location)
-            else:
-                location = np.asarray([self.display.slice_location[2], 0, 0, 1])
-
-        return location.dot(pixel_to_position_matrix.T)[:3]
-
-    def retrieve_scroll_max(self, slice_plane):
-        """Queries upper bounding index ranges for scroll components.
-        
-        Parameters
-        ----------
-        slice_plane : str
-            Target viewport tracker orientation name.
-        
-        Returns
-        -------
-        int
-            Maximum allowed index position tracking step.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-        >>> dose.retrieve_scroll_max(...)
-        """
-        if slice_plane == 'Axial':
-            return self.display.scroll_max[0]
-
-        elif slice_plane == 'Coronal':
-            return self.display.scroll_max[1]
-
-        else:
-            return self.display.scroll_max[2]
-
-    def retrieve_vtk_slice(self, slice_plane):
-        """Queries independent VTK slice representations matching active view planes.
-        
-        Parameters
-        ----------
-        slice_plane : str
-            Target plane tracking workspace identifier.
-        
-        Returns
-        -------
-        vtk.vtkImageData
-            Structured single-slice collection array.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-        >>> dose.retrieve_vtk_slice(...)
-        """
-        return self.display.compute_vtk_slice(slice_plane)
-
-    def retrieve_vtk_volume(self, slice_plane):
-        """Queries independent full VTK volume blocks configured inside displays.
-        
-        Parameters
-        ----------
-        slice_plane : str
-            Target processing plane context wrapper name.
-        
-        Returns
-        -------
-        vtk.vtkImageData
-            Structured multi-channel data.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-        >>> dose.retrieve_vtk_volume(...)
-        """
-        return self.display.compute_vtk_volume(slice_plane)
-
-    def save_image(self, path):
-        """Serializes structural metadata tables and tensor data files to disk targets.
-        
-        Parameters
-        ----------
-        path : str
-            File system folder destination targeted to write files.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-        >>> dose.save_image(...)
-        """
-        variable_names = self.__dict__.keys()
-        column_names = [name for name in variable_names if name not in ['tags', 'array', 'display', 'roi']]
-
-        df = pd.DataFrame(index=[0], columns=column_names)
-        for name in column_names:
-            df.at[0, name] = getattr(self, name)
-
-        df.to_pickle(os.path.join(path, 'info.p'))
-        np.save(os.path.join(path, 'tags.npy'), self.tags, allow_pickle=True)
-        np.save(os.path.join(path, 'array.npy'), self.array, allow_pickle=True)
-
-    def update_rotation(self, r_x=0, r_y=0, r_z=0, base=True):
-        """Applies extrinsic directional Euler rotations to recalculate off-axis visualization spaces.
-        
-        Forces structural arrays through oblique transformation filters using underlying
-        VTK matrix interpolation models.
-        
-        Parameters
-        ----------
-        r_x : float, optional
-            Rotation angle applied around the spatial X axis. Defaults to 0.
-        r_y : float, optional
-            Rotation angle applied around the spatial Y axis. Defaults to 0.
-        r_z : float, optional
-            Rotation angle applied around the spatial Z axis. Defaults to 0.
-        base : bool, optional
-            Resets properties back to native image matrices before execution if True. Defaults to True.
-        
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> dose = mia.Data.dose[mia.Data.dose_list()[0]]
-        >>> dose.update_rotation(...)
-        """
-        if r_x != 0 or r_y != 0 or r_z != 0:
-            r = Rotation.from_euler('xyz', [r_x, r_y, r_z], degrees=True)
-            new_matrix = r.as_matrix()
-
-            if base:
-                base_matrix = copy.deepcopy(self.matrix)
-                self.display.matrix = new_matrix @ base_matrix
-            else:
-                self.display.matrix = new_matrix @ self.display.matrix
-
-            self.display.compute_offaxis_array()
-            self.display.compute_scroll_max()
-        else:
-            self.display.compute_scroll_max()
-            self.reset_array()
+        self._raise_no_annotations()

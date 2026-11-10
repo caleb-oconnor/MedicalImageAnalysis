@@ -25,6 +25,10 @@ Key Functionalities:
        return the names currently held in the registry.
     3. **Annotation Sync**: `match_rois` / `match_pois` make every image carry
        the same set of ROI/POI names with consistent color and visibility.
+       Doses live in `dose`, so they are never given ROIs or POIs.
+    4. **Lookup / Removal**: `volume` returns an image or dose by name for
+       display code (Rigid, Deformable); `delete` removes an entry from any
+       registry.
 
 Architecture Note:
     The module utilizes a Singleton-style pattern via class-level attributes
@@ -188,9 +192,68 @@ class Data(object):
         return list(cls.deformable.keys())
 
     @classmethod
+    def delete(cls, name: str, registry: str | None = None) -> None:
+        """
+        Remove an image, dose, rigid or deformable registration from the registry.
+
+        Registrations are not removed with their images: Rigid and Deformable keep their frames of reference (and
+        Deformable its meshes), so they keep working when the image is loaded again.
+
+        Parameters
+        ----------
+        name : str
+            Key of the entry to delete (as returned by `image_list`, `dose_list`, `rigid_list` or
+            `deformable_list`).
+        registry : {'image', 'dose', 'rigid', 'deformable'}, optional
+            Registry to delete from. None searches all four; the name must then be in exactly one.
+
+        Returns
+        -------
+        None
+
+        Raises
+        ------
+        KeyError
+            If `name` is not in the registry (or in any registry when `registry` is None).
+        ValueError
+            If `registry` is not a known registry, or `registry` is None and `name` is in more than one.
+
+        Examples
+        --------
+        Remove a dose, a rigid and a deformable registration:
+
+        >>> import medicalimageanalysis as mia
+        >>> from medicalimageanalysis import Data
+        >>> Data.delete('Dose_0')
+        >>> Data.delete('CT 01_MR 01', registry='rigid')
+        >>> Data.delete('DVF_CT 01_CBCT 01')
+
+        Remove an image while keeping the rest of the session:
+
+        >>> Data.delete('MR 01', registry='image')
+        >>> Data.image_list()
+        ['CT 01']
+        """
+        registries = {'image': cls.image, 'dose': cls.dose, 'rigid': cls.rigid, 'deformable': cls.deformable}
+
+        if registry is not None:
+            if registry not in registries:
+                raise ValueError(f"registry must be one of {list(registries)}; got {registry!r}")
+            del registries[registry][name]
+            return
+
+        found = [key for key, entries in registries.items() if name in entries]
+        if not found:
+            raise KeyError(f"'{name}' is not in any registry.")
+        if len(found) > 1:
+            raise ValueError(f"'{name}' is in {found}; pass registry= to choose one.")
+
+        del registries[found[0]][name]
+
+    @classmethod
     def delete_image(cls, image_name: str) -> None:
         """
-        Remove a specific image from the registry.
+        Remove a specific image from the registry. Same as ``delete(image_name, registry='image')``.
 
         Parameters
         ----------
@@ -224,7 +287,7 @@ class Data(object):
         >>> if 'PT 01' in Data.image:
         ...     Data.delete_image('PT 01')
         """
-        del cls.image[image_name]
+        cls.delete(image_name, registry='image')
 
     @classmethod
     def dose_list(cls) -> list[str]:
@@ -552,3 +615,43 @@ class Data(object):
                 if roi_name not in roi_names:
                     roi_names.append(roi_name)
         return roi_names
+
+    @classmethod
+    def volume(cls, name: str):
+        """
+        Return an image or dose by name, for anything that is only displayed or resliced.
+
+        Looks in `image` first, then `dose`. Rigid and Deformable use this for their display paths so a dose can be
+        shown through a registration. Registration, masks and ROI/POI matching keep using `image` directly, so a dose
+        is never registered, contoured on or given synced ROIs.
+
+        Parameters
+        ----------
+        name : str
+            Key in `image` or `dose`.
+
+        Returns
+        -------
+        Image or Dose
+
+        Raises
+        ------
+        KeyError
+            If `name` is in neither registry.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> from medicalimageanalysis import Data
+        >>> mia.read_dicoms(folder_path='C:/Data/Patient01', only_modality=['CT', 'RTDOSE'])
+        >>> Data.volume('CT 01') is Data.image['CT 01']
+        True
+        >>> Data.volume('Dose_0') is Data.dose['Dose_0']
+        True
+        """
+        if name in cls.image:
+            return cls.image[name]
+        if name in cls.dose:
+            return cls.dose[name]
+
+        raise KeyError(f"'{name}' is not in Data.image or Data.dose.")

@@ -23,10 +23,13 @@ Description:
       ``image.matrix @ display.matrix.T`` are the view axes.
     * ``rigid_matrix`` (4x4) maps this image's native world to the displayed world, as returned by
       ``Rigid.get_display_matrix``. Identity or None = no registration.
+    * ``Image.background`` is the value shown outside the volume (-3001 for images). Subclasses override it, e.g.
+      ``Dose.background`` is 0 Gy. Color images always use 0.
 
 Structure:
     - _fused_oblique_sample_kernel: numba kernel that trilinearly samples one oblique slice.
-    - Display: slice positions, shared view rotation, crosshair lines and reslicing for one image. Built by Image.
+    - Display: slice positions, shared view rotation, crosshair lines and reslicing for one image. Built by Image
+      (and by its subclass Dose).
     - Image: array, DICOM tags, geometry, ROIs/POIs and saving/loading.
 
 Examples
@@ -149,8 +152,8 @@ def _fused_oblique_sample_kernel(volume, h, w, sx, sy,
 class Display(object):
     """Reslicing and view state for one image: slice positions, the shared view rotation and crosshair lines.
 
-    Built by :class:`Image`, not created directly. Each call names its own plane and position, so any number of widgets
-    can share one Display.
+    Built by :class:`Image` (or a subclass such as Dose), not created directly. Each call names its own plane and
+    position, so any number of widgets can share one Display.
 
     Parameters
     ----------
@@ -206,9 +209,6 @@ class Display(object):
 
         self._warm_up_kernel()
 
-    # ------------------------------------------------------------------------------------------------------------
-    # Static methods
-    # ------------------------------------------------------------------------------------------------------------
     @staticmethod
     def _intersection_line(active_plane, crossing_plane):
         """Line where crossing_plane cuts active_plane, in active_plane's pixel coordinates.
@@ -262,9 +262,6 @@ class Display(object):
 
         return new
 
-    # ------------------------------------------------------------------------------------------------------------
-    # Private methods
-    # ------------------------------------------------------------------------------------------------------------
     def _get_axis_aligned_array(self, plane, position):
         """Native slice straight from the stored volume (no reslicing), or None when position is outside it."""
         pixel = self.image.compute_pixel(position)
@@ -300,11 +297,8 @@ class Display(object):
             np.float32(0), np.float32(0), np.float32(0),
             M, np.float32(1), np.float32(1), np.float32(1), 0.0)
 
-    # ------------------------------------------------------------------------------------------------------------
-    # Public methods
-    # ------------------------------------------------------------------------------------------------------------
     def compute_array(self, plane, position, matrix_override=None, rigid_matrix=None, grid=None, as_array=True,
-                      as_vtk=False, copy_array=False, force_reslice=False, background=-3001.0):
+                      as_vtk=False, copy_array=False, force_reslice=False, background=None):
         """2D slice of this image for one plane, axis-aligned when possible, otherwise resliced.
 
         Parameters
@@ -326,8 +320,9 @@ class Display(object):
             Copy the array. The axis-aligned path otherwise returns a view into the volume.
         force_reslice : bool, default False
             Always use the reslice kernel, even when a native slice would do.
-        background : float, default -3001.0
-            Value outside the volume (0 for color).
+        background : float, optional
+            Value outside the volume. None = ``image.background`` (-3001 for images, 0 Gy for a dose). Color always
+            uses 0.
 
         Returns
         -------
@@ -342,6 +337,7 @@ class Display(object):
         >>> res = display.compute_array('Axial', display.position['Axial'])
         >>> res = display.compute_array('Coronal', display.position['Coronal'], as_vtk=True)
         """
+        background = float(self.image.background if background is None else background)
         m = matrix_override if matrix_override is not None else self.matrix
         has_rigid = rigid_matrix is not None and not np.allclose(rigid_matrix, np.eye(4), atol=1e-9)
         rigid_matrix = rigid_matrix if rigid_matrix is not None else np.eye(4)
@@ -636,6 +632,11 @@ class Image(object):
         Reader output (e.g. Read3D, ReadUS, ReadXRay) providing image_set, array, image_name, modality, filepaths,
         sops, plane, spacing, dimensions, orientation, origin, image_matrix, skipped_slice and rgb.
 
+    Attributes
+    ----------
+    background : float
+        Class attribute: value shown outside the volume when it is resliced (-3001). Subclasses override it.
+
     Examples
     --------
     >>> import medicalimageanalysis as mia
@@ -643,6 +644,8 @@ class Image(object):
     >>> image = mia.Data.image[mia.Data.image_list()[0]]
     >>> image.origin, image.spacing, image.array.shape
     """
+    background = -3001.0
+
     def __init__(self, image):
         self.roi = {}
         self.poi = {}
@@ -708,9 +711,6 @@ class Image(object):
         if display is not None:
             display.image = self
 
-    # ------------------------------------------------------------------------------------------------------------
-    # Private methods
-    # ------------------------------------------------------------------------------------------------------------
     def _first_tag(self, keywords, default=None):
         """Value of the first DICOM keyword present in the first file's tags, else default."""
         for keyword in keywords:
@@ -719,9 +719,10 @@ class Image(object):
 
         return default
 
-    # ------------------------------------------------------------------------------------------------------------
-    # Public methods
-    # ------------------------------------------------------------------------------------------------------------
+    def _register(self):
+        """Store this image in its registry (``Data.image``). Subclasses override it (Dose -> ``Data.dose``)."""
+        Data.image[self.image_name] = self
+
     def add_poi(self, poi_name=None, color=None, visible=False, path=None, point=None):
         """Add a point of interest at a world position.
 
@@ -1120,7 +1121,8 @@ class Image(object):
         self.array = np.frombuffer(raw, dtype=self.array_dtype).reshape(self.dimensions).copy()
 
     def load_metadata(self, metadata_path, key):
-        """Decrypt the metadata written by :meth:`save` into this image and register it in ``Data.image``.
+        """Decrypt the metadata written by :meth:`save` into this image and register it (``Data.image``, or
+        ``Data.dose`` for a Dose).
 
         Call :meth:`load_array` afterwards for the pixels.
 
@@ -1138,7 +1140,7 @@ class Image(object):
         loaded = pickle.loads(AESGCM(key).decrypt(nonce, encrypted, None))
         self.__setstate__(loaded.__dict__)
 
-        Data.image[self.image_name] = self
+        self._register()
 
     def load_unencrypted_image(self, image_path, rois=True, pois=True):
         """Load an image folder written by :meth:`save_unencrypted`, optionally with its ROIs and POIs.
