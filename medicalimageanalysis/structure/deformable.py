@@ -44,6 +44,9 @@ Description:
     * Display calls name their own images, like Rigid: ``base_name`` is the image whose view is shown, ``image_name``
       the image deformed onto it. Each view is its own call, so any number of views (in either direction) can share
       one registration. Leaving both out shows the moving image deformed onto the reference image.
+    * Ids are in charge, like Rigid: the registration stores image ids and ROI ids (``roi`` is keyed by ROI id). Every
+      argument naming an image or ROI accepts the user name or the permanent id and is turned into the id on the way
+      in, so renaming never breaks a registration or its caches.
     * Any image in either frame can be displayed (e.g. an RTDose in the moving image's frame shown deformed on the
       reference). Display paths look images up with ``Data.volume`` (image or dose); registration and ROI warping use
       ``Data.image`` only. An image with no usable Frame of Reference UID is its own frame. Two images on the same side
@@ -59,7 +62,7 @@ Description:
       The default lives in ``visual.percent`` (set it with :meth:`Deformable.set_percent`).
     * ROIs: :meth:`Deformable.compute_mesh_slice` gives 2D contours for the views; ``roi`` (built by
       :meth:`Deformable.update_rois`) holds the moving ROIs deformed onto the reference for the 3D view.
-    * :meth:`Deformable.save` writes one .npz: the JSON state (names, frames, roi_names, rigid matrix, DVF grid), the
+    * :meth:`Deformable.save` writes one .npz: the JSON state (ids, frames, roi_ids, rigid matrix, DVF grid), the
       DVF and the reference / moving meshes, so the meshes stay viewable if the images are deleted. Warped ROI
       meshes, display settings and caches are never saved; they are rebuilt on demand.
 
@@ -333,14 +336,14 @@ class DeformableSide:
 
     Attributes
     ----------
-    image_name : str or None
-        The image this side was registered with (key into ``Data.image``).
+    image_id : int or None
+        Permanent id of the image this side was registered with (``Data.image[image_id]``).
     frame : str or None
-        Frame of Reference UID shared by every image on this side; the image name when the image has none.
+        Frame of Reference UID shared by every image on this side; 'volume:<id>' when the image has none.
     mesh : pyvista.PolyData, optional
         Surface used for the registration on this side, if any. Saved, so it stays viewable if the image is deleted.
     """
-    image_name: str | None
+    image_id: int | None
     frame: str | None = None
     mesh: object = None
 
@@ -382,31 +385,40 @@ class Deformable(object):
         DVF grid origin and spacing, (x, y, z).
     dimensions : tuple, optional
         DVF grid dimensions, (z, y, x).
-    roi_names : list of str, optional
-        Default ROIs whose masks guide :meth:`compute_registration` (must exist on both images).
+    roi_names : list of str or int, optional
+        Default ROIs (names or ids) whose masks guide :meth:`compute_registration` (must exist on both images). Kept
+        as ``roi_ids``.
     rigid_matrix : (4, 4) array_like, optional
         Rigid pre-alignment, reference world -> moving world (``Rigid.get_combined_matrix()``). Defaults to identity.
     dvf_matrix : (3, 3) array_like, optional
         Direction of the supplied DVF, rows = index axes in world (same as ``image.matrix``). Anything other than
         identity is resampled onto an identity grid with :meth:`correct_dvf_direction`.
     registration_name : str, optional
-        Lookup key in ``Data.deformable``. None builds one from the image names.
-    reference_name, moving_name : str
-        Images in ``Data.image`` used to compute the registration: the moving image is deformed onto the reference.
-        Their frames define what the registration applies to.
+        User name in ``Data.deformable``. None builds one from the current image names (a plain label).
+    reference_name, moving_name : str or int
+        Images in ``Data.image`` (name or id) used to compute the registration: the moving image is deformed onto the
+        reference. Their frames define what the registration applies to. Only the ids are kept.
     reference_meshes, moving_meshes : pyvista.PolyData, optional
         Surfaces used for registration (stored as ``reference.mesh`` / ``moving.mesh``).
     local_uid : str, optional
         Existing uid when loading (:meth:`load`). None generates a new one.
+    deformable_id : int, optional
+        Existing id in ``Data.deformable`` when loading. None (or an id already in use) gets a new one.
 
     Attributes
     ----------
+    id : int
+        Permanent id in ``Data.deformable``.
+    deformable_name : str
+        User name, mirrored from ``Data.deformable``. Change it with ``Data.rename_deformable``.
     reference, moving : DeformableSide
-        Image name, frame and registration surface of each side.
+        Image id, frame and registration surface of each side.
+    roi_ids : list of int or None
+        Default ROIs guiding :meth:`compute_registration`.
     visual : DeformableVisual
         Display settings, including the default deformation ``percent``.
     roi : dict
-        Moving ROI meshes deformed into the reference world at ``visual.percent``, for the 3D view (built by
+        ROI id -> moving ROI mesh deformed into the reference world at ``visual.percent``, for the 3D view (built by
         :meth:`update_rois`). The 2D views use :meth:`compute_mesh_slice` instead.
 
     Examples
@@ -417,7 +429,7 @@ class Deformable(object):
     >>> deform.compute_registration('itk_diffeomorphic')
     >>> deform = mia.Data.deformable['DVF_CT 01_CBCT 01']
     """
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
 
     # compute_registration method name -> DeformableITK method, for the image-based SimpleITK / Elastix methods
     ITK_METHODS = {'itk_bspline': 'bspline', 'itk_field': 'displacement_field', 'itk_demons': 'demons',
@@ -430,11 +442,13 @@ class Deformable(object):
 
     def __init__(self, dvf=None, origin=None, spacing=None, dimensions=None, roi_names=None,
                  rigid_matrix=None, dvf_matrix=None, registration_name=None, reference_name=None, moving_name=None,
-                 reference_meshes=None, moving_meshes=None, local_uid=None):
-        self.reference = DeformableSide(reference_name, self._frame_of(reference_name), reference_meshes)
-        self.moving = DeformableSide(moving_name, self._frame_of(moving_name), moving_meshes)
-        self.roi_names = roi_names
-        self.roi = dict.fromkeys(Data.roi_list())
+                 reference_meshes=None, moving_meshes=None, local_uid=None, deformable_id=None):
+        self.id = None
+        reference_id, moving_id = Data.volume_id(reference_name), Data.volume_id(moving_name)
+        self.reference = DeformableSide(reference_id, Data.frame_of(reference_id), reference_meshes)
+        self.moving = DeformableSide(moving_id, Data.frame_of(moving_id), moving_meshes)
+        self.roi_ids = None if roi_names is None else [Data.get_roi_id(roi) for roi in self._as_list(roi_names)]
+        self.roi = dict.fromkeys(Data.roi_ids())
         self.local_uid = generate_uid() if local_uid is None else local_uid
 
         if dvf_matrix is not None and not np.allclose(dvf_matrix, np.identity(3), atol=1e-3):
@@ -459,10 +473,10 @@ class Deformable(object):
         self._display_cache = {}
         self.mesh_slice_cache_size = 2000  # per view, all ROIs together; least-recently-used entries dropped first
 
-        self.deformable_name = self.add_deformable(registration_name)
+        self.deformable_name = self.add_deformable(registration_name, deformable_id=deformable_id)
 
         # the moving image may not be loaded (or was deleted) when a saved registration is loaded
-        if self.dvf is not None and self.moving.image_name in Data.image:
+        if self.dvf is not None and self.moving.image_id in Data.image:
             self.update_rois()
 
     @staticmethod
@@ -472,21 +486,11 @@ class Deformable(object):
         return points @ matrix[:3, :3].T + matrix[:3, 3]
 
     @staticmethod
-    def _frame_of(image_name):
-        """Frame of Reference UID of an image, or its own name when the UID is missing or a placeholder.
-
-        A placeholder (e.g. '00000.00000' from Image) must never make unrelated images share a frame.
-        """
-        try:
-            volume = Data.volume(image_name)
-        except KeyError:
-            volume = None
-
-        frame = None if volume is None else getattr(volume, 'frame_ref', None)
-        if frame is None or not str(frame).strip(' .0'):
-            return image_name
-
-        return str(frame)
+    def _as_list(names):
+        """None stays None, a single name or id becomes a one-item list, anything else becomes a list."""
+        if names is None:
+            return None
+        return [names] if isinstance(names, (str, int, np.integer)) else list(names)
 
     @staticmethod
     def _invert_field(field, origin, spacing, iterations=50, mean_tolerance=1e-3, max_tolerance=1e-1):
@@ -600,8 +604,12 @@ class Deformable(object):
     def load(cls, path):
         """Rebuild a registration from :meth:`save` output and register it in ``Data.deformable``.
 
-        Works before (or without) its images being loaded: the saved frames are kept, the reference and moving meshes
-        come from the file, and the warped ROIs (``roi``) are only built when the moving image is present.
+        Works before (or without) its images being loaded: the saved frames and ids are kept (the image ids must be
+        the ones the images are restored with), the reference and moving meshes come from the file, and the warped
+        ROIs (``roi``) are only built when the moving image is present.
+
+        Schema 1 files (saved with image and ROI names) are read too: the names are looked up, so their images and
+        ROIs must be loaded first.
 
         Examples
         --------
@@ -611,8 +619,9 @@ class Deformable(object):
         """
         with np.load(path, allow_pickle=False) as data:
             record = json.loads(str(data['record']))
-            if record.get('schema', 1) > cls.SCHEMA_VERSION:
-                raise ValueError(f"Record schema {record['schema']} is newer than supported ({cls.SCHEMA_VERSION}).")
+            schema = record.get('schema', 1)
+            if schema > cls.SCHEMA_VERSION:
+                raise ValueError(f"Record schema {schema} is newer than supported ({cls.SCHEMA_VERSION}).")
 
             dvf = data['dvf'] if 'dvf' in data else None
             meshes = {}
@@ -622,11 +631,25 @@ class Deformable(object):
                     faces = data[side + '_faces']
                     meshes[side] = pv.PolyData(data[side + '_points'], faces if faces.size else None)
 
+        if schema == 1:
+            reference_id = Data.volume_id(record['reference']['image_name'])
+            moving_id = Data.volume_id(record['moving']['image_name'])
+            roi_ids = record['roi_names']
+        else:
+            reference_id = record['reference']['image_id']
+            moving_id = record['moving']['image_id']
+            roi_ids = record['roi_ids']
+
+        deformable_id = record.get('id')
+        if deformable_id is not None and deformable_id in Data.deformable:
+            deformable_id = None
+
         deform = cls(dvf=dvf, origin=record['origin'], spacing=record['spacing'],
-                     dimensions=None if dvf is None else dvf.shape[:3], roi_names=record['roi_names'],
+                     dimensions=None if dvf is None else dvf.shape[:3], roi_names=roi_ids,
                      rigid_matrix=np.reshape(record['rigid_matrix'], (4, 4)), registration_name=record['name'],
-                     reference_name=record['reference']['image_name'], moving_name=record['moving']['image_name'],
-                     reference_meshes=meshes['reference'], moving_meshes=meshes['moving'], local_uid=record['uid'])
+                     reference_name=reference_id, moving_name=moving_id,
+                     reference_meshes=meshes['reference'], moving_meshes=meshes['moving'], local_uid=record['uid'],
+                     deformable_id=deformable_id)
 
         # the images may not be loaded, so keep the saved frames instead of the placeholders __init__ derived
         deform.reference.frame = record['reference'].get('frame', deform.reference.frame)
@@ -638,30 +661,30 @@ class Deformable(object):
         """(reference mask, moving mask) as (z, y, x) bool arrays on each image's own grid: the union of the ROI pairs
         (paired by position) that have a shape on both images, or (None, None) when there are none.
 
-        reference_rois None = ``roi_names``; moving_rois None = the same names as reference_rois.
+        Names or ids. reference_rois None = ``roi_ids``; moving_rois None = the same ROIs as reference_rois.
         """
-        reference_rois = self.roi_names if reference_rois is None else reference_rois
+        reference_rois = self.roi_ids if reference_rois is None else reference_rois
         if reference_rois is None:
             return None, None
 
-        reference_rois = [reference_rois] if isinstance(reference_rois, str) else list(reference_rois)
+        reference_rois = [Data.get_roi_id(roi) for roi in self._as_list(reference_rois)]
         if moving_rois is None:
             moving_rois = list(reference_rois)
         else:
-            moving_rois = [moving_rois] if isinstance(moving_rois, str) else list(moving_rois)
+            moving_rois = [Data.get_roi_id(roi) for roi in self._as_list(moving_rois)]
 
         if len(reference_rois) != len(moving_rois):
             raise ValueError(f"reference_rois ({len(reference_rois)}) and moving_rois ({len(moving_rois)}) must "
                              f"pair one-to-one.")
 
-        ref_image = Data.image[self.reference.image_name]
-        mov_image = Data.image[self.moving.image_name]
+        ref_image = Data.image[self.reference.image_id]
+        mov_image = Data.image[self.moving.image_id]
 
         ref_mask = None
         mov_mask = None
-        for ref_name, mov_name in zip(reference_rois, moving_rois):
-            ref_roi = ref_image.roi.get(ref_name)
-            mov_roi = mov_image.roi.get(mov_name)
+        for ref_id, mov_id in zip(reference_rois, moving_rois):
+            ref_roi = ref_image.roi.get(ref_id)
+            mov_roi = mov_image.roi.get(mov_id)
             if ref_roi is None or (ref_roi.mesh is None and ref_roi.contour_pixel is None):
                 continue
             if mov_roi is None or (mov_roi.mesh is None and mov_roi.contour_pixel is None):
@@ -696,10 +719,10 @@ class Deformable(object):
 
     def _record(self):
         """Registration state as plain JSON types. The DVF and the meshes are stored as arrays next to it by save."""
-        return {'schema': self.SCHEMA_VERSION, 'uid': self.local_uid, 'name': self.deformable_name,
-                'reference': {'image_name': self.reference.image_name, 'frame': self.reference.frame},
-                'moving': {'image_name': self.moving.image_name, 'frame': self.moving.frame},
-                'roi_names': None if self.roi_names is None else list(self.roi_names),
+        return {'schema': self.SCHEMA_VERSION, 'id': self.id, 'uid': self.local_uid, 'name': self.deformable_name,
+                'reference': {'image_id': self.reference.image_id, 'frame': self.reference.frame},
+                'moving': {'image_id': self.moving.image_id, 'frame': self.moving.frame},
+                'roi_ids': None if self.roi_ids is None else list(self.roi_ids),
                 'rigid_matrix': np.asarray(self.rigid_matrix, dtype=float).ravel().tolist(),
                 'origin': None if self.origin is None else [float(v) for v in self.origin],
                 'spacing': None if self.spacing is None else [float(v) for v in self.spacing]}
@@ -713,12 +736,12 @@ class Deformable(object):
         so the backends only have to find the deformation. Explicit masks ((z, y, x) on each image's own grid) take
         priority over ROI masks. images=False returns only the reference image (its grid is all a landmark fit needs).
         """
-        ref = Data.image[self.reference.image_name]
+        ref = Data.image[self.reference.image_id]
         fixed = sitk.Cast(ref.create_sitk_image(), sitk.sitkFloat32)
         if not images:
             return fixed, None, None, None
 
-        mov = Data.image[self.moving.image_name]
+        mov = Data.image[self.moving.image_id]
         mov_native = sitk.Cast(mov.create_sitk_image(), sitk.sitkFloat32)
 
         # sitk transforms map output (reference) points to input (moving) points: exactly rigid_matrix.
@@ -781,20 +804,20 @@ class Deformable(object):
 
         return image.array, pre[:3].astype(np.float32), post_index.astype(np.float32), not to_reference
 
-    def _side_of(self, image_name):
-        """The side an image belongs to: by name for the registered images, otherwise by frame of reference.
+    def _side_of(self, image_id):
+        """The side an image id belongs to: by id for the registered images, otherwise by frame of reference.
 
         None when the image is in neither frame, or when both registered images share one frame (then only those two
         images can tell the sides apart).
         """
-        if image_name == self.reference.image_name:
+        if image_id == self.reference.image_id:
             return self.reference
-        if image_name == self.moving.image_name:
+        if image_id == self.moving.image_id:
             return self.moving
         if self.reference.frame == self.moving.frame:
             return None
 
-        frame = self._frame_of(image_name)
+        frame = Data.frame_of(image_id)
         if frame == self.reference.frame:
             return self.reference
         if frame == self.moving.frame:
@@ -803,17 +826,18 @@ class Deformable(object):
         return None
 
     def _sides(self, base_name, image_name):
-        """(base_name, image_name, base side, moved side) for a display call; None names default to the registered
-        reference (base) / moving (image) image, i.e. the moving image deformed onto the reference."""
-        base_name = self.reference.image_name if base_name is None else base_name
-        image_name = self.moving.image_name if image_name is None else image_name
+        """(base id, image id, base side, moved side) for a display call. Names or ids go in, ids come out, so
+        everything after this (sampling, caches) is keyed by id. None defaults to the registered reference (base) /
+        moving (image) image, i.e. the moving image deformed onto the reference."""
+        base_id = self.reference.image_id if base_name is None else Data.volume_id(base_name)
+        image_id = self.moving.image_id if image_name is None else Data.volume_id(image_name)
 
-        base_side, moved_side = self._side_of(base_name), self._side_of(image_name)
+        base_side, moved_side = self._side_of(base_id), self._side_of(image_id)
         if base_side is None or moved_side is None:
-            missing = base_name if base_side is None else image_name
+            missing = Data.volume_label(base_id if base_side is None else image_id)
             raise ValueError(f"'{missing}' is not in a frame of reference connected by '{self.deformable_name}'.")
 
-        return base_name, image_name, base_side, moved_side
+        return base_id, image_id, base_side, moved_side
 
     def _slice_cache_for(self, plane, base_name, grid):
         """
@@ -909,8 +933,9 @@ class Deformable(object):
         a = self._apply_affine(self._rigid_inv(self.rigid_matrix), points)
         return self._solve_points(a, percent / 100)
 
-    def add_deformable(self, deformable_name):
-        """Store this registration in ``Data.deformable``; None builds a unique name from the image names.
+    def add_deformable(self, deformable_name, deformable_id=None):
+        """Store this registration in ``Data.deformable`` and return its name; None builds a unique name from the
+        current image names. A name already in use is replaced and its id taken over.
 
         Examples
         --------
@@ -921,21 +946,22 @@ class Deformable(object):
         'DVF_CT 01_CBCT 01_1'
         """
         if deformable_name is None:
-            if self.reference.image_name is None and self.moving.image_name is None:
+            if self.reference.image_id is None and self.moving.image_id is None:
                 deformable_name = 'DVF_Unknown'
             else:
-                deformable_name = 'DVF_' + self.reference.image_name + '_' + self.moving.image_name
+                deformable_name = ('DVF_' + Data.volume_label(self.reference.image_id) + '_' +
+                                   Data.volume_label(self.moving.image_id))
 
-            if deformable_name in Data.deformable_list():
-                n = 0
-                while n > -1:
+            if deformable_name in Data.deformable:
+                n = 1
+                while deformable_name + '_' + str(n) in Data.deformable:
                     n += 1
-                    new_name = copy.deepcopy(deformable_name + '_' + str(n))
-                    if new_name not in Data.deformable_list():
-                        deformable_name = new_name
-                        n = -100
+                deformable_name = deformable_name + '_' + str(n)
 
-        Data.deformable[deformable_name] = self
+        if deformable_name in Data.deformable:
+            Data.deformable[deformable_name] = self
+        else:
+            Data.deformable.add(self, deformable_name, item_id=deformable_id)
 
         return deformable_name
 
@@ -1047,15 +1073,17 @@ class Deformable(object):
         return np.round(sx / sy, 2)
 
     def compute_components(self, roi_name):
-        """Connected components of a deformed ROI mesh (``self.roi``), or None if it has not been warped.
+        """Connected components of a deformed ROI mesh (``self.roi``, ROI name or id), or None if it has not been
+        warped.
 
         Examples
         --------
         >>> import medicalimageanalysis as mia
         >>> parts = mia.Data.deformable['DVF_CT 01_CBCT 01'].compute_components('Liver')
         """
-        if self.roi[roi_name] is not None:
-            return compute_components(self.roi[roi_name])
+        mesh = self.roi.get(Data.get_roi_id(roi_name))
+        if mesh is not None:
+            return compute_components(mesh)
 
         else:
             return None
@@ -1188,8 +1216,8 @@ class Deformable(object):
 
         Parameters
         ----------
-        roi_name : str
-            ROI on image_name.
+        roi_name : str or int
+            ROI (name or id) on image_name.
         plane : str
             View plane, e.g. 'Axial'.
         position : array_like
@@ -1219,18 +1247,18 @@ class Deformable(object):
         >>> world = deform.compute_mesh_slice('Liver', 'Axial', ct_position, percent=50, return_pixel=False)
         """
         percent = self.visual.percent if percent is None else percent
-        base_name, image_name, _, _ = self._sides(base_name, image_name)
+        base_id, image_id, _, _ = self._sides(base_name, image_name)
 
-        mesh = self.get_display_mesh(roi_name, base_name, image_name, percent=percent)
+        mesh = self.get_display_mesh(roi_name, base_id, image_id, percent=percent)
         if mesh is None:
             return [] if return_pixel else None
 
-        _, grid = self._view_grid(plane, position, base_name, image_name, spacing)
+        _, grid = self._view_grid(plane, position, base_id, image_id, spacing)
 
         if use_cache:
-            entries = self._slice_cache_for(plane, base_name, grid)
-            key = (image_name, roi_name, float(percent), np.round(np.asarray(position, dtype=float), 3).tobytes(),
-                   bool(return_pixel))
+            entries = self._slice_cache_for(plane, base_id, grid)
+            key = (image_id, Data.get_roi_id(roi_name), float(percent),
+                   np.round(np.asarray(position, dtype=float), 3).tobytes(), bool(return_pixel))
             hit = entries.get(key)
             if hit is not None and hit[0] is mesh:
                 entries.move_to_end(key)
@@ -1294,7 +1322,7 @@ class Deformable(object):
             * 'ants_landmark' : field fitted to the points only, ``DeformableANTs.landmark``.
         reference_rois, moving_rois : str or list of str, optional
             ROIs whose masks restrict the metric (ANTs: also the default labels for ``label_weight``), paired by
-            position. reference_rois None = ``roi_names``; moving_rois None = the same names. Pairs missing on either
+            position. reference_rois None = ``roi_ids``; moving_rois None = the same ROIs. Names or ids. Pairs missing on either
             image are skipped.
         reference_mask, moving_mask : numpy.ndarray, optional
             Binary (z, y, x) masks on each image's own grid; override the ROI masks.
@@ -1324,9 +1352,9 @@ class Deformable(object):
         if method not in self.ITK_METHODS and method not in landmark_methods and method != 'ants':
             raise ValueError(f"Unknown method: {method}")
 
-        for name in (self.reference.image_name, self.moving.image_name):
-            if name not in Data.image:
-                raise ValueError(f"'{name}' must be loaded to compute a registration.")
+        for image_id in (self.reference.image_id, self.moving.image_id):
+            if image_id not in Data.image:
+                raise ValueError(f"'{Data.volume_label(image_id)}' must be loaded to compute a registration.")
 
         if (reference_points is None) != (moving_points is None):
             raise ValueError("reference_points and moving_points must be given together.")
@@ -1417,8 +1445,8 @@ class Deformable(object):
         >>> image = deform.create_image()
         >>> halfway = deform.create_image(ratio=0.5)
         """
-        ref = Data.image[self.reference.image_name]
-        volume, pre, post_index, _ = self._sampling_setup(self.moving.image_name, to_reference=True)
+        ref = Data.image[self.reference.image_id]
+        volume, pre, post_index, _ = self._sampling_setup(self.moving.image_id, to_reference=True)
         field = self._get_field()
         field_origin, field_spacing = self._field_grid()
 
@@ -1433,7 +1461,7 @@ class Deformable(object):
             slice_origin = (origin + k * sz * M[2]).astype(np.float32)
             array[k] = _deformable_sample_kernel(volume, field, ny, nx, np.float32(sx), np.float32(sy), slice_origin,
                                                  x_axis, y_axis, pre, field_origin, field_spacing, np.float32(ratio),
-                                                 post_index, np.float32(Data.image[self.moving.image_name].background),
+                                                 post_index, np.float32(Data.image[self.moving.image_id].background),
                                                  False, self.INVERT_ITERATIONS,
                                                  np.float32(self.INVERT_TOLERANCE))
 
@@ -1449,7 +1477,8 @@ class Deformable(object):
 
         Parameters
         ----------
-        roi_name : str
+        roi_name : str or int
+            ROI name or id.
         sitk_image : bool, default True
             True returns a SimpleITK image with the reference geometry, False a (z, y, x) uint8 array.
 
@@ -1460,12 +1489,12 @@ class Deformable(object):
         >>> mask_image = deform.create_roi_image('Liver')
         >>> mask = deform.create_roi_image('Liver', sitk_image=False)
         """
-        mesh = self.roi[roi_name].triangulate()
+        mesh = self.roi[Data.get_roi_id(roi_name)].triangulate()
 
         image = vtk.vtkImageData()
-        image.SetDimensions(np.flip(Data.image[self.reference.image_name].dimensions))
-        image.SetSpacing(Data.image[self.reference.image_name].spacing)
-        image.SetOrigin(Data.image[self.reference.image_name].origin)
+        image.SetDimensions(np.flip(Data.image[self.reference.image_id].dimensions))
+        image.SetSpacing(Data.image[self.reference.image_id].spacing)
+        image.SetOrigin(Data.image[self.reference.image_id].origin)
         image.AllocateScalars(vtk.VTK_UNSIGNED_CHAR, 1)
         image.GetPointData().GetScalars().Fill(0)      # AllocateScalars leaves the memory uninitialized
 
@@ -1484,10 +1513,10 @@ class Deformable(object):
         stencil.Update()
         out = stencil.GetOutput()
         array = numpy_support.vtk_to_numpy(out.GetPointData().GetScalars())
-        mask = array.reshape(Data.image[self.reference.image_name].dimensions)  # z,y,x
+        mask = array.reshape(Data.image[self.reference.image_id].dimensions)  # z,y,x
 
         if sitk_image:
-            ref_image = Data.image[self.reference.image_name].create_sitk_image()
+            ref_image = Data.image[self.reference.image_id].create_sitk_image()
             mask_image = sitk.GetImageFromArray(mask)
             mask_image.CopyInformation(ref_image)
 
@@ -1505,7 +1534,7 @@ class Deformable(object):
         >>> import medicalimageanalysis as mia
         >>> mia.Data.deformable['DVF_CT 01_CBCT 01'].export_image('C:/Data/cbct_deformed.mhd')
         """
-        if self.moving.image_name is not None and path is not None:
+        if self.moving.image_id is not None and path is not None:
             image = self.create_image()
 
             sitk.WriteImage(image, path)
@@ -1526,9 +1555,13 @@ class Deformable(object):
         >>> on_cbct = deform.get_display_mesh('Liver', base_name='CBCT 01', image_name='CT 01')
         """
         percent = self.visual.percent if percent is None else percent
-        base_name, image_name, base_side, moved_side = self._sides(base_name, image_name)
+        base_id, image_id, base_side, moved_side = self._sides(base_name, image_name)
 
-        source = Data.volume(image_name).roi.get(roi_name)     # a dose has no ROIs -> None
+        if not Data.has_roi(roi_name):
+            return None
+        roi_id = Data.get_roi_id(roi_name)
+
+        source = Data.volume(image_id).roi.get(roi_id)     # a dose has no ROIs -> None
         if source is None or source.mesh is None:
             return None
 
@@ -1539,7 +1572,7 @@ class Deformable(object):
             return None
 
         to_reference = moved_side is self.moving
-        key = ('mesh', to_reference, image_name, roi_name, float(percent), id(self.dvf), id(source.mesh),
+        key = ('mesh', to_reference, image_id, roi_id, float(percent), id(self.dvf), id(source.mesh),
                np.asarray(self.rigid_matrix, dtype=float).tobytes())
         mesh = self._display_cache.get(key)
         if mesh is None:
@@ -1560,7 +1593,7 @@ class Deformable(object):
         >>> import medicalimageanalysis as mia
         >>> col, row = mia.Data.deformable['DVF_CT 01_CBCT 01'].get_view_center('Axial', ct_position)
         """
-        base_name = self.reference.image_name if base_name is None else base_name
+        base_name = self.reference.image_id if base_name is None else base_name
         base = Data.volume(base_name).display
         grid = base.get_grid(plane, position)
         d = base.crosshair - grid['origin']
@@ -1587,7 +1620,8 @@ class Deformable(object):
 
         Parameters
         ----------
-        roi_name : str
+        roi_name : str or int
+            ROI name or id.
         set_moving : bool, default True
             Replace the moving image's ROI mesh with the mapped one.
         return_mesh : bool, default False
@@ -1600,17 +1634,18 @@ class Deformable(object):
         >>> deform.map_mesh('Liver')                                                   # update the CBCT's Liver
         >>> mesh = deform.map_mesh('Liver', set_moving=False, return_mesh=True)       # just look at it
         """
-        if self.roi[roi_name] is None:
-            self.update_rois(roi_name)
+        roi_id = Data.get_roi_id(roi_name)
+        if self.roi.get(roi_id) is None:
+            self.update_rois(roi_id)
 
-        if self.roi[roi_name] is None or self.dvf is None:
+        if self.roi.get(roi_id) is None or self.dvf is None:
             return None
 
         # reference world -> moving native world is the direct direction of dvf (no solve needed)
-        mapped_mesh = copy.deepcopy(self.roi[roi_name])
-        mapped_mesh.points = self._warp_to_moving(self.roi[roi_name].points, percent=self.visual.percent)
+        mapped_mesh = copy.deepcopy(self.roi[roi_id])
+        mapped_mesh.points = self._warp_to_moving(self.roi[roi_id].points, percent=self.visual.percent)
         if set_moving:
-            Data.image[self.moving.image_name].roi[roi_name].update_mesh(mapped_mesh)
+            Data.image[self.moving.image_id].roi[roi_id].update_mesh(mapped_mesh)
 
         if return_mesh:
             return mapped_mesh
@@ -1671,8 +1706,8 @@ class Deformable(object):
 
         Parameters
         ----------
-        roi_name : str, optional
-            Only this ROI. None = every ROI.
+        roi_name : str or int, optional
+            Only this ROI (name or id). None = every ROI.
 
         Examples
         --------
@@ -1680,20 +1715,24 @@ class Deformable(object):
         >>> deform = mia.Data.deformable['DVF_CT 01_CBCT 01']
         >>> deform.update_rois()
         >>> deform.update_rois('Liver')
-        >>> liver_on_ct = deform.roi['Liver']
+        >>> liver_on_ct = deform.roi[mia.Data.get_roi_id('Liver')]
         """
-        for name in list(self.roi.keys()):
-            if name not in Data.roi_list():
-                del self.roi[name]
+        only_id = None if roi_name is None else Data.get_roi_id(roi_name)
+        roi_ids = Data.roi_ids()
 
-        for name in Data.roi_list():
-            if name not in list(self.roi.keys()):
-                self.roi[name] = None
+        for roi_id in list(self.roi.keys()):
+            if roi_id not in roi_ids:
+                del self.roi[roi_id]
 
-        for name in Data.roi_list():
-            if roi_name is None or name == roi_name:
-                roi = Data.image[self.moving.image_name].roi[name]
-                if roi.mesh is not None and roi.visible:
+        for roi_id in roi_ids:
+            if roi_id not in self.roi:
+                self.roi[roi_id] = None
+
+        moving = Data.image[self.moving.image_id]
+        for roi_id in roi_ids:
+            if only_id is None or roi_id == only_id:
+                roi = moving.roi.get(roi_id)
+                if roi is not None and roi.mesh is not None and roi.visible:
                     mesh = roi.mesh.copy()
                     mesh.points = self._warp_to_reference(roi.mesh.points, percent=self.visual.percent)
-                    self.roi[name] = mesh
+                    self.roi[roi_id] = mesh

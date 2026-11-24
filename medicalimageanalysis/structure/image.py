@@ -25,6 +25,9 @@ Description:
       ``Rigid.get_display_matrix``. Identity or None = no registration.
     * ``Image.background`` is the value shown outside the volume (-3001 for images). Subclasses override it, e.g.
       ``Dose.background`` is 0 Gy. Color images always use 0.
+    * Images, ROIs and POIs have a permanent integer ``id`` (database key) and a user name that can change. Both look
+      them up: ``image.roi[3]`` and ``image.roi['Liver']``. An ROI/POI exists only on an image; a name has the same id
+      on every image (``Data.new_roi_id``). Rename through ``Data.rename_image`` / ``rename_roi`` / ``rename_poi``.
 
 Structure:
     - _fused_oblique_sample_kernel: numba kernel that trilinearly samples one oblique slice.
@@ -69,6 +72,7 @@ from ..utils.roi.to_contours import mask_to_contours
 from .poi import Poi
 from .roi import Roi
 from ..data import Data
+from ..registry import Registry
 
 
 @njit(parallel=True, fastmath=True, nogil=True, cache=True)
@@ -636,6 +640,13 @@ class Image(object):
     ----------
     background : float
         Class attribute: value shown outside the volume when it is resliced (-3001). Subclasses override it.
+    id : int | None
+        Permanent id, written by ``Data.image`` when the image is registered. None until then.
+    image_name : str
+        User name, mirrored from ``Data.image``. Change it with ``Data.rename_image``.
+    roi, poi : Registry
+        ROIs / POIs by permanent id or name. Their ids come from ``Data.new_roi_id`` / ``Data.new_poi_id``, so an ROI
+        has the same id on every image. Rename them with ``Data.rename_roi`` / ``Data.rename_poi``, not on one image.
 
     Examples
     --------
@@ -643,12 +654,19 @@ class Image(object):
     >>> mia.read_mhd(file='C:/Data/scan.mhd', modality='CT')
     >>> image = mia.Data.image[mia.Data.image_list()[0]]
     >>> image.origin, image.spacing, image.array.shape
+
+    ROIs by name or id
+
+    >>> roi_id = mia.Data.get_roi_id('Liver')
+    >>> image.roi['Liver'] is image.roi[roi_id]
+    True
     """
     background = -3001.0
 
     def __init__(self, image):
-        self.roi = {}
-        self.poi = {}
+        self.id = None
+        self.roi = Registry(id_source=lambda name, item: Data.new_roi_id(name))
+        self.poi = Registry(id_source=lambda name, item: Data.new_poi_id(name))
 
         self.tags = image.image_set
         self.array = np.ascontiguousarray(image.array)
@@ -703,8 +721,10 @@ class Image(object):
         """Restore metadata-only state with empty array/ROI/POI containers, and point the display back at this image."""
         self.__dict__.update(state)
         self.array = None
-        self.roi = {}
-        self.poi = {}
+        self.roi = Registry(id_source=lambda name, item: Data.new_roi_id(name))
+        self.poi = Registry(id_source=lambda name, item: Data.new_poi_id(name))
+        if 'id' not in state:
+            self.id = None   # metadata saved before ids existed
 
         # load_metadata copies another instance's state in, so its display would still reslice that instance.
         display = self.__dict__.get('display')
@@ -720,16 +740,24 @@ class Image(object):
         return default
 
     def _register(self):
-        """Store this image in its registry (``Data.image``). Subclasses override it (Dose -> ``Data.dose``)."""
-        Data.image[self.image_name] = self
+        """Store this image in its registry (``Data.image``). Subclasses override it (Dose -> ``Data.dose``).
 
-    def add_poi(self, poi_name=None, color=None, visible=False, path=None, point=None):
+        A loaded image keeps its saved id. If its name is already registered, it replaces that entry and takes its id.
+        """
+        if self.image_name in Data.image:
+            Data.image[self.image_name] = self
+        else:
+            Data.image.add(self, self.image_name, item_id=self.id)
+
+    def add_poi(self, poi_name=None, color=None, visible=False, path=None, point=None, match=True):
         """Add a point of interest at a world position.
+
+        The POI gets the id poi_name already has on another image, or a new one (``Data.new_poi_id``).
 
         Parameters
         ----------
         poi_name : str, optional
-            Key in ``self.poi``.
+            Name in ``self.poi``.
         color : list of int, optional
             RGB, 0-255.
         visible : bool, default False
@@ -738,22 +766,28 @@ class Image(object):
             Source file.
         point : (3,) array_like, optional
             World position (x, y, z).
+        match : bool, default True
+            Run ``Data.match_pois`` afterwards. ``match_pois`` itself passes False.
 
         Examples
         --------
         >>> import medicalimageanalysis as mia
         >>> mia.Data.image['CT 01'].add_poi('Iso', color=[255, 0, 0], point=[0.0, -20.0, 15.5])
+        >>> mia.Data.image['CT 01'].poi['Iso'].id
         """
         self.poi[poi_name] = Poi(self, position=point, name=poi_name, color=color, visible=visible, filepaths=path)
-        Data.match_pois()
+        if match:
+            Data.match_pois()
 
-    def add_roi(self, roi_name=None, color=None, visible=False, path=None, contour=None, plane='Axial'):
+    def add_roi(self, roi_name=None, color=None, visible=False, path=None, contour=None, plane='Axial', match=True):
         """Add an ROI from world-space contours.
+
+        The ROI gets the id roi_name already has on another image, or a new one (``Data.new_roi_id``).
 
         Parameters
         ----------
         roi_name : str, optional
-            Key in ``self.roi``.
+            Name in ``self.roi``.
         color : list of int, optional
             RGB, 0-255.
         visible : bool, default False
@@ -764,15 +798,20 @@ class Image(object):
             World-space contour points.
         plane : str, default 'Axial'
             Plane the contours were drawn on.
+        match : bool, default True
+            Run ``Data.match_rois`` afterwards. ``match_rois`` itself passes False.
 
         Examples
         --------
         >>> import medicalimageanalysis as mia
         >>> mia.Data.image['CT 01'].add_roi('Liver', color=[0, 255, 0], contour=contours)
+        >>> mia.Data.image['CT 01'].roi['Liver'].id == mia.Data.image['MR 01'].roi['Liver'].id
+        True
         """
         self.roi[roi_name] = Roi(self, position=contour, name=roi_name, color=color, visible=visible, filepaths=path,
                                   plane=plane)
-        Data.match_rois()
+        if match:
+            Data.match_rois()
 
     def compute_corner_positions(self):
         """(8, 3) world positions of the corner voxel centers.
@@ -1167,17 +1206,26 @@ class Image(object):
                 self.load_unencrypted_pois(os.path.join(image_path, 'POIs', name))
 
     def load_unencrypted_pois(self, poi_path):
-        """Load one POI folder. A name that already exists gets a _1, _2, ... suffix.
+        """Load one POI folder, keeping its saved id when it doesn't clash.
+
+        A name already on this image gets a _1, _2, ... suffix and a new id. A name already on another image takes
+        that image's id, so one name never has two ids. The saved id is also dropped when another POI already uses it.
+        Folders saved before ids existed get a new id.
 
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image.load_unencrypted_pois('C:/Data/CT 01/POIs/Iso')
+        >>> image.load_unencrypted_pois('C:/Data/CT 01/POIs/3')
         """
         name = str(np.load(os.path.join(poi_path, 'name.npy'), allow_pickle=True))
 
+        poi_id = None
+        if os.path.exists(os.path.join(poi_path, 'id.npy')):
+            poi_id = int(np.load(os.path.join(poi_path, 'id.npy'), allow_pickle=True))
+
         existing_pois = list(self.poi.keys())
         if name in existing_pois:
+            poi_id = None
             n = 0
             while n >= 0:
                 n += 1
@@ -1186,8 +1234,11 @@ class Image(object):
                     name = new_name
                     n = -1
 
-        self.poi[name] = Poi(self)
-        self.poi[name].name = name
+        if Data.has_poi(name):                                    # on another image: one id per name
+            poi_id = Data.get_poi_id(name)
+        elif poi_id is not None and Data.has_poi(poi_id):           # saved id now belongs to another POI
+            poi_id = None
+        self.poi.add(Poi(self), name, item_id=poi_id)        # None -> Data.new_poi_id
         self.poi[name].visible = bool(np.load(os.path.join(poi_path, 'visible.npy'), allow_pickle=True))
         self.poi[name].color = list(np.load(os.path.join(poi_path, 'color.npy'), allow_pickle=True))
         self.poi[name].filepaths = str(np.load(os.path.join(poi_path, 'filepaths.npy'), allow_pickle=True))
@@ -1197,17 +1248,26 @@ class Image(object):
                                                          allow_pickle=True))
 
     def load_unencrypted_rois(self, roi_path):
-        """Load one ROI folder. A name that already exists gets a _1, _2, ... suffix.
+        """Load one ROI folder, keeping its saved id when it doesn't clash.
+
+        A name already on this image gets a _1, _2, ... suffix and a new id. A name already on another image takes
+        that image's id, so one name never has two ids. The saved id is also dropped when another ROI already uses it.
+        Folders saved before ids existed get a new id.
 
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image.load_unencrypted_rois('C:/Data/CT 01/ROIs/Liver')
+        >>> image.load_unencrypted_rois('C:/Data/CT 01/ROIs/1')
         """
         name = str(np.load(os.path.join(roi_path, 'name.npy'), allow_pickle=True))
 
+        roi_id = None
+        if os.path.exists(os.path.join(roi_path, 'id.npy')):
+            roi_id = int(np.load(os.path.join(roi_path, 'id.npy'), allow_pickle=True))
+
         existing_rois = list(self.roi.keys())
         if name in existing_rois:
+            roi_id = None
             n = 0
             while n >= 0:
                 n += 1
@@ -1216,8 +1276,11 @@ class Image(object):
                     name = new_name
                     n = -1
 
-        self.roi[name] = Roi(self)
-        self.roi[name].name = name
+        if Data.has_roi(name):                                    # on another image: one id per name
+            roi_id = Data.get_roi_id(name)
+        elif roi_id is not None and Data.has_roi(roi_id):           # saved id now belongs to another ROI
+            roi_id = None
+        self.roi.add(Roi(self), name, item_id=roi_id)        # None -> Data.new_roi_id
         self.roi[name].visible = bool(np.load(os.path.join(roi_path, 'visible.npy'), allow_pickle=True))
         self.roi[name].color = list(np.load(os.path.join(roi_path, 'color.npy'), allow_pickle=True))
         self.roi[name].filepaths = str(np.load(os.path.join(roi_path, 'filepaths.npy'), allow_pickle=True))
@@ -1310,8 +1373,9 @@ class Image(object):
             self.save_unencrypted_pois(path, create_main_folder=True)
 
     def save_unencrypted_pois(self, path, create_main_folder=False):
-        """Write one folder per POI (name, visible, color, filepaths, point_position) under path.
+        """Write one folder per POI (id, name, visible, color, filepaths, point_position) under path.
 
+        Folders are named by the permanent POI id, so renaming a POI never moves its folder.
         create_main_folder=True puts them in a new 'POIs' subfolder.
 
         Examples
@@ -1323,19 +1387,22 @@ class Image(object):
             path = os.path.join(path, 'POIs')
             os.mkdir(path)
 
-        for name in list(self.poi.keys()):
-            poi_path = os.path.join(os.path.join(path, name))
+        for poi_id in self.poi.ids():
+            poi = self.poi[poi_id]
+            poi_path = os.path.join(path, str(poi_id))
             os.mkdir(poi_path)
 
-            np.save(os.path.join(poi_path, 'name.npy'), self.poi[name].name, allow_pickle=True)
-            np.save(os.path.join(poi_path, 'visible.npy'), self.poi[name].visible, allow_pickle=True)
-            np.save(os.path.join(poi_path, 'color.npy'), self.poi[name].color, allow_pickle=True)
-            np.save(os.path.join(poi_path, 'filepaths.npy'), self.poi[name].filepaths, allow_pickle=True)
-            np.save(os.path.join(poi_path, 'point_position.npy'), self.poi[name].point_position, allow_pickle=True)
+            np.save(os.path.join(poi_path, 'id.npy'), poi_id, allow_pickle=True)
+            np.save(os.path.join(poi_path, 'name.npy'), poi.name, allow_pickle=True)
+            np.save(os.path.join(poi_path, 'visible.npy'), poi.visible, allow_pickle=True)
+            np.save(os.path.join(poi_path, 'color.npy'), poi.color, allow_pickle=True)
+            np.save(os.path.join(poi_path, 'filepaths.npy'), poi.filepaths, allow_pickle=True)
+            np.save(os.path.join(poi_path, 'point_position.npy'), poi.point_position, allow_pickle=True)
 
     def save_unencrypted_rois(self, path, create_main_folder=False):
-        """Write one folder per ROI (name, visible, color, filepaths, contour_position) under path.
+        """Write one folder per ROI (id, name, visible, color, filepaths, contour_position) under path.
 
+        Folders are named by the permanent ROI id, so renaming an ROI never moves its folder.
         create_main_folder=True puts them in a new 'ROIs' subfolder.
 
         Examples
@@ -1347,15 +1414,17 @@ class Image(object):
             path = os.path.join(path, 'ROIs')
             os.mkdir(path)
 
-        for name in list(self.roi.keys()):
-            roi_path = os.path.join(os.path.join(path, name))
+        for roi_id in self.roi.ids():
+            roi = self.roi[roi_id]
+            roi_path = os.path.join(path, str(roi_id))
             os.mkdir(roi_path)
 
-            np.save(os.path.join(roi_path, 'name.npy'), self.roi[name].name, allow_pickle=True)
-            np.save(os.path.join(roi_path, 'visible.npy'), self.roi[name].visible, allow_pickle=True)
-            np.save(os.path.join(roi_path, 'color.npy'), self.roi[name].color, allow_pickle=True)
-            np.save(os.path.join(roi_path, 'filepaths.npy'), self.roi[name].filepaths, allow_pickle=True)
-            if self.roi[name].contour_position is not None:
+            np.save(os.path.join(roi_path, 'id.npy'), roi_id, allow_pickle=True)
+            np.save(os.path.join(roi_path, 'name.npy'), roi.name, allow_pickle=True)
+            np.save(os.path.join(roi_path, 'visible.npy'), roi.visible, allow_pickle=True)
+            np.save(os.path.join(roi_path, 'color.npy'), roi.color, allow_pickle=True)
+            np.save(os.path.join(roi_path, 'filepaths.npy'), roi.filepaths, allow_pickle=True)
+            if roi.contour_position is not None:
                 np.save(os.path.join(roi_path, 'contour_position.npy'),
-                        np.array(self.roi[name].contour_position, dtype=object),
+                        np.array(roi.contour_position, dtype=object),
                         allow_pickle=True)

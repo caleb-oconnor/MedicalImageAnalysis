@@ -21,10 +21,14 @@ Description:
     * Display calls name their own images: ``base_name`` is the image whose view is shown, ``image_name`` the image
       resliced onto it. Each view (and each overlay in a view) is its own call, so any number of views can share one
       registration. Leaving both out shows the registered moving image on the registered reference image.
-    * An image with no usable Frame of Reference UID is its own frame. When both registered images share a frame, the
-      registration only applies to those two images.
-    * The JSON state holds only 4x4 matrices, names, frames, indices and ROI names. Image arrays, masks,
-      points and meshes are never saved.
+    * Ids are in charge: the registration stores image ids and ROI ids, never names. Every argument that names an
+      image, ROI or registration (``base_name``, ``image_name``, ``reference_rois``, ``parent_name``, ...) accepts the
+      user name or the permanent id; it is turned into the id once on the way in (``Data.volume_id``,
+      ``Data.get_roi_id``), so renaming anything never breaks a registration.
+    * An image with no usable Frame of Reference UID is its own frame (``Data.frame_of``). When both registered images
+      share a frame, the registration only applies to those two images.
+    * The JSON state holds only 4x4 matrices, ids, frames and indices. Image arrays, masks, points and meshes are
+      never saved.
 
 Structure:
     - RigidSide: image name, frame, z-slice selection and ROI names for one side. Built by Rigid.
@@ -86,17 +90,17 @@ class RigidSide:
 
     Attributes
     ----------
-    image_name : str
-        The image this side was registered with (key into ``Data.image``).
+    image_id : int
+        Permanent id of the image this side was registered with (``Data.image[image_id]``).
     frame : str
-        Frame of Reference UID shared by every image on this side; the image name when the image has none.
+        Frame of Reference UID shared by every image on this side; 'volume:<id>' when the image has none.
     indices : list of int or None
-        z-indices of ``image_name`` used for computation. None = all slices. The matching SOP Instance UIDs are
-        ``Data.image[image_name].sops[i]``.
-    rois : list of str
-        ROI names on ``image_name``, paired by position with the other side's ``rois``.
+        z-indices of the image used for computation. None = all slices. The matching SOP Instance UIDs are
+        ``Data.image[image_id].sops[i]``.
+    rois : list of int
+        ROI ids, paired by position with the other side's ``rois``.
     """
-    image_name: str
+    image_id: int
     frame: str
     indices: list | None = None
     rois: list = field(default_factory=list)
@@ -129,34 +133,47 @@ class Rigid(object):
 
     Parameters
     ----------
-    reference_name, moving_name : str
-        Images in ``Data.image`` used to compute the registration. Their frames define what it applies to.
+    reference_name, moving_name : str or int
+        Images in ``Data.image`` (name or id) used to compute the registration. Their frames define what it applies
+        to. Only the ids are kept.
     rigid_name : str, optional
-        Lookup key in ``Data.rigid``. None builds one from the image names.
-    parent_name : str, optional
-        Registration this one is built on; it must connect the same two frames. Its result is the base of this one
-        and is followed live while it exists; the last known base is kept (and saved) so this registration survives
-        the parent being deleted.
+        User name in ``Data.rigid``. None builds one from the current image names (a plain label: it is not updated
+        when an image is renamed).
+    parent_name : str or int, optional
+        Registration (name or id) this one is built on; it must connect the same two frames. Its result is the base
+        of this one and is followed live while it exists; the last known base is kept (and saved) so this
+        registration survives the parent being deleted.
     reference_indices, moving_indices : list of int, optional
         z-slices used on each side (e.g. ultrasound frames). None = all slices.
     matrix : (4, 4) array_like, optional
         This registration's own step (reference -> moving). Defaults to identity.
     local_uid : str, optional
         Existing uid when loading (:meth:`from_json`). None generates a new one.
+    rigid_id : int, optional
+        Existing id in ``Data.rigid`` when loading. None (or an id already in use) gets a new one.
+
+    Attributes
+    ----------
+    id : int
+        Permanent id in ``Data.rigid``.
+    rigid_name : str
+        User name, mirrored from ``Data.rigid``. Change it with ``Data.rename_rigid``.
 
     Examples
     --------
     >>> import medicalimageanalysis as mia
     >>> rigid = mia.Rigid('CT 01', 'MR 01')
+    >>> rigid = mia.Rigid(1, 2)                                   # same, by image id
     >>> rigid = mia.Rigid('CT 01', 'US 01', moving_indices=[10, 11, 12])
     >>> left = mia.Rigid('CT 01', 'CBCT 01', rigid_name='left hip', parent_name='right hip')
     """
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
 
     def __init__(self, reference_name, moving_name, rigid_name=None, parent_name=None, reference_indices=None,
-                 moving_indices=None, matrix=None, local_uid=None):
-        self.reference = self._make_side(reference_name, reference_indices)
-        self.moving = self._make_side(moving_name, moving_indices)
+                 moving_indices=None, matrix=None, local_uid=None, rigid_id=None):
+        self.id = None
+        self.reference = self._make_side(Data.volume_id(reference_name), reference_indices)
+        self.moving = self._make_side(Data.volume_id(moving_name), moving_indices)
         self.local_uid = generate_uid() if local_uid is None else local_uid
 
         self.matrix = np.identity(4) if matrix is None else np.asarray(matrix, dtype=float)
@@ -172,36 +189,19 @@ class Rigid(object):
 
         self.visual = RigidVisual()
 
-        self.rigid_name = self.add_rigid(rigid_name)
+        self.rigid_name = self.add_rigid(rigid_name, rigid_id=rigid_id)
 
     @staticmethod
     def _as_list(names):
-        """None stays None, a single name becomes a one-item list, anything else becomes a list."""
+        """None stays None, a single name or id becomes a one-item list, anything else becomes a list."""
         if names is None:
             return None
-        return [names] if isinstance(names, str) else list(names)
+        return [names] if isinstance(names, (str, int, np.integer)) else list(names)
 
     @staticmethod
-    def _frame_of(image_name):
-        """Frame of Reference UID of an image, or its own name when the UID is missing or a placeholder.
-
-        A placeholder (e.g. '00000.00000' from Image.get_frame_ref) must never make unrelated images share a frame.
-        """
-        try:
-            volume = Data.volume(image_name)
-        except KeyError:
-            volume = None
-
-        frame = None if volume is None else getattr(volume, 'frame_ref', None)
-        if frame is None or not str(frame).strip(' .0'):
-            return image_name
-
-        return str(frame)
-
-    @staticmethod
-    def _make_side(image_name, indices=None, frame=None):
-        """RigidSide with clean int indices; frame read from the image unless given."""
-        return RigidSide(image_name, Rigid._frame_of(image_name) if frame is None else frame,
+    def _make_side(image_id, indices=None, frame=None):
+        """RigidSide with clean int indices; frame read from the image (``Data.frame_of``) unless given."""
+        return RigidSide(image_id, Data.frame_of(image_id) if frame is None else frame,
                          None if indices is None else [int(i) for i in indices])
 
     @staticmethod
@@ -272,7 +272,7 @@ class Rigid(object):
 
         indices = [i for i in side.indices if 0 <= i < shape[0]]
         if not indices:
-            raise ValueError(f"None of the indices {side.indices} are inside '{side.image_name}' (z = {shape[0]}).")
+            raise ValueError(f"None of the indices {side.indices} are inside '{Data.volume_label(side.image_id)}' (z = {shape[0]}).")
 
         mask = np.zeros(shape, dtype=np.uint8)
         mask[indices] = 1
@@ -288,7 +288,8 @@ class Rigid(object):
 
     @staticmethod
     def find_rigids(image_a, image_b):
-        """Names of every registration in ``Data.rigid`` that connects the frames of two images (either direction).
+        """Names of every registration in ``Data.rigid`` that connects the frames of two images (name or id, either
+        direction). Use ``Data.rigid.get_id`` on a result for its id.
 
         Several can match, e.g. 'right hip' and 'left hip' between the same CT and CBCT.
 
@@ -304,8 +305,12 @@ class Rigid(object):
     def from_json(cls, text):
         """Rebuild a registration from :meth:`to_json` output and register it in ``Data.rigid``.
 
-        The saved frames are kept, so it works before its images are loaded. The parent is found again by uid when it
-        is loaded too; otherwise the saved base matrix is used.
+        The saved frames and ids are kept, so it works before its images are loaded (the image ids must be the ones
+        the images are restored with). The parent is found again by uid when it is loaded too; otherwise the saved
+        base matrix is used.
+
+        Schema 1 records (saved with image and ROI names) are read too: the names are looked up, so their images and
+        ROIs must be loaded first.
 
         Examples
         --------
@@ -314,17 +319,29 @@ class Rigid(object):
         ...     rigid = mia.Rigid.from_json(f.read())
         """
         record = json.loads(text)
-        if record.get('schema', 1) > cls.SCHEMA_VERSION:
-            raise ValueError(f"Record schema {record['schema']} is newer than supported ({cls.SCHEMA_VERSION}).")
+        schema = record.get('schema', 1)
+        if schema > cls.SCHEMA_VERSION:
+            raise ValueError(f"Record schema {schema} is newer than supported ({cls.SCHEMA_VERSION}).")
 
         reference, moving = record['reference'], record['moving']
-        rigid = cls(reference['image_name'], moving['image_name'], rigid_name=record['name'],
-                    matrix=np.reshape(record['matrix'], (4, 4)), local_uid=record['uid'])
+        if schema == 1:
+            image_ids = [Data.volume_id(reference['image_name']), Data.volume_id(moving['image_name'])]
+            roi_ids = [[Data.get_roi_id(name) for name in side['rois']] for side in (reference, moving)]
+        else:
+            image_ids = [reference['image_id'], moving['image_id']]
+            roi_ids = [list(side['rois']) for side in (reference, moving)]
 
-        rigid.reference = cls._make_side(reference['image_name'], reference['indices'], reference.get('frame'))
-        rigid.moving = cls._make_side(moving['image_name'], moving['indices'], moving.get('frame'))
-        rigid.reference.rois = list(reference['rois'])
-        rigid.moving.rois = list(moving['rois'])
+        rigid_id = record.get('id')
+        if rigid_id is not None and rigid_id in Data.rigid:
+            rigid_id = None
+
+        rigid = cls(image_ids[0], image_ids[1], rigid_name=record['name'],
+                    matrix=np.reshape(record['matrix'], (4, 4)), local_uid=record['uid'], rigid_id=rigid_id)
+
+        rigid.reference = cls._make_side(image_ids[0], reference['indices'], reference.get('frame'))
+        rigid.moving = cls._make_side(image_ids[1], moving['indices'], moving.get('frame'))
+        rigid.reference.rois = roi_ids[0]
+        rigid.moving.rois = roi_ids[1]
         rigid.parent_uid = record['parent_uid']
         rigid.base_matrix = np.reshape(np.asarray(record['base_matrix'], dtype=float), (4, 4))
 
@@ -348,7 +365,7 @@ class Rigid(object):
         """
         helper = RigidITK()
         for side, is_reference, mask in ((self.reference, True, reference_mask), (self.moving, False, moving_mask)):
-            image = Data.image[side.image_name]
+            image = Data.image[side.image_id]
             direction = np.asarray(image.matrix, dtype=float).T     # rows = axes -> sitk columns = axes
 
             if images:
@@ -405,13 +422,13 @@ class Rigid(object):
 
         return None
 
-    def _merge_roi_meshes(self, image_name, roi_names):
+    def _merge_roi_meshes(self, image_id, roi_ids):
         """One PolyData from several ROI meshes on the same image (world coordinates, never modified)."""
         meshes = []
-        for name in roi_names:
-            roi = Data.image[image_name].roi.get(name)
+        for roi_id in roi_ids:
+            roi = Data.image[image_id].roi.get(roi_id)
             if roi is None or roi.mesh is None:
-                raise ValueError(f"ROI '{name}' has no mesh on '{image_name}'.")
+                raise ValueError(f"ROI '{self._roi_label(roi_id)}' has no mesh on '{Data.volume_label(image_id)}'.")
             meshes.append(roi.mesh)
 
         if len(meshes) == 1:
@@ -431,11 +448,11 @@ class Rigid(object):
         Uses the registered image even when another image of the same frame is displayed, so every image moved
         through this registration animates about the same point.
         """
-        image = Data.image[side.image_name]
+        image = Data.image[side.image_id]
 
         bounds = []
-        for name in side.rois:
-            roi = image.roi.get(name)
+        for roi_id in side.rois:
+            roi = image.roi.get(roi_id)
             if roi is not None and roi.mesh is not None:
                 bounds.append(roi.mesh.bounds)
 
@@ -447,34 +464,45 @@ class Rigid(object):
 
     def _record(self):
         """Registration state as plain JSON types (no arrays other than the 4x4 matrices as lists)."""
-        return {'schema': self.SCHEMA_VERSION, 'uid': self.local_uid, 'name': self.rigid_name,
+        return {'schema': self.SCHEMA_VERSION, 'id': self.id, 'uid': self.local_uid, 'name': self.rigid_name,
                 'reference': asdict(self.reference), 'moving': asdict(self.moving),
                 'matrix': self._matrix_list(self.matrix), 'parent_uid': self.parent_uid,
                 'base_matrix': self._matrix_list(self.get_base_matrix())}
 
-    def _roi_on_image(self, roi_name, image_name, moved_side):
-        """Name of the ROI to slice on image_name: a paired name from the other side is mapped when image_name is
-        the moved side's registered image; otherwise roi_name is used as given."""
+    def _roi_label(self, roi_id):
+        """Current ROI name for messages, or 'id <n>' when the ROI no longer exists."""
+        return Data.get_roi_name(roi_id) if Data.has_roi(roi_id) else f'id {roi_id}'
+
+    def _roi_on_image(self, roi_key, image_id, moved_side):
+        """Id of the ROI to slice on image_id: a paired ROI from the other side is mapped when image_id is the moved
+        side's registered image; otherwise the ROI is used as given."""
+        roi_id = Data.get_roi_id(roi_key)
         other = self.reference if moved_side is self.moving else self.moving
-        if image_name == moved_side.image_name and roi_name not in moved_side.rois and roi_name in other.rois:
-            return moved_side.rois[other.rois.index(roi_name)]
+        if image_id == moved_side.image_id and roi_id not in moved_side.rois and roi_id in other.rois:
+            return moved_side.rois[other.rois.index(roi_id)]
 
-        return roi_name
+        return roi_id
 
-    def _side_of(self, image_name):
-        """The side an image belongs to: by name for the registered images, otherwise by frame of reference.
+    def _side_of(self, image_key):
+        """The side an image (name or id) belongs to: by id for the registered images, otherwise by frame of
+        reference.
 
-        None when the image is in neither frame, or when both registered images share one frame (then only those two
-        images can tell the sides apart).
+        None when the image is unknown, in neither frame, or when both registered images share one frame (then only
+        those two images can tell the sides apart).
         """
-        if image_name == self.reference.image_name:
+        try:
+            image_id = Data.volume_id(image_key)
+        except KeyError:
+            return None
+
+        if image_id == self.reference.image_id:
             return self.reference
-        if image_name == self.moving.image_name:
+        if image_id == self.moving.image_id:
             return self.moving
         if self.reference.frame == self.moving.frame:
             return None
 
-        frame = self._frame_of(image_name)
+        frame = Data.frame_of(image_id)
         if frame == self.reference.frame:
             return self.reference
         if frame == self.moving.frame:
@@ -484,15 +512,16 @@ class Rigid(object):
 
     def _sides(self, base_name, image_name, require_different=False):
         """(base side, moved side) for a display call; None names default to the registered reference / moving."""
-        base_name = self.reference.image_name if base_name is None else base_name
-        image_name = self.moving.image_name if image_name is None else image_name
+        base_name = self.reference.image_id if base_name is None else base_name
+        image_name = self.moving.image_id if image_name is None else image_name
 
         base_side, moved_side = self._side_of(base_name), self._side_of(image_name)
         if base_side is None or moved_side is None:
-            missing = base_name if base_side is None else image_name
+            missing = Data.volume_label(base_name if base_side is None else image_name)
             raise ValueError(f"'{missing}' is not in a frame of reference connected by '{self.rigid_name}'.")
         if require_different and base_side is moved_side:
-            raise ValueError(f"'{base_name}' and '{image_name}' are on the same side of '{self.rigid_name}'.")
+            raise ValueError(f"'{Data.volume_label(base_name)}' and '{Data.volume_label(image_name)}' are on the same "
+                             f"side of '{self.rigid_name}'.")
 
         return base_side, moved_side
 
@@ -519,24 +548,30 @@ class Rigid(object):
 
         return float(spacing[0]), float(spacing[1])
 
-    def add_rigid(self, rigid_name):
-        """Store this registration in ``Data.rigid``; None builds a unique name from the image names.
+    def add_rigid(self, rigid_name, rigid_id=None):
+        """Store this registration in ``Data.rigid`` and return its name; None builds a unique name from the current
+        image names. A name already in use is replaced and its id taken over.
 
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> mia.Rigid('CT 01', 'MR 01').rigid_name
-        'CT 01_MR 01'
+        >>> rigid = mia.Rigid('CT 01', 'MR 01')
+        >>> rigid.rigid_name, rigid.id
+        ('CT 01_MR 01', 1)
         """
         if rigid_name is None:
-            rigid_name = self.reference.image_name + '_' + self.moving.image_name
-            if rigid_name in Data.rigid_list():
+            rigid_name = (Data.volume_label(self.reference.image_id) + '_' +
+                          Data.volume_label(self.moving.image_id))
+            if rigid_name in Data.rigid:
                 n = 1
-                while rigid_name + '_' + str(n) in Data.rigid_list():
+                while rigid_name + '_' + str(n) in Data.rigid:
                     n += 1
                 rigid_name = rigid_name + '_' + str(n)
 
-        Data.rigid[rigid_name] = self
+        if rigid_name in Data.rigid:
+            Data.rigid[rigid_name] = self
+        else:
+            Data.rigid.add(self, rigid_name, item_id=rigid_id)
 
         return rigid_name
 
@@ -549,8 +584,8 @@ class Rigid(object):
         >>> mia.Data.rigid['CT 01_MR 01'].align_origins()
         """
         combined = np.identity(4)
-        combined[:3, 3] = (np.asarray(Data.image[self.moving.image_name].origin, dtype=float) -
-                           np.asarray(Data.image[self.reference.image_name].origin, dtype=float))
+        combined[:3, 3] = (np.asarray(Data.image[self.moving.image_id].origin, dtype=float) -
+                           np.asarray(Data.image[self.reference.image_id].origin, dtype=float))
 
         self.matrix = combined @ self._rigid_inv(self.get_base_matrix())
 
@@ -589,8 +624,8 @@ class Rigid(object):
         >>> res = rigid.compute_array('Sagittal', position, extend=True)    # whole MR, even past the CT's z range
         >>> res = rigid.compute_array('Axial', position, base_name='MR 01', image_name='Dose 01')
         """
-        base_name = self.reference.image_name if base_name is None else base_name
-        image_name = self.moving.image_name if image_name is None else image_name
+        base_name = self.reference.image_id if base_name is None else base_name
+        image_name = self.moving.image_id if image_name is None else image_name
 
         grid, base_grid = self._view_grid(plane, position, base_name, image_name, spacing)
         col0, row0 = 0, 0
@@ -613,8 +648,8 @@ class Rigid(object):
         >>> import medicalimageanalysis as mia
         >>> mia.Data.rigid['CT 01_MR 01'].compute_aspect('Sagittal')
         """
-        base_name = self.reference.image_name if base_name is None else base_name
-        image_name = self.moving.image_name if image_name is None else image_name
+        base_name = self.reference.image_id if base_name is None else base_name
+        image_name = self.moving.image_id if image_name is None else image_name
         sx, sy = self._view_spacing(plane, base_name, image_name, spacing)
 
         return np.round(sx / sy, 2)
@@ -623,19 +658,19 @@ class Rigid(object):
                            return_pixel=True, use_cache=True, spacing=None):
         """Slice one of image_name's ROIs on the same grid compute_array samples, so image and contour line up.
 
-        On the registered images, roi_name can be the paired name from either image. Pass use_cache=False while
-        dragging or animating.
+        roi_name is an ROI name or id. On the registered images it can be the paired ROI from either image. Pass
+        use_cache=False while dragging or animating.
 
         Examples
         --------
         >>> import medicalimageanalysis as mia
         >>> mia.Data.rigid['CT 01_MR 01'].compute_mesh_slice('Liver', 'Axial', position)
         """
-        base_name = self.reference.image_name if base_name is None else base_name
-        image_name = self.moving.image_name if image_name is None else image_name
+        base_name = self.reference.image_id if base_name is None else base_name
+        image_name = self.moving.image_id if image_name is None else image_name
         _, moved_side = self._sides(base_name, image_name)
 
-        roi = Data.volume(image_name).roi[self._roi_on_image(roi_name, image_name, moved_side)]
+        roi = Data.volume(image_name).roi[self._roi_on_image(roi_name, Data.volume_id(image_name), moved_side)]
         grid, _ = self._view_grid(plane, position, base_name, image_name, spacing)
 
         return roi.compute_mesh_slice(origin=position, plane=plane, offset=offset,
@@ -690,6 +725,7 @@ class Rigid(object):
             raise ValueError("moving_rois needs reference_rois to pair with.")
         if reference_rois:
             self.pair_rois(reference_rois, moving_rois)
+            reference_rois = list(self.reference.rois)      # ROI ids from here on
             moving_rois = list(self.moving.rois)
 
         start = self.get_combined_matrix()
@@ -697,9 +733,9 @@ class Rigid(object):
 
         if method in ('icp_point', 'icp_plane', 'icp_vtk'):
             if reference_mesh is None and reference_rois:
-                reference_mesh = self._merge_roi_meshes(self.reference.image_name, reference_rois)
+                reference_mesh = self._merge_roi_meshes(self.reference.image_id, reference_rois)
             if moving_mesh is None and moving_rois:
-                moving_mesh = self._merge_roi_meshes(self.moving.image_name, moving_rois)
+                moving_mesh = self._merge_roi_meshes(self.moving.image_id, moving_rois)
             if reference_mesh is None or moving_mesh is None:
                 raise ValueError(f"'{method}' needs reference_rois or both reference_mesh and moving_mesh.")
 
@@ -717,7 +753,7 @@ class Rigid(object):
             helper = self._build_itk(reference_mask, moving_mask, images=(method == 'itk'))
             initial = None
             if seed:
-                initial = self._matrix_to_sitk(start, Data.image[self.reference.image_name].get_center())
+                initial = self._matrix_to_sitk(start, Data.image[self.reference.image_id].get_center())
 
             run = helper.rigid if method == 'itk' else helper.rigid_mask
             # sitk is pull-back (reference point -> moving point), the same convention as self.matrix.
@@ -760,8 +796,8 @@ class Rigid(object):
         >>> import medicalimageanalysis as mia
         >>> vtk_image = mia.Data.rigid['CT 01_MR 01'].create_image()
         """
-        base_name = self.reference.image_name if base_name is None else base_name
-        image_name = self.moving.image_name if image_name is None else image_name
+        base_name = self.reference.image_id if base_name is None else base_name
+        image_name = self.moving.image_id if image_name is None else image_name
 
         mov = Data.volume(image_name)
         array = np.ascontiguousarray(mov.array)
@@ -821,8 +857,8 @@ class Rigid(object):
 
     def get_center(self, base_name=None, image_name=None, plane=None, position=None):
         """image_name's center as displayed on base_name, projected onto the active slice plane when given."""
-        base_name = self.reference.image_name if base_name is None else base_name
-        image_name = self.moving.image_name if image_name is None else image_name
+        base_name = self.reference.image_id if base_name is None else base_name
+        image_name = self.moving.image_id if image_name is None else image_name
 
         A = self.get_display_matrix(base_name, image_name)
         native_center = np.asarray(Data.volume(image_name).get_center(), dtype=float)
@@ -868,8 +904,9 @@ class Rigid(object):
         >>> mia.Rigid('CT 01', 'US 01', moving_indices=[40, 41, 42]).get_indices('US 01')
         [40, 41, 42]
         """
+        image_id = Data.volume_id(image_name)
         for side in (self.reference, self.moving):
-            if image_name == side.image_name:
+            if image_id == side.image_id:
                 return side.indices
 
         return None
@@ -900,7 +937,7 @@ class Rigid(object):
 
     def get_view_center(self, plane, position, base_name=None, image_name=None):
         """Center in the base widget's view coords (pixel centers at integers, matching the -0.5 placement)."""
-        base_name = self.reference.image_name if base_name is None else base_name
+        base_name = self.reference.image_id if base_name is None else base_name
 
         grid = Data.volume(base_name).display.get_grid(plane, position)
         d = self.get_center(base_name, image_name, plane, position) - grid['origin']
@@ -913,6 +950,8 @@ class Rigid(object):
 
     def pair_rois(self, reference_rois, moving_rois=None):
         """Set which reference ROI corresponds to which moving ROI (paired by position, replaces earlier pairs).
+
+        Names or ids; the ids are stored, so renaming an ROI keeps the pair.
 
         Examples
         --------
@@ -927,8 +966,8 @@ class Rigid(object):
             raise ValueError(f"reference_rois ({len(reference_rois)}) and moving_rois ({len(moving_rois)}) must "
                              f"pair one-to-one.")
 
-        self.reference.rois = list(reference_rois)
-        self.moving.rois = list(moving_rois)
+        self.reference.rois = [Data.get_roi_id(roi) for roi in reference_rois]
+        self.moving.rois = [Data.get_roi_id(roi) for roi in moving_rois]
 
     def retrieve_angles(self, order='ZXY'):
         """Euler angles (degrees) of this registration's own step."""

@@ -137,10 +137,21 @@ class Roi(object):
     Region of interest of one image: contours, surface mesh and slicing.
 
     ROIs are normally made by the image (`image.add_roi`, `image.create_roi`,
-    RTSTRUCT / MHD input) and stored in `image.roi[name]`.
+    RTSTRUCT / MHD input) and stored in `image.roi`, which looks them up by
+    permanent id or by name (`image.roi[3]`, `image.roi['Liver']`).
 
     Attributes
     ----------
+    id : int | None
+        Permanent ROI id, written by the image's ROI registry. The same ROI
+        has the same id on every image (see `Data.new_roi_id`). It never
+        changes, so use it as the database key. None until the ROI is added
+        to an image.
+
+    name : str | None
+        User name, written by the image's ROI registry. Change it with
+        `Data.rename_roi`, never by assigning `roi.name`.
+
     contour_position : list[np.ndarray] | None
         World contours, (N, 3) in mm.
 
@@ -193,7 +204,8 @@ class Roi(object):
             World contours, (N, 3) in mm.
 
         name : str | None
-            ROI name, the key in `image.roi`.
+            ROI name. The image's ROI registry overwrites it (and sets `id`)
+            when the ROI is added.
 
         color : tuple | None
             RGB, 0-255. Random if None.
@@ -227,6 +239,7 @@ class Roi(object):
         """
         self.image = image
 
+        self.id = None
         self.name = name
         self.visible = visible
         self.color = color
@@ -1156,7 +1169,7 @@ class Roi(object):
             self.contour_position = None
             self.mesh = None
 
-    def update_position(self, position, plane='Axial', ):
+    def update_position(self, position, plane='Axial'):
         """
         Replace the contours with new world contours and rebuild the mesh.
 

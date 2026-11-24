@@ -16,7 +16,11 @@ Description:
       rows are the dose grid axes.
     * The array is float32 in Gy (stored pixel values times DoseGridScaling).
     * Outside the dose grid the display returns ``Dose.background`` (0 Gy).
-    * ``dose_name`` is the key in ``Data.dose``; ``image_name`` is the same name, so inherited Image code works.
+    * ``id`` is the permanent id in ``Data.dose``. Image and dose ids share one counter, so a volume id is unique
+      across both. ``image_name`` is the user name (mirrored from ``Data.dose``) and ``dose_name`` the same name; change
+      both with ``Data.rename_dose``.
+    * Every argument naming an image, ROI or registration accepts the user name or the permanent id. DVH tables report
+      both ('ROI ID' and 'ROI').
     * DVH metrics are named as strings (see :meth:`Dose.compute_roi_metrics`): 'Volume', 'Dmin', 'Dmax', 'Dmean',
       'Dmedian', 'Dstd', 'D95' (dose to the hottest 95 % of the volume), 'D0.03cc' (hottest 0.03 cc), 'V20Gy' (% of the
       volume receiving at least 20 Gy), 'V20Gy_cc', 'VS20Gy' / 'VS20Gy_cc' (volume receiving less than 20 Gy), and with
@@ -81,8 +85,10 @@ class Dose(Image):
     DEFAULT_METRICS : list of str
         Class attribute: metrics :meth:`compute_roi_metrics` reports when none are named: Volume, Dmin, Dmax, Dmean,
         Dmedian, Dstd, D1, D2, D5 ... D95, D98, D99, and V0Gy ... V150Gy in % and cc.
+    id : int | None
+        Permanent id in ``Data.dose``, written when the dose is registered.
     dose_name : str
-        Key in ``Data.dose`` (``image_name`` holds the same name).
+        User name, same as ``image_name``. Change it with ``Data.rename_dose``.
     display : Display or None
         None for a tag-only read (no array).
 
@@ -101,6 +107,7 @@ class Dose(Image):
                        [f'V{x}Gy_cc' for x in range(0, 155, 5)])
 
     def __init__(self, dose):
+        self.id = None
         self.roi = {}
         self.poi = {}
 
@@ -151,16 +158,6 @@ class Dose(Image):
     # ------------------------------------------------------------------------------------------------------------
     # Static methods
     # ------------------------------------------------------------------------------------------------------------
-    @staticmethod
-    def _frame(volume, name):
-        """Frame of Reference UID of an image or dose, or its name when the UID is missing or a placeholder
-        (the same rule as Rigid / Deformable)."""
-        frame = getattr(volume, 'frame_ref', None)
-        if frame is None or not str(frame).strip(' .0'):
-            return name
-
-        return str(frame)
-
     @staticmethod
     def _metric_values(dose, weight, metrics, prescription=None):
         """Metric name -> value for one ROI.
@@ -231,30 +228,37 @@ class Dose(Image):
     # ------------------------------------------------------------------------------------------------------------
     def _raise_no_annotations(self):
         """Doses carry no ROIs or POIs: contour on the image in the dose's frame of reference instead."""
-        raise TypeError(f"'{self.dose_name}' is a dose; ROIs and POIs belong on an image in its frame of reference.")
+        raise TypeError(f"'{self.image_name}' is a dose; ROIs and POIs belong on an image in its frame of reference.")
 
     def _register(self):
-        """Store this dose in ``Data.dose`` (used by :meth:`Image.load_metadata`)."""
-        Data.dose[self.dose_name] = self
+        """Store this dose in ``Data.dose`` (used by :meth:`Image.load_metadata`).
+
+        A loaded dose keeps its saved id. If its name is already registered, it replaces that entry and takes its id.
+        """
+        if self.image_name in Data.dose:
+            Data.dose[self.image_name] = self
+        else:
+            Data.dose.add(self, self.image_name, item_id=getattr(self, 'id', None))
+        self.dose_name = self.image_name
 
     def _registration_matrix(self, image_name, rigid_name=None):
-        """4x4 dose native world -> image_name world.
+        """4x4 dose native world -> image world (image_name and rigid_name are names or ids).
 
         Without a Rigid the image must be in the dose's frame of reference. With one, the full registration is used
         (its display animation fraction is ignored), in whichever direction carries the dose onto the image.
         """
         image = Data.image[image_name]
-        dose_frame = self._frame(self, self.dose_name)
+        dose_frame = Data.frame_of(self.id)
 
         if rigid_name is None:
-            if self._frame(image, image_name) != dose_frame:
-                raise ValueError(f"'{image_name}' is not in the frame of reference of '{self.dose_name}'; pass the "
-                                 f"rigid_name of a registration that connects them.")
+            if Data.frame_of(image.id) != dose_frame:
+                raise ValueError(f"'{image.image_name}' is not in the frame of reference of '{self.image_name}'; pass "
+                                 f"the rigid_name of a registration that connects them.")
             return np.identity(4)
 
         rigid = Data.rigid[rigid_name]
-        if not rigid.connects(image_name, self.dose_name):
-            raise ValueError(f"'{rigid_name}' does not connect '{image_name}' and '{self.dose_name}'.")
+        if not rigid.connects(image.id, self.id):
+            raise ValueError(f"'{rigid.rigid_name}' does not connect '{image.image_name}' and '{self.image_name}'.")
 
         combined = rigid.get_combined_matrix()      # reference world -> moving world
         if dose_frame != rigid.moving.frame:
@@ -266,9 +270,10 @@ class Dose(Image):
 
         return inverse
 
-    def _roi_weights(self, image, roi_names, partial_volume=True):
-        """Per ROI: (name, box, weight). box is (z0, z1, y0, y1, x0, x1) on the image grid, weight the (z, y, x) volume
-        in cc of each box voxel inside the ROI. box and weight are None for an ROI with no contours or no voxels.
+    def _roi_weights(self, image, roi_ids, partial_volume=True):
+        """Per ROI id: (roi_id, box, weight). box is (z0, z1, y0, y1, x0, x1) on the image grid, weight the (z, y, x)
+        volume in cc of each box voxel inside the ROI. box and weight are None for an ROI with no contours or no
+        voxels.
 
         partial_volume=True weights each voxel by the fraction inside the contour (mask / 255); False counts a voxel
         fully when at least half of it is inside (mask >= 128).
@@ -276,16 +281,16 @@ class Dose(Image):
         voxel_cc = float(np.prod(np.asarray(image.spacing, dtype=float))) / 1000.0
 
         rois = []
-        for name in roi_names:
-            roi = image.roi.get(name)
+        for roi_id in roi_ids:
+            roi = image.roi.get(roi_id)
             if roi is None or roi.contour_position is None or len(roi.contour_position) == 0:
-                rois.append((name, None, None))
+                rois.append((roi_id, None, None))
                 continue
 
             mask = contours_to_mask(roi.contour_position, image.dimensions, image.origin, image.spacing, image.matrix)
             inside = mask > 0 if partial_volume else mask >= 128
             if not inside.any():
-                rois.append((name, None, None))
+                rois.append((roi_id, None, None))
                 continue
 
             box = []
@@ -300,7 +305,7 @@ class Dose(Image):
             else:
                 weight = (crop >= 128).astype(np.float32) * np.float32(voxel_cc)
 
-            rois.append((name, tuple(box), weight))
+            rois.append((roi_id, tuple(box), weight))
 
         return rois
 
@@ -336,7 +341,7 @@ class Dose(Image):
     # ------------------------------------------------------------------------------------------------------------
     # Public methods
     # ------------------------------------------------------------------------------------------------------------
-    def add_poi(self, poi_name=None, color=None, visible=False, path=None, point=None):
+    def add_poi(self, poi_name=None, color=None, visible=False, path=None, point=None, match=True):
         """Not available on a dose; raises TypeError. Add the POI to an image in the dose's frame instead.
 
         Examples
@@ -346,7 +351,7 @@ class Dose(Image):
         """
         self._raise_no_annotations()
 
-    def add_roi(self, roi_name=None, color=None, visible=False, path=None, contour=None, plane='Axial'):
+    def add_roi(self, roi_name=None, color=None, visible=False, path=None, contour=None, plane='Axial', match=True):
         """Not available on a dose; raises TypeError. Add the ROI to an image in the dose's frame instead.
 
         Examples
@@ -361,11 +366,11 @@ class Dose(Image):
 
         Parameters
         ----------
-        image_name : str
-            Image in ``Data.image`` whose grid the dose is sampled on.
-        rigid_name : str, optional
-            Registration in ``Data.rigid`` connecting the dose's frame of reference with the image's (e.g. planning CT
-            -> CBCT). None = the image is in the dose's frame of reference.
+        image_name : str or int
+            Image in ``Data.image`` (name or id) whose grid the dose is sampled on.
+        rigid_name : str or int, optional
+            Registration in ``Data.rigid`` (name or id) connecting the dose's frame of reference with the image's (e.g.
+            planning CT -> CBCT). None = the image is in the dose's frame of reference.
         bounds : tuple of int, optional
             (z0, z1, y0, y1, x0, x1) index box on the image grid (end exclusive). None = the whole image.
 
@@ -399,10 +404,10 @@ class Dose(Image):
 
         Parameters
         ----------
-        image_name : str
-            Image in ``Data.image`` holding the ROIs.
-        roi_names : str or list of str, optional
-            ROIs on that image. None = every ROI on it. ROIs with no contours get NaN.
+        image_name : str or int
+            Image in ``Data.image`` (name or id) holding the ROIs.
+        roi_names : str, int or list of them, optional
+            ROIs on that image, by name or id. None = every ROI on it. ROIs with no contours get NaN.
         metrics : str or list of str, optional
             Metric names (see the module conventions), reported in this order. None = ``DEFAULT_METRICS``.
 
@@ -412,9 +417,9 @@ class Dose(Image):
             * 'V<x>Gy'    : % of the volume receiving at least x Gy ('V<x>Gy_cc' in cc)
             * 'VS<x>Gy'   : % of the volume receiving less than x Gy ('VS<x>Gy_cc' in cc)
             * 'V<x>%'     : % of the volume receiving at least x % of the prescription ('V<x>%_cc' in cc)
-        rigid_name : str, optional
-            Registration in ``Data.rigid`` connecting the dose's frame of reference with the image's. None = the image
-            is in the dose's frame of reference.
+        rigid_name : str or int, optional
+            Registration in ``Data.rigid`` (name or id) connecting the dose's frame of reference with the image's.
+            None = the image is in the dose's frame of reference.
         partial_volume : bool, default True
             Weight voxels by the fraction inside the contour. False counts a voxel when at least half of it is inside.
         prescription : float, optional
@@ -423,7 +428,8 @@ class Dose(Image):
         Returns
         -------
         pandas.DataFrame
-            One row per ROI: 'ROI' then the metrics in the requested order.
+            One row per ROI: 'ROI ID' (permanent id, for storing results), 'ROI' (current name), then the metrics in
+            the requested order.
 
         Raises
         ------
@@ -443,8 +449,11 @@ class Dose(Image):
         """
         image = Data.image[image_name]
         if roi_names is None:
-            roi_names = list(image.roi)
-        roi_names = [roi_names] if isinstance(roi_names, str) else list(roi_names)
+            roi_ids = image.roi.ids()
+        else:
+            if isinstance(roi_names, (str, int, np.integer)):
+                roi_names = [roi_names]
+            roi_ids = [Data.get_roi_id(roi) for roi in roi_names]
 
         if metrics is None:
             metrics = self.DEFAULT_METRICS
@@ -457,7 +466,7 @@ class Dose(Image):
                 raise ValueError(f"{metric!r} needs a prescription (Gy).")
 
         matrix = self._registration_matrix(image_name, rigid_name)
-        rois = self._roi_weights(image, roi_names, partial_volume=partial_volume)
+        rois = self._roi_weights(image, roi_ids, partial_volume=partial_volume)
 
         boxes = np.array([box for _, box, _ in rois if box is not None])
         if len(boxes):
@@ -466,7 +475,7 @@ class Dose(Image):
             dose = self._sample_box(image, union, matrix)
 
         rows = []
-        for name, box, weight in rois:
+        for roi_id, box, weight in rois:
             if box is None:
                 values = {m: np.nan for m in metrics}
             else:
@@ -475,9 +484,9 @@ class Dose(Image):
                 inside = weight > 0
                 values = self._metric_values(sub[inside], weight[inside], metrics, prescription)
 
-            rows.append({'ROI': name, **values})
+            rows.append({'ROI ID': roi_id, 'ROI': Data.get_roi_name(roi_id), **values})
 
-        return pd.DataFrame(rows, columns=['ROI'] + metrics)
+        return pd.DataFrame(rows, columns=['ROI ID', 'ROI'] + metrics)
 
     def create_external(self, name='External', color=None, visible=False, filepaths=None, threshold=-250):
         """Not available on a dose; raises TypeError. Create the external on the planning image instead.
