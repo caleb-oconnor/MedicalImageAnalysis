@@ -28,6 +28,13 @@ Description:
     * Images, ROIs and POIs have a permanent integer ``id`` (database key) and a user name that can change. Both look
       them up: ``image.roi[3]`` and ``image.roi['Liver']``. An ROI/POI exists only on an image; a name has the same id
       on every image (``Data.new_roi_id``). Rename through ``Data.rename_image`` / ``rename_roi`` / ``rename_poi``.
+    * Markups (``image.moi``) and planes (``image.planeoi``) belong to one image only: unlike ROIs/POIs they are never
+      synced to other images. Their ids are unique across every image (``Data.new_moi_id`` / ``new_planeoi_id``),
+      their names only on their image. ``image.plane`` is still the acquisition plane; planes of interest live in
+      ``image.planeoi``.
+    * Models (``image.model``) are meshes derived from this image's ROIs for one computation (clustered surfaces,
+      tetrahedral FE meshes). They never replace ``roi.mesh`` and are never synced to other images. Ids are unique
+      across every image (``Data.new_model_id``), names only on this image.
 
 Structure:
     - _fused_oblique_sample_kernel: numba kernel that trilinearly samples one oblique slice.
@@ -51,6 +58,7 @@ Rotate every view of the image 10 degrees about z, then redraw
 
 import os
 import copy
+import json
 import blosc2
 import pickle
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -69,6 +77,9 @@ from vtkmodules.util import numpy_support
 from ..utils.image.threshold import external
 from ..utils.roi.to_contours import mask_to_contours
 
+from .moi import Moi
+from .model import Model
+from .planeoi import PlaneOI
 from .poi import Poi
 from .roi import Roi
 from ..data import Data
@@ -515,6 +526,74 @@ class Display(object):
                 'sx': float(self.spacing[xi]), 'sy': float(self.spacing[yi]),
                 'shape': tuple(self.oblique_shape[plane])}
 
+    def go_to_plane(self, plane, origin, normal, x_axis=None):
+        """Rotate the shared view so `plane` lies in a world plane, then scroll every plane through `origin`.
+
+        Used by markups and planes of interest to jump to the view they were drawn on / look straight at a cut. The
+        rotation pivot and the crosshair move to origin. Every plane of this image turns with the shared rotation,
+        so the other two show the target plane edge-on.
+
+        Parameters
+        ----------
+        plane : str
+            'Axial', 'Sagittal' or 'Coronal': the view that should lie in the world plane.
+        origin : (3,) array_like
+            World point on the plane; becomes the rotation center and crosshair.
+        normal : (3,) array_like
+            World normal of the plane.
+        x_axis : (3,) array_like, optional
+            In-plane direction the view's x axis should follow. None keeps the current x axis as close as possible.
+
+        Returns
+        -------
+        (3,) ndarray
+            The new position (top-left corner) of `plane`.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> display = mia.Data.image['CT 01'].display
+        >>> position = display.go_to_plane('Axial', [10.0, -40.0, 120.0], [0.0, 0.26, 0.97])
+        >>> res = display.compute_array('Axial', position)
+        """
+        origin = np.asarray(origin, dtype=float)
+        normal = np.asarray(normal, dtype=float)
+        normal = normal / np.linalg.norm(normal)
+
+        image_matrix = np.asarray(self.image.matrix, dtype=float)
+        xi, yi, ni = self.AXES[plane]
+
+        current = image_matrix @ self.matrix.T
+        x_axis = current[xi] if x_axis is None else np.asarray(x_axis, dtype=float)
+        x_axis = x_axis - np.dot(x_axis, normal) * normal
+        if np.linalg.norm(x_axis) < 1e-6:                    # current x runs along the normal: follow y instead
+            x_axis = current[yi] - np.dot(current[yi], normal) * normal
+        x_axis = x_axis / np.linalg.norm(x_axis)
+
+        # view axes wanted (rows = view axes, same as image.matrix @ display.matrix.T); keep the image's handedness,
+        # since Coronal (x, z, y) is a left-handed set of rows
+        effective = np.empty((3, 3))
+        effective[xi] = x_axis
+        effective[yi] = np.cross(normal, x_axis)
+        effective[ni] = normal
+        if np.linalg.det(effective) * np.linalg.det(image_matrix) < 0:
+            effective[yi] = -effective[yi]
+
+        # effective = image.matrix @ display.matrix.T  ->  display.matrix = effective.T @ image.matrix
+        display_matrix = effective.T @ image_matrix
+        angles = Rotation.from_matrix(display_matrix).as_euler('xyz', degrees=True)
+
+        self.set_rotation_center(origin)
+        self.update_rotation(r_x=angles[0], r_y=angles[1], r_z=angles[2], absolute=True)
+
+        effective = image_matrix @ self.matrix.T
+        for name in self.position:
+            n = effective[self.AXES[name][2]]
+            self.position[name] = self.position[name] + np.dot(origin - self.position[name], n) * n
+        self.crosshair = origin.copy()
+
+        return self.position[plane]
+
     def pivot_position(self, position, R):
         """Rotate one widget's position about rotation_center by R (the value returned by :meth:`update_rotation`).
 
@@ -647,6 +726,12 @@ class Image(object):
     roi, poi : Registry
         ROIs / POIs by permanent id or name. Their ids come from ``Data.new_roi_id`` / ``Data.new_poi_id``, so an ROI
         has the same id on every image. Rename them with ``Data.rename_roi`` / ``Data.rename_poi``, not on one image.
+    moi, planeoi : Registry
+        Markups / planes of interest by permanent id or name. Ids come from ``Data.new_moi_id`` /
+        ``Data.new_plane_oi_id`` (unique across every image); names are unique on this image only.
+    model : Registry
+        Models (clustered / tetrahedral meshes derived from this image's ROIs) by permanent id or name. Ids come
+        from ``Data.new_model_id`` (unique across every image); names are unique on this image only.
 
     Examples
     --------
@@ -667,6 +752,9 @@ class Image(object):
         self.id = None
         self.roi = Registry(id_source=lambda name, item: Data.new_roi_id(name))
         self.poi = Registry(id_source=lambda name, item: Data.new_poi_id(name))
+        self.moi = Registry(id_source=lambda name, item: Data.new_moi_id(name, item))
+        self.planeoi = Registry(id_source=lambda name, item: Data.new_planeoi_id(name, item))
+        self.model = Registry(id_source=lambda name, item: Data.new_model_id(name, item))
 
         self.tags = image.image_set
         self.array = np.ascontiguousarray(image.array)
@@ -709,11 +797,10 @@ class Image(object):
         self.display = Display(self)
 
     def __getstate__(self):
-        """Metadata-only state for pickling (array, ROIs and POIs are left out)."""
+        """Metadata-only state for pickling (array, ROIs, POIs, markups, planes and models are left out)."""
         state = self.__dict__.copy()
-        state.pop("array", None)
-        state.pop("roi", None)
-        state.pop("poi", None)
+        for key in ('array', 'roi', 'poi', 'moi', 'planeoi', 'model'):
+            state.pop(key, None)
 
         return state
 
@@ -723,6 +810,9 @@ class Image(object):
         self.array = None
         self.roi = Registry(id_source=lambda name, item: Data.new_roi_id(name))
         self.poi = Registry(id_source=lambda name, item: Data.new_poi_id(name))
+        self.moi = Registry(id_source=lambda name, item: Data.new_moi_id(name, item))
+        self.planeoi = Registry(id_source=lambda name, item: Data.new_planeoi_id(name, item))
+        self.model = Registry(id_source=lambda name, item: Data.new_model_id(name, item))
         if 'id' not in state:
             self.id = None   # metadata saved before ids existed
 
@@ -730,6 +820,15 @@ class Image(object):
         display = self.__dict__.get('display')
         if display is not None:
             display.image = self
+
+    @staticmethod
+    def _next_markup_name(registry, prefix):
+        """'<prefix> <n>' with the smallest n >= 1 not yet used in registry (e.g. 'Line 3')."""
+        n = 1
+        while f'{prefix} {n}' in registry:
+            n += 1
+
+        return f'{prefix} {n}'
 
     def _first_tag(self, keywords, default=None):
         """Value of the first DICOM keyword present in the first file's tags, else default."""
@@ -748,6 +847,171 @@ class Image(object):
             Data.image[self.image_name] = self
         else:
             Data.image.add(self, self.image_name, item_id=self.id)
+
+    def add_model(self, roi_names, kind='tet', name=None, cavities=None, cluster_points=None, edge_length_fac=0.05,
+                  edge_length_abs=None, region_edge_lengths=None, epsilon=1e-3, optimize=True, simplify=True,
+                  coarsen=False, stop_energy=10.0, num_opt_iter=80, color=None, visible=True, build=False):
+        """Add a model (clustered surface or tetrahedral mesh) built from ROIs of this image. Nothing is synced.
+
+        The recipe is stored on the model; it is only run when ``build=True`` or on ``model.build()``, since
+        pytetwild takes seconds.
+
+        Parameters
+        ----------
+        roi_names : str, int or list of them
+            Source ROIs (names or ids), in region order.
+        kind : {'tet', 'surface'}, default 'tet'
+        name : str, optional
+            Name on this image. None = 'Model <n>'.
+        cavities, cluster_points, edge_length_fac, edge_length_abs, region_edge_lengths, epsilon, optimize, simplify,
+        coarsen, stop_energy, num_opt_iter
+            The recipe; see :class:`Model`.
+        color : list of int, optional
+            RGB, 0-255. Random if None.
+        visible : bool, default True
+        build : bool, default False
+            Run the recipe now.
+
+        Returns
+        -------
+        Model
+
+        Raises
+        ------
+        KeyError
+            If `name` is already a model on this image.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> image = mia.Data.image['CT 01']
+        >>> fe = image.add_model(['Liver', 'GTV'], name='Liver FE', cluster_points=[2500, 800], edge_length_abs=4.0,
+        ...                      region_edge_lengths=[None, 1.5], build=True)
+        >>> cpd = image.add_model('Liver', kind='surface', name='Liver CPD', cluster_points=2500, build=True)
+        """
+        model = Model(self, roi_names, kind=kind, cavities=cavities, cluster_points=cluster_points,
+                      edge_length_fac=edge_length_fac, edge_length_abs=edge_length_abs,
+                      region_edge_lengths=region_edge_lengths, epsilon=epsilon, optimize=optimize,
+                      simplify=simplify, coarsen=coarsen, stop_energy=stop_energy, num_opt_iter=num_opt_iter,
+                      color=color, visible=visible)
+        name = self._next_markup_name(self.model, 'Model') if name is None else name
+        self.model.add(model, name)
+
+        if build:
+            model.build()
+
+        return model
+
+    def add_moi(self, kind, points, view_plane='Axial', position=None, name=None, color=None, visible=True,
+                text=None):
+        """Add a markup of interest (line, arrow, angle, polyline, polygon, ellipse or text) drawn on one view.
+
+        The markup keeps that view's plane (current rotation included) and is shown only on views lying in it.
+        Nothing is synced to other images.
+
+        Parameters
+        ----------
+        kind : str
+            'line', 'arrow', 'angle', 'polyline', 'polygon', 'ellipse' or 'text' (point counts: ``Moi.POINTS``).
+        points : (N, 3) array_like
+            World points (mm). From clicks: ``Moi.convert_pixel_to_position(pixels, grid)``.
+        view_plane : str, default 'Axial'
+            Plane of the view it is drawn on.
+        position : (3,) array_like, optional
+            That view's position. None = ``self.display.position[view_plane]``.
+        name : str, optional
+            Name on this image. None = '<Kind> <n>' (e.g. 'Line 3').
+        color : list of int, optional
+            RGB, 0-255. Defaults to yellow.
+        visible : bool, default True
+            Show in the views.
+        text : str, optional
+            Label (the content for kind 'text').
+
+        Returns
+        -------
+        Moi
+
+        Raises
+        ------
+        KeyError
+            If `name` is already a markup on this image.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> image = mia.Data.image['CT 01']
+        >>> position = image.display.position['Axial']
+        >>> grid = image.display.get_grid('Axial', position)
+        >>> points = mia.Moi.convert_pixel_to_position([[200, 180], [260, 230]], grid)
+        >>> ruler = image.add_moi('line', points, view_plane='Axial', position=position)
+        >>> ruler.name, ruler.compute_measurement()
+        ('Line 1', ('Length', 52.4, 'mm'))
+        >>> image.add_moi('text', points[:1], position=position, text='Recurrence?', color=[255, 0, 0])
+        """
+        position = self.display.position[view_plane] if position is None else position
+        grid = self.display.get_grid(view_plane, position)
+
+        moi = Moi(self, kind, points, view_plane=view_plane, plane_origin=grid['origin'],
+                  plane_x_axis=grid['x_axis'], plane_y_axis=grid['y_axis'], plane_normal=grid['normal'],
+                  color=color, visible=visible, text=text)
+        name = self._next_markup_name(self.moi, kind.capitalize()) if name is None else name
+        self.moi.add(moi, name)
+
+        return moi
+
+    def add_plane_oi(self, origin, normal, x_axis=None, name=None, extent=None, keep_side=None, group=None,
+                     color=None, visible=True):
+        """Add a plane of interest (cut plane, reference plane, ...). Nothing is synced to other images.
+
+        Parameters
+        ----------
+        origin : (3,) array_like
+            World point on the plane (mm); the center of its extent.
+        normal : (3,) array_like
+            Plane normal.
+        x_axis : (3,) array_like, optional
+            In-plane x direction. None picks one.
+        name : str, optional
+            Name on this image. None = 'Plane <n>'.
+        extent : (2,) array_like, optional
+            (width, height) in mm. None = infinite.
+        keep_side : {1, -1, None}, optional
+            Side kept when cutting (+1 = the side the normal points to).
+        group : str, optional
+            Label tying planes together (e.g. one resection).
+        color : list of int, optional
+            RGB, 0-255. Random if None.
+        visible : bool, default True
+            Show in the views.
+
+        Returns
+        -------
+        PlaneOI
+
+        Raises
+        ------
+        KeyError
+            If `name` is already a plane on this image.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> image = mia.Data.image['CT 01']
+        >>> cut = image.add_plane_oi(origin=[12.0, -80.0, 410.0], normal=[0.0, 0.3, 0.95], extent=(120, 90),
+        ...                          keep_side=-1, group='Resection 1', name='Superior cut')
+
+        The plane of the view currently shown, through the crosshair:
+
+        >>> grid = image.display.get_grid('Sagittal', image.display.position['Sagittal'])
+        >>> image.add_plane_oi(origin=image.display.crosshair, normal=grid['normal'], x_axis=grid['x_axis'])
+        """
+        plane = PlaneOI(self, origin, normal, x_axis=x_axis, extent=extent, keep_side=keep_side, group=group,
+                        color=color, visible=visible)
+        name = self._next_markup_name(self.planeoi, 'Plane') if name is None else name
+        self.planeoi.add(plane, name)
+
+        return plane
 
     def add_poi(self, poi_name=None, color=None, visible=False, path=None, point=None, match=True):
         """Add a point of interest at a world position.
@@ -812,6 +1076,23 @@ class Image(object):
                                   plane=plane)
         if match:
             Data.match_rois()
+
+    def add_saved_model(self, model):
+        """Add a model read with ``Model.load`` / ``Model.from_bytes``, keeping its saved id unless another model on
+        any loaded image already uses it; a name already on this image gets the next free '<name> <n>'.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> image = mia.Data.image['CT 01']
+        >>> image.add_saved_model(mia.Model.load(image, 'C:/Data/liver_fe.npz'))
+        """
+        used = set(Data.model_ids()) | set(self.model.ids())
+        item_id = None if model.id is None or model.id in used else model.id
+        name = model.name if model.name not in self.model else self._next_markup_name(self.model, model.name)
+        self.model.add(model, name, item_id=item_id)
+
+        return model
 
     def compute_corner_positions(self):
         """(8, 3) world positions of the corner voxel centers.
@@ -1159,6 +1440,23 @@ class Image(object):
         raw = blosc2.decompress(AESGCM(key).decrypt(nonce, encrypted, None))
         self.array = np.frombuffer(raw, dtype=self.array_dtype).reshape(self.dimensions).copy()
 
+    def load_markups(self, markups_path, key):
+        """Decrypt and add the markups and planes written by :meth:`save` (markups.enc). Call after
+        :meth:`load_metadata`, so the image is registered and ids are checked against every loaded image.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> image.load_metadata('C:/Data/CT 01/metadata.enc', key)
+        >>> image.load_array('C:/Data/CT 01/array.enc', key)
+        >>> image.load_markups('C:/Data/CT 01/markups.enc', key)
+        """
+        with open(markups_path, "rb") as f:
+            data = f.read()
+
+        nonce, encrypted = data[:12], data[12:]
+        self.markups_from_json(AESGCM(key).decrypt(nonce, encrypted, None).decode('utf-8'))
+
     def load_metadata(self, metadata_path, key):
         """Decrypt the metadata written by :meth:`save` into this image and register it (``Data.image``, or
         ``Data.dose`` for a Dose).
@@ -1180,6 +1478,25 @@ class Image(object):
         self.__setstate__(loaded.__dict__)
 
         self._register()
+
+    def load_models(self, folder_path, key):
+        """Decrypt and add every model written by :meth:`save` (model_<id>.enc files). Call after
+        :meth:`load_metadata`.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> image.load_metadata('C:/Data/CT 01/metadata.enc', key)
+        >>> image.load_array('C:/Data/CT 01/array.enc', key)
+        >>> image.load_models('C:/Data/CT 01', key)
+        """
+        aes = AESGCM(key)
+        for file_name in sorted(os.listdir(folder_path)):
+            if file_name.startswith('model_') and file_name.endswith('.enc'):
+                with open(os.path.join(folder_path, file_name), "rb") as f:
+                    data = f.read()
+                nonce, encrypted = data[:12], data[12:]
+                self.add_saved_model(Model.from_bytes(self, aes.decrypt(nonce, encrypted, None)))
 
     def load_unencrypted_image(self, image_path, rois=True, pois=True):
         """Load an image folder written by :meth:`save_unencrypted`, optionally with its ROIs and POIs.
@@ -1204,6 +1521,16 @@ class Image(object):
             roi_names = os.listdir(os.path.join(image_path, 'POIs'))
             for name in roi_names:
                 self.load_unencrypted_pois(os.path.join(image_path, 'POIs', name))
+
+        markups_path = os.path.join(image_path, 'markups.json')
+        if os.path.exists(markups_path):
+            with open(markups_path) as f:
+                self.markups_from_json(f.read())
+
+        models_path = os.path.join(image_path, 'Models')
+        if os.path.exists(models_path):
+            for file_name in sorted(os.listdir(models_path)):
+                self.add_saved_model(Model.load(self, os.path.join(models_path, file_name)))
 
     def load_unencrypted_pois(self, poi_path):
         """Load one POI folder, keeping its saved id when it doesn't clash.
@@ -1289,6 +1616,43 @@ class Image(object):
             self.roi[name].contour_position = list(np.load(os.path.join(roi_path, 'contour_position.npy'),
                                                             allow_pickle=True))
 
+    def markups_from_json(self, text):
+        """Add the markups and planes in :meth:`markups_to_json` output to this image.
+
+        A saved id is kept unless another markup (plane) on any loaded image already uses it; a name already on this
+        image gets the next free '<name> <n>'.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> with open('C:/Data/CT 01/markups.json') as f:
+        ...     mia.Data.image['CT 01'].markups_from_json(f.read())
+        """
+        record = json.loads(text)
+
+        for kind, markup_class in (('moi', Moi), ('planeoi', PlaneOI)):
+            registry = getattr(self, kind)
+            used = set(getattr(Data, kind + '_ids')()) | set(registry.ids())
+
+            for item_text in record.get(kind, []):
+                item = markup_class.from_json(self, item_text)
+                item_id = None if item.id is None or item.id in used else item.id
+                name = item.name if item.name not in registry else self._next_markup_name(registry, item.name)
+                used.add(registry.add(item, name, item_id=item_id))
+
+    def markups_to_json(self):
+        """Every markup and plane of this image as one JSON string: {'schema', 'moi': [...], 'planeoi': [...]}, where
+        each entry is that item's own ``to_json`` string (so it can also be stored one database row per item).
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> text = mia.Data.image['CT 01'].markups_to_json()
+        """
+        return json.dumps({'schema': 1,
+                           'moi': [moi.to_json() for moi in self.moi.values()],
+                           'planeoi': [plane.to_json() for plane in self.planeoi.values()]})
+
     def reset_display(self):
         """Clear the view rotation and put every plane back at its initial slice (see :meth:`Display.reset`).
 
@@ -1314,7 +1678,8 @@ class Image(object):
         return rotation.as_euler(order, degrees=True)
 
     def save(self, folder_path, key, clevel=5):
-        """Write encrypted metadata.enc (pickled, no array/ROIs/POIs) and array.enc (blosc2 ZSTD) into folder_path.
+        """Write encrypted metadata.enc (pickled, no array/ROIs/POIs), array.enc (blosc2 ZSTD), markups.enc (markups and
+        planes, JSON) and one model_<id>.enc per model (npz) into folder_path.
 
         Parameters
         ----------
@@ -1347,8 +1712,20 @@ class Image(object):
         with open(os.path.join(folder_path, 'array.enc'), "wb") as f:
             f.write(encrypted)
 
+        nonce = os.urandom(12)
+        encrypted = nonce + aes.encrypt(nonce, self.markups_to_json().encode('utf-8'), None)
+        with open(os.path.join(folder_path, 'markups.enc'), "wb") as f:
+            f.write(encrypted)
+
+        for model_id in self.model.ids():
+            nonce = os.urandom(12)
+            encrypted = nonce + aes.encrypt(nonce, self.model[model_id].to_bytes(), None)
+            with open(os.path.join(folder_path, f'model_{model_id}.enc'), "wb") as f:
+                f.write(encrypted)
+
     def save_unencrypted(self, path, rois=True, pois=True):
-        """Write the image to a folder: info.p (attributes), tags.npy, array.npy, plus ROIs/ and POIs/ folders.
+        """Write the image to a folder: info.p (attributes), tags.npy, array.npy, markups.json, plus ROIs/, POIs/ and
+        Models/ folders.
 
         Examples
         --------
@@ -1356,7 +1733,8 @@ class Image(object):
         >>> mia.Data.image['CT 01'].save_unencrypted('C:/Data/CT 01')
         """
         variable_names = self.__dict__.keys()
-        column_names = [name for name in variable_names if name not in ['roi', 'poi', 'tags', 'array', 'display']]
+        column_names = [name for name in variable_names
+                        if name not in ['roi', 'poi', 'moi', 'planeoi', 'model', 'tags', 'array', 'display']]
 
         df = pd.DataFrame(index=[0], columns=column_names)
         for name in column_names:
@@ -1365,6 +1743,13 @@ class Image(object):
         df.to_pickle(os.path.join(path, 'info.p'))
         np.save(os.path.join(path, 'tags.npy'), self.tags, allow_pickle=True)
         np.save(os.path.join(path, 'array.npy'), self.array, allow_pickle=True)
+        with open(os.path.join(path, 'markups.json'), 'w') as f:
+            f.write(self.markups_to_json())
+
+        if len(self.model) > 0:
+            os.mkdir(os.path.join(path, 'Models'))
+            for model_id in self.model.ids():
+                self.model[model_id].save(os.path.join(path, 'Models', f'{model_id}.npz'))
 
         if rois:
             self.save_unencrypted_rois(path, create_main_folder=True)

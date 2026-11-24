@@ -8,7 +8,8 @@ Description:
     oblique views, crosshairs), geometry, encrypted saving and the Rigid / Deformable display paths. What it adds is
     dose scaling (Gy), a 0 Gy background, a dose window, dose resampled onto any image grid (optionally through a
     Rigid) and partial-volume dose-volume histogram metrics for many ROIs at once. Doses live in
-    ``Data.dose`` (not ``Data.image``), so they are never registered, contoured on or given synced ROIs/POIs.
+    ``Data.dose`` (not ``Data.image``), so they are never registered, contoured on or given synced ROIs/POIs, and
+    never carry markups, planes or models.
 
     Conventions
     -----------
@@ -110,6 +111,9 @@ class Dose(Image):
         self.id = None
         self.roi = {}
         self.poi = {}
+        self.moi = {}
+        self.planeoi = {}
+        self.model = {}
 
         self.tags = dose.image_set
         self.array = None if dose.array is None else self._to_gy(dose.array)    # None for a tag-only read
@@ -227,8 +231,9 @@ class Dose(Image):
     # Private methods
     # ------------------------------------------------------------------------------------------------------------
     def _raise_no_annotations(self):
-        """Doses carry no ROIs or POIs: contour on the image in the dose's frame of reference instead."""
-        raise TypeError(f"'{self.image_name}' is a dose; ROIs and POIs belong on an image in its frame of reference.")
+        """Doses carry no ROIs, POIs, markups or planes: put them on the image in the dose's frame of reference."""
+        raise TypeError(f"'{self.image_name}' is a dose; ROIs, POIs, markups and planes belong on an image in its "
+                        f"frame of reference.")
 
     def _register(self):
         """Store this dose in ``Data.dose`` (used by :meth:`Image.load_metadata`).
@@ -341,6 +346,40 @@ class Dose(Image):
     # ------------------------------------------------------------------------------------------------------------
     # Public methods
     # ------------------------------------------------------------------------------------------------------------
+    def add_model(self, roi_names, kind='tet', name=None, cavities=None, cluster_points=None, edge_length_fac=0.05,
+                  edge_length_abs=None, region_edge_lengths=None, epsilon=1e-3, optimize=True, simplify=True,
+                  coarsen=False, stop_energy=10.0, num_opt_iter=80, color=None, visible=True, build=False):
+        """Not available on a dose; raises TypeError. Build the model from an image's ROIs instead.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> mia.Data.image['CT 01'].add_model('Liver', build=True)
+        """
+        self._raise_no_annotations()
+
+    def add_moi(self, kind, points, view_plane='Axial', position=None, name=None, color=None, visible=True,
+                text=None):
+        """Not available on a dose; raises TypeError. Add the markup to an image in the dose's frame instead.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> mia.Data.image['CT 01'].add_moi('line', points)
+        """
+        self._raise_no_annotations()
+
+    def add_planeoi(self, origin, normal, x_axis=None, name=None, extent=None, keep_side=None, group=None,
+                    color=None, visible=True):
+        """Not available on a dose; raises TypeError. Add the plane to an image in the dose's frame instead.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> mia.Data.image['CT 01'].add_planeoi(origin=[0.0, 0.0, 0.0], normal=[0.0, 0.0, 1.0])
+        """
+        self._raise_no_annotations()
+
     def add_poi(self, poi_name=None, color=None, visible=False, path=None, point=None, match=True):
         """Not available on a dose; raises TypeError. Add the POI to an image in the dose's frame instead.
 

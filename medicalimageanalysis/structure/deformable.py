@@ -65,13 +65,18 @@ Description:
     * :meth:`Deformable.save` writes one .npz: the JSON state (ids, frames, roi_ids, rigid matrix, DVF grid), the
       DVF and the reference / moving meshes, so the meshes stay viewable if the images are deleted. Warped ROI
       meshes, display settings and caches are never saved; they are rebuilt on demand.
+    * A side can record the Model (``image.model``) it was computed with: ``side.model_id``, ``side.model_build`` (the
+      model's build_count at that moment) and ``side.model_mesh``, a frozen copy of its mesh, all taken by
+      :meth:`Deformable.set_model`. The model itself stays on its image; the copy is what is saved, so rebuilding or
+      deleting the model never changes this registration. :meth:`Deformable.check_model` tells whether the live model
+      is still the one used ('current'), or was rebuilt, deleted or went stale since.
 
 Structure:
     - _deformable_sample_kernel: numba kernel, deformed image sampled onto a view grid.
     - _field_component_kernel: numba kernel, one DVF component or its magnitude sampled onto a view grid.
     - _field_corner: numba helper, clamped trilinear lookup into the DVF.
     - _solve_field: numba helper, solves r + ratio * dvf(r) = a for one point (the "solve" case above).
-    - DeformableSide: image name, frame and registration surface for one side. Built by Deformable.
+    - DeformableSide: image id, frame, registration surface and Model used for one side. Built by Deformable.
     - DeformableVisual: display settings (opacity, DVF overlay, default deformation percent).
     - Deformable: DVF, rigid pre-alignment, registration (one call for SimpleITK / Elastix / ANTs), display, ROI
       warping and saving.
@@ -118,6 +123,7 @@ Existing DVF (e.g. from a DICOM deformable registration) with a non-identity dir
 import os
 import copy
 import json
+import warnings
 
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -342,10 +348,19 @@ class DeformableSide:
         Frame of Reference UID shared by every image on this side; 'volume:<id>' when the image has none.
     mesh : pyvista.PolyData, optional
         Surface used for the registration on this side, if any. Saved, so it stays viewable if the image is deleted.
+    model_id : int or None
+        Permanent id of the Model (on this side's image) the registration was computed with, if any.
+    model_build : int or None
+        That model's ``build_count`` when it was used: a different live value means it was rebuilt since.
+    model_mesh : pyvista.UnstructuredGrid or pyvista.PolyData, optional
+        Frozen copy of that model's mesh, with its data arrays. Saved.
     """
     image_id: int | None
     frame: str | None = None
     mesh: object = None
+    model_id: int | None = None
+    model_build: int | None = None
+    model_mesh: object = None
 
 
 @dataclass
@@ -400,6 +415,8 @@ class Deformable(object):
         reference. Their frames define what the registration applies to. Only the ids are kept.
     reference_meshes, moving_meshes : pyvista.PolyData, optional
         Surfaces used for registration (stored as ``reference.mesh`` / ``moving.mesh``).
+    reference_model, moving_model : str or int, optional
+        Model (name or id, on that side's image) the registration is computed with; see :meth:`set_model`.
     local_uid : str, optional
         Existing uid when loading (:meth:`load`). None generates a new one.
     deformable_id : int, optional
@@ -412,7 +429,7 @@ class Deformable(object):
     deformable_name : str
         User name, mirrored from ``Data.deformable``. Change it with ``Data.rename_deformable``.
     reference, moving : DeformableSide
-        Image id, frame and registration surface of each side.
+        Image id, frame, registration surface and Model (id, build and frozen mesh) of each side.
     roi_ids : list of int or None
         Default ROIs guiding :meth:`compute_registration`.
     visual : DeformableVisual
@@ -429,7 +446,7 @@ class Deformable(object):
     >>> deform.compute_registration('itk_diffeomorphic')
     >>> deform = mia.Data.deformable['DVF_CT 01_CBCT 01']
     """
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 3
 
     # compute_registration method name -> DeformableITK method, for the image-based SimpleITK / Elastix methods
     ITK_METHODS = {'itk_bspline': 'bspline', 'itk_field': 'displacement_field', 'itk_demons': 'demons',
@@ -442,7 +459,8 @@ class Deformable(object):
 
     def __init__(self, dvf=None, origin=None, spacing=None, dimensions=None, roi_names=None,
                  rigid_matrix=None, dvf_matrix=None, registration_name=None, reference_name=None, moving_name=None,
-                 reference_meshes=None, moving_meshes=None, local_uid=None, deformable_id=None):
+                 reference_meshes=None, moving_meshes=None, reference_model=None, moving_model=None, local_uid=None,
+                 deformable_id=None):
         self.id = None
         reference_id, moving_id = Data.volume_id(reference_name), Data.volume_id(moving_name)
         self.reference = DeformableSide(reference_id, Data.frame_of(reference_id), reference_meshes)
@@ -472,6 +490,11 @@ class Deformable(object):
         # rebuilds itself when dvf is replaced (checked by identity, not by a manual flag).
         self._display_cache = {}
         self.mesh_slice_cache_size = 2000  # per view, all ROIs together; least-recently-used entries dropped first
+
+        if reference_model is not None:
+            self.set_model(reference_model, side='reference')
+        if moving_model is not None:
+            self.set_model(moving_model, side='moving')
 
         self.deformable_name = self.add_deformable(registration_name, deformable_id=deformable_id)
 
@@ -519,6 +542,41 @@ class Deformable(object):
         image = sitk.GetImageFromArray((np.asarray(mask) != 0).astype(np.uint8))
         image.CopyInformation(like)
         return image
+
+    @staticmethod
+    def _mesh_arrays(prefix, mesh):
+        """Arrays to save a tet UnstructuredGrid or a PolyData (with its point / cell data) under prefix."""
+        arrays = {prefix + 'points': np.asarray(mesh.points)}
+        if isinstance(mesh, pv.UnstructuredGrid):
+            arrays[prefix + 'tets'] = np.asarray(mesh.cells_dict[pv.CellType.TETRA])
+        else:
+            arrays[prefix + 'faces'] = np.asarray(mesh.faces)
+        for key in mesh.point_data.keys():
+            arrays[prefix + 'point_data_' + key] = np.asarray(mesh.point_data[key])
+        for key in mesh.cell_data.keys():
+            arrays[prefix + 'cell_data_' + key] = np.asarray(mesh.cell_data[key])
+
+        return arrays
+
+    @staticmethod
+    def _mesh_from_arrays(prefix, data):
+        """Mesh saved by _mesh_arrays under prefix, or None when there is none."""
+        if prefix + 'points' not in data:
+            return None
+
+        if prefix + 'tets' in data:
+            mesh = pv.UnstructuredGrid({pv.CellType.TETRA: data[prefix + 'tets']}, data[prefix + 'points'])
+        else:
+            faces = data[prefix + 'faces']
+            mesh = pv.PolyData(data[prefix + 'points'], faces if faces.size else None)
+
+        for key in data.files:
+            if key.startswith(prefix + 'point_data_'):
+                mesh.point_data[key[len(prefix + 'point_data_'):]] = data[key]
+            elif key.startswith(prefix + 'cell_data_'):
+                mesh.cell_data[key[len(prefix + 'cell_data_'):]] = data[key]
+
+        return mesh
 
     @staticmethod
     def _rigid_inv(mat):
@@ -609,7 +667,7 @@ class Deformable(object):
         ROIs (``roi``) are only built when the moving image is present.
 
         Schema 1 files (saved with image and ROI names) are read too: the names are looked up, so their images and
-        ROIs must be loaded first.
+        ROIs must be loaded first. Schema 2 files simply have no models.
 
         Examples
         --------
@@ -630,6 +688,7 @@ class Deformable(object):
                 if side + '_points' in data:
                     faces = data[side + '_faces']
                     meshes[side] = pv.PolyData(data[side + '_points'], faces if faces.size else None)
+            model_meshes = {side: cls._mesh_from_arrays(side + '_model_', data) for side in ('reference', 'moving')}
 
         if schema == 1:
             reference_id = Data.volume_id(record['reference']['image_name'])
@@ -654,6 +713,12 @@ class Deformable(object):
         # the images may not be loaded, so keep the saved frames instead of the placeholders __init__ derived
         deform.reference.frame = record['reference'].get('frame', deform.reference.frame)
         deform.moving.frame = record['moving'].get('frame', deform.moving.frame)
+        deform.reference.model_id = record['reference'].get('model_id')
+        deform.moving.model_id = record['moving'].get('model_id')
+        deform.reference.model_build = record['reference'].get('model_build')
+        deform.moving.model_build = record['moving'].get('model_build')
+        deform.reference.model_mesh = model_meshes['reference']
+        deform.moving.model_mesh = model_meshes['moving']
 
         return deform
 
@@ -720,8 +785,10 @@ class Deformable(object):
     def _record(self):
         """Registration state as plain JSON types. The DVF and the meshes are stored as arrays next to it by save."""
         return {'schema': self.SCHEMA_VERSION, 'id': self.id, 'uid': self.local_uid, 'name': self.deformable_name,
-                'reference': {'image_id': self.reference.image_id, 'frame': self.reference.frame},
-                'moving': {'image_id': self.moving.image_id, 'frame': self.moving.frame},
+                'reference': {'image_id': self.reference.image_id, 'frame': self.reference.frame,
+                              'model_id': self.reference.model_id, 'model_build': self.reference.model_build},
+                'moving': {'image_id': self.moving.image_id, 'frame': self.moving.frame,
+                           'model_id': self.moving.model_id, 'model_build': self.moving.model_build},
                 'roi_ids': None if self.roi_ids is None else list(self.roi_ids),
                 'rigid_matrix': np.asarray(self.rigid_matrix, dtype=float).ravel().tolist(),
                 'origin': None if self.origin is None else [float(v) for v in self.origin],
@@ -964,6 +1031,43 @@ class Deformable(object):
             Data.deformable.add(self, deformable_name, item_id=deformable_id)
 
         return deformable_name
+
+    def check_model(self, side='reference'):
+        """Whether the live Model is still the mesh this side was computed with.
+
+        Returns
+        -------
+        str or None
+            None when the side has no model. Otherwise:
+
+            * 'current' : same build, and its source ROIs are unchanged.
+            * 'rebuilt' : the model was rebuilt (or given another mesh) since :meth:`set_model`; this registration
+              still holds the old mesh in ``side.model_mesh``.
+            * 'stale'   : same build, but a source ROI was edited since the model was built.
+            * 'deleted' : the model is gone (or its image is not loaded); ``side.model_mesh`` is all that is left.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> deform = mia.Data.deformable['DVF_CT 01_CT 02']
+        >>> deform.check_model('reference')
+        'rebuilt'
+        """
+        target = getattr(self, side)
+        if target.model_id is None:
+            return None
+
+        try:
+            model = Data.find_model(target.model_id)
+        except KeyError:
+            return 'deleted'
+
+        if model.build_count != target.model_build:
+            return 'rebuilt'
+        if model.is_stale():
+            return 'stale'
+
+        return 'current'
 
     def clear_mesh_slice_cache(self, plane=None):
         """Drop cached mesh slices for one plane, or all planes when plane is None.
@@ -1585,6 +1689,36 @@ class Deformable(object):
 
         return mesh
 
+    def get_model(self, side='reference'):
+        """The live Model a side was computed with, or None (no model, or it was deleted). The frozen copy of the
+        mesh actually used is always ``self.<side>.model_mesh``.
+
+        Warns (``UserWarning``) when the live model has been rebuilt since :meth:`set_model`, since its mesh is then
+        not the one this registration was computed with. See :meth:`check_model`.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> deform = mia.Data.deformable['DVF_CT 01_CT 02']
+        >>> model = deform.get_model('reference')
+        >>> if deform.check_model('reference') == 'stale':
+        ...     print('Liver ROI edited after this registration was computed')
+        """
+        model_id = getattr(self, side).model_id
+        if model_id is None:
+            return None
+
+        try:
+            model = Data.find_model(model_id)
+        except KeyError:
+            return None
+
+        if model.build_count != getattr(self, side).model_build:
+            warnings.warn(f"Model '{model.name}' was rebuilt after '{self.deformable_name}' used it; "
+                          f"{side}.model_mesh holds the mesh that was used.", stacklevel=2)
+
+        return model
+
     def get_view_center(self, plane, position, base_name=None):
         """base_name's crosshair in view pixel coords (pixel centers at integers), for crosshair / zoom anchors.
 
@@ -1653,9 +1787,9 @@ class Deformable(object):
             return None
 
     def save(self, path):
-        """Write the registration to one .npz file: the JSON state, the DVF and the reference / moving meshes (points
-        and faces). Written to a temporary name and swapped in, so a crash never leaves a half-written file. No
-        pickle, so loading never runs code from the file.
+        """Write the registration to one .npz file: the JSON state, the DVF, the reference / moving meshes (points
+        and faces) and the frozen copy of each side's Model mesh. Written to a temporary name and swapped in, so a
+        crash never leaves a half-written file. No pickle, so loading never runs code from the file.
 
         Warped ROIs (``roi``), display settings and caches are not saved; they are rebuilt on demand.
 
@@ -1672,11 +1806,45 @@ class Deformable(object):
             if side.mesh is not None:
                 arrays[name + '_points'] = np.asarray(side.mesh.points)
                 arrays[name + '_faces'] = np.asarray(side.mesh.faces)
+            if side.model_mesh is not None:
+                arrays.update(self._mesh_arrays(name + '_model_', side.model_mesh))
 
         temp = path + '.tmp'
         with open(temp, 'wb') as f:      # a file object stops numpy from appending .npz to the temporary name
             np.savez(f, **arrays)
         os.replace(temp, path)
+
+    def set_model(self, model_name, side='reference'):
+        """Record the Model a side is computed with and freeze a copy of its mesh (``side.model_mesh``).
+
+        Call it when the model is used (e.g. before running the FEBio registration). Rebuilding or deleting the model
+        afterwards does not change this registration (:meth:`check_model` reports it); call set_model again, and
+        recompute, to take the new mesh.
+
+        Parameters
+        ----------
+        model_name : str or int
+            Model name or id on that side's image.
+        side : {'reference', 'moving'}, default 'reference'
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> deform = mia.Data.deformable['DVF_CT 01_CT 02']
+        >>> deform.set_model('Liver FE', side='reference')
+        >>> deform.reference.model_mesh.n_points
+        """
+        if side not in ('reference', 'moving'):
+            raise ValueError(f"side must be 'reference' or 'moving'; got {side!r}")
+
+        target = getattr(self, side)
+        model = Data.find_model(model_name, image_name=target.image_id)
+        if model.mesh is None:
+            raise ValueError(f"Model '{model.name}' is not built.")
+
+        target.model_id = model.id
+        target.model_build = model.build_count
+        target.model_mesh = model.mesh.copy(deep=True)
 
     def set_percent(self, percent):
         """Deformation level used by compute_array / compute_mesh_slice / get_display_mesh when no percent is passed

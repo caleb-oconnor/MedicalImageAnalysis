@@ -17,6 +17,7 @@ Stored Data:
     * Rigid registrations
     * Deformable registrations (DVFs)
     * Dose distributions (RTDOSE)
+    * Markups, planes and models of interest (kept on their images)
 
 Key Functionalities:
     1. **Global Registry**: Class-level `Registry` containers shared by every
@@ -40,6 +41,13 @@ Key Functionalities:
        display code (Rigid, Deformable); `delete` removes an entry from any
        registry, `delete_roi` / `delete_poi` remove an ROI/POI from every
        image.
+    6. **Markups and Planes**: markups of interest (``image.moi``: lines, arrows, angles, ...) and planes of interest
+       (``image.planeoi``: cut and reference planes) belong to one image and are never synced or matched. `Data`
+       only keeps their ids unique across every image (`new_moi_id`, `new_planeoi_id`) and finds, renames, re-keys
+       and deletes them by id (`find_moi`, `rename_moi`, `change_moi_id`, `delete_moi`, and the same for planes).
+       Their names are unique per image only, so a name needs the image (``image_name=``).
+       Models (``image.model``: clustered / tetrahedral meshes derived from ROIs) follow the same rules: `find_model`,
+       `rename_model`, `change_model_id`, `delete_model`.
 
 Id Note:
     Without help, new ids come from counters (1, 2, 3, ...) that only go
@@ -49,7 +57,8 @@ Id Note:
 
     * **Provider (recommended):** set `Data.roi_id_provider` (and
       `volume_id_provider`, `poi_id_provider`, `rigid_id_provider`,
-      `deformable_id_provider`) to a function `provider(name, item)` that
+      `deformable_id_provider`, `moi_id_provider`, `planeoi_id_provider`,
+      `model_id_provider`) to a function `provider(name, item)` that
       returns the database id: the existing one when the name / series is
       already known, otherwise a newly created one. Returning None falls back
       to the counter. Every new ROI anywhere (RTSTRUCT, mask, drawing,
@@ -134,6 +143,10 @@ class Data(object):
         Fallback counters for new ROI / POI ids (no provider). ROIs and POIs
         themselves live only on images (``image.roi`` / ``image.poi``).
 
+    moi_next_id, planeoi_next_id, model_next_id : int
+        Fallback counters for new markup / plane / model ids (no provider). They themselves live only on images
+        (``image.moi`` / ``image.planeoi`` / ``image.model``).
+
     Examples
     --------
     Access the registry from any module without passing objects around:
@@ -165,11 +178,17 @@ class Data(object):
     poi_id_provider = None           # item is None
     rigid_id_provider = None         # item is the Rigid
     deformable_id_provider = None    # item is the Deformable
+    moi_id_provider = None           # item is the Moi (its image, kind, ... are set)
+    planeoi_id_provider = None      # item is the PlaneOI
+    model_id_provider = None         # item is the Model (its image, roi_ids, recipe are set)
 
     # Fallback counters for new ROI / POI ids when there is no provider (or it returns None). They only go up, so a
     # number is never handed out twice in a session. Reset by clear().
     roi_next_id = 1
     poi_next_id = 1
+    moi_next_id = 1
+    planeoi_next_id = 1
+    model_next_id = 1
 
     # Registries, built by clear() (run once at import, below the class). Images and doses draw ids from one counter,
     # so a volume id is unique across both and Data.volume(id) is never ambiguous.
@@ -234,6 +253,25 @@ class Data(object):
         return old_id
 
     @classmethod
+    def _change_markup_id(cls, kind, key, new_id, image_name=None):
+        """Re-key a markup (kind='moi') or plane (kind='planeoi') on its image. Returns the old id, or None when new_id
+        is already its id."""
+        item = cls._find_markup(kind, key, image_name)
+        new_id = Registry._check_id(new_id)
+        if new_id == item.id:
+            return None
+
+        if new_id in cls._markup_ids(kind):
+            raise KeyError(f"{kind.upper()} id {new_id} is already in use.")
+
+        old_id = getattr(item.image, kind).change_id(item.id, new_id)
+
+        counter = kind + '_next_id'
+        setattr(cls, counter, max(getattr(cls, counter), new_id + 1))
+
+        return old_id
+
+    @classmethod
     def _check_annotations(cls, kind):
         """Raise ValueError if one ROI/POI name has two ids across the images, or one id two names.
 
@@ -267,9 +305,42 @@ class Data(object):
         return annotation_id
 
     @classmethod
+    def _delete_markup(cls, kind, key, image_name=None):
+        """Remove a markup / plane from its image and return it. Its id is retired: the counter never hands it out
+        again."""
+        item = cls._find_markup(kind, key, image_name)
+
+        return getattr(item.image, kind).remove(item.id)
+
+    @classmethod
+    def _find_markup(cls, kind, key, image_name=None):
+        """The markup / plane with this id on any loaded image, or with this name (or id) on image_name.
+
+        Names are unique per image only, so a name needs image_name.
+        """
+        if image_name is not None:
+            return getattr(cls.image[image_name], kind)[key]
+
+        if isinstance(key, str):
+            raise ValueError(f"{kind.upper()} names are only unique on one image; pass image_name= to find "
+                             f"{key!r}, or use its id.")
+
+        for image in cls.image.values():
+            registry = getattr(image, kind)
+            if key in registry:
+                return registry[key]
+
+        raise KeyError(f"No {kind.upper()} with id {key!r} on any loaded image.")
+
+    @classmethod
     def _has_annotation(cls, kind, key):
         """True when some loaded image has the ROI/POI (name or id)."""
         return any(key in getattr(image, kind) for image in cls.image.values())
+
+    @classmethod
+    def _markup_ids(cls, kind):
+        """Ids of every markup / plane on the loaded images, image by image."""
+        return [item_id for image in cls.image.values() for item_id in getattr(image, kind).ids()]
 
     @classmethod
     def _match_annotations(cls, kind):
@@ -326,6 +397,26 @@ class Data(object):
         return annotation_id
 
     @classmethod
+    def _new_markup_id(cls, kind, name, item):
+        """Id for a markup / plane being added to an image: the provider's (``moi_id_provider`` /
+        ``planeoi_id_provider``), else the counter past every id in use. No name matching: two markups with the
+        same name on different images get different ids."""
+        used = set(cls._markup_ids(kind))
+        counter = kind + '_next_id'
+
+        item_id = cls._provided_id(getattr(cls, kind + '_id_provider'), name, item)
+        if item_id is None:
+            item_id = max([getattr(cls, counter)] + [i + 1 for i in used])
+        else:
+            item_id = Registry._check_id(item_id)
+            if item_id in used:
+                raise KeyError(f"{kind}_id_provider gave id {item_id} for {name!r}, but it is already in use.")
+
+        setattr(cls, counter, max(getattr(cls, counter), item_id + 1))
+
+        return item_id
+
+    @classmethod
     def _rename_annotation(cls, kind, key, new_name):
         """Rename an ROI/POI on every image that has it; checked before anything changes."""
         annotation_id = cls._resolve_annotation(kind, key)
@@ -340,6 +431,12 @@ class Data(object):
                 registry.rename(annotation_id, new_name)
 
     @classmethod
+    def _rename_markup(cls, kind, key, new_name, image_name=None):
+        """Rename a markup / plane on its image (names only need to be unique there)."""
+        item = cls._find_markup(kind, key, image_name)
+        getattr(item.image, kind).rename(item.id, new_name)
+
+    @classmethod
     def _resolve_annotation(cls, kind, key):
         """Id of an ROI/POI (name or id) on the loaded images; KeyError when no image has it."""
         for image in cls.image.values():
@@ -348,6 +445,86 @@ class Data(object):
                 return registry.get_id(key)
 
         raise KeyError(f"No {kind.upper()} {key!r} on any loaded image.")
+
+    @classmethod
+    def change_model_id(cls, key, new_id, image_name=None) -> None:
+        """
+        Give a model a new permanent id (e.g. the database's). The name is unchanged. Every Deformable that refers to
+        the model is updated too.
+
+        Parameters
+        ----------
+        key : int | str
+            Current id, or name with `image_name`.
+
+        new_id : int
+            New id, not used by another model on any image.
+
+        image_name : str | int, optional
+            Image holding the model; needed when `key` is a name.
+
+        Examples
+        --------
+        >>> from medicalimageanalysis import Data
+        >>> Data.change_model_id('Liver FE', 3301, image_name='CT 01')
+        """
+        old_id = cls._change_markup_id('model', key, new_id, image_name)
+        if old_id is None:
+            return
+        new_id = Registry._check_id(new_id)
+
+        for deform in cls.deformable.values():
+            for side in (deform.reference, deform.moving):
+                if side.model_id == old_id:
+                    side.model_id = new_id
+
+    @classmethod
+    def change_moi_id(cls, key, new_id, image_name=None) -> None:
+        """
+        Give a markup of interest a new permanent id (e.g. the database's). The name is unchanged.
+
+        Parameters
+        ----------
+        key : int | str
+            Current id, or name with `image_name`.
+
+        new_id : int
+            New id, not used by another markup on any image.
+
+        image_name : str | int, optional
+            Image holding the markup; needed when `key` is a name.
+
+        Examples
+        --------
+        >>> from medicalimageanalysis import Data
+        >>> Data.change_moi_id('Line 1', 5521, image_name='CT 01')
+        >>> Data.image['CT 01'].moi['Line 1'].id
+        5521
+        """
+        cls._change_markup_id('moi', key, new_id, image_name)
+
+    @classmethod
+    def change_planeoi_id(cls, key, new_id, image_name=None) -> None:
+        """
+        Give a plane of interest a new permanent id (e.g. the database's). The name is unchanged.
+
+        Parameters
+        ----------
+        key : int | str
+            Current id, or name with `image_name`.
+
+        new_id : int
+            New id, not used by another plane on any image.
+
+        image_name : str | int, optional
+            Image holding the plane; needed when `key` is a name.
+
+        Examples
+        --------
+        >>> from medicalimageanalysis import Data
+        >>> Data.change_planeoi_id('Superior cut', 812, image_name='CT 01')
+        """
+        cls._change_markup_id('planeoi', key, new_id, image_name)
 
     @classmethod
     def change_poi_id(cls, key, new_id) -> None:
@@ -390,7 +567,8 @@ class Data(object):
         """
         Give an ROI a new permanent id everywhere it is stored. The name is unchanged.
 
-        Updates every image's ROI, every Rigid's ROI pairs and every Deformable's guiding ROIs and warped meshes. Use it to adopt the database's id for an ROI made before the database knew it.
+        Updates every image's ROI, every Rigid's ROI pairs, every Deformable's guiding ROIs and warped meshes and every
+        Model's source ROIs. Use it to adopt the database's id for an ROI made before the database knew it.
 
         Parameters
         ----------
@@ -431,6 +609,11 @@ class Data(object):
             if old_id in deform.roi:
                 deform.roi = {(new_id if k == old_id else k): v for k, v in deform.roi.items()}
             deform.invalidate_display()
+
+        for image in cls.image.values():
+            for model in image.model.values():
+                model.roi_ids = [new_id if roi_id == old_id else roi_id for roi_id in model.roi_ids]
+                model.cavity_ids = [new_id if roi_id == old_id else roi_id for roi_id in model.cavity_ids]
 
     @classmethod
     def change_volume_id(cls, key, new_id) -> None:
@@ -493,9 +676,9 @@ class Data(object):
         Wipe all data from the global registry.
 
         Performs a full reset of the class-level storage, clearing the
-        current session's images, registrations, dose objects and ROI/POI
-        ids. Ids start again at 1. This action is non-reversible and affects
-        every module importing `Data`.
+        current session's images, registrations, dose objects and ROI/POI/
+        MOI/PlaneOI/Model ids. Ids start again at 1. This action is
+        non-reversible and affects every module importing `Data`.
 
         Returns
         -------
@@ -530,6 +713,9 @@ class Data(object):
                                   id_source=lambda name, item: cls._provided_id(cls.deformable_id_provider, name, item))
         cls.roi_next_id = 1
         cls.poi_next_id = 1
+        cls.moi_next_id = 1
+        cls.planeoi_next_id = 1
+        cls.model_next_id = 1
 
     @classmethod
     def deformable_list(cls) -> list[str]:
@@ -668,6 +854,44 @@ class Data(object):
         cls.delete(image_name, registry='image')
 
     @classmethod
+    def delete_model(cls, key, image_name=None) -> None:
+        """
+        Remove a model from its image and retire its id. A Deformable that used it keeps its frozen copy
+        (``side.model_mesh``), so the registration still works and can still be viewed.
+
+        Examples
+        --------
+        >>> from medicalimageanalysis import Data
+        >>> Data.delete_model('Liver FE fine', image_name='CT 01')
+        """
+        cls._delete_markup('model', key, image_name)
+
+    @classmethod
+    def delete_moi(cls, key, image_name=None) -> None:
+        """
+        Remove a markup of interest from its image and retire its id.
+
+        Examples
+        --------
+        >>> from medicalimageanalysis import Data
+        >>> Data.delete_moi(5521)
+        >>> Data.delete_moi('Line 2', image_name='CT 01')
+        """
+        cls._delete_markup('moi', key, image_name)
+
+    @classmethod
+    def delete_planeoi(cls, key, image_name=None) -> None:
+        """
+        Remove a plane of interest from its image and retire its id.
+
+        Examples
+        --------
+        >>> from medicalimageanalysis import Data
+        >>> Data.delete_planeoi('Superior cut', image_name='CT 01')
+        """
+        cls._delete_markup('planeoi', key, image_name)
+
+    @classmethod
     def delete_poi(cls, key) -> None:
         """
         Remove a POI from every image and retire its id.
@@ -743,6 +967,62 @@ class Data(object):
         ['Dose_0']
         """
         return cls.dose.keys()
+
+    @classmethod
+    def find_model(cls, key, image_name=None):
+        """
+        A model by id (searched on every loaded image), or by name / id on `image_name`. Its image is ``model.image``.
+
+        Raises
+        ------
+        KeyError
+            If it is not found.
+        ValueError
+            If `key` is a name and `image_name` is None (names are unique per image only).
+
+        Examples
+        --------
+        >>> from medicalimageanalysis import Data
+        >>> model = Data.find_model(3301)
+        >>> model = Data.find_model('Liver FE', image_name='CT 01')
+        """
+        return cls._find_markup('model', key, image_name)
+
+    @classmethod
+    def find_moi(cls, key, image_name=None):
+        """
+        A markup of interest by id (searched on every loaded image), or by name / id on `image_name`.
+
+        Its image is ``moi.image``.
+
+        Raises
+        ------
+        KeyError
+            If it is not found.
+        ValueError
+            If `key` is a name and `image_name` is None (names are unique per image only).
+
+        Examples
+        --------
+        >>> from medicalimageanalysis import Data
+        >>> moi = Data.find_moi(5521)
+        >>> moi.image.image_name, moi.name
+        ('CT 01', 'Line 1')
+        """
+        return cls._find_markup('moi', key, image_name)
+
+    @classmethod
+    def find_planeoi(cls, key, image_name=None):
+        """
+        A plane of interest by id (searched on every loaded image), or by name / id on `image_name`.
+
+        Examples
+        --------
+        >>> from medicalimageanalysis import Data
+        >>> plane = Data.find_planeoi(812)
+        >>> plane = Data.find_planeoi('Superior cut', image_name='CT 01')
+        """
+        return cls._find_markup('planeoi', key, image_name)
 
     @classmethod
     def frame_of(cls, key):
@@ -982,6 +1262,84 @@ class Data(object):
         cls._match_annotations('roi')
 
     @classmethod
+    def model_ids(cls) -> list[int]:
+        """
+        Permanent ids of every model on the loaded images.
+
+        Examples
+        --------
+        >>> from medicalimageanalysis import Data
+        >>> Data.model_ids()
+        [3301, 3302]
+        """
+        return cls._markup_ids('model')
+
+    @classmethod
+    def moi_ids(cls) -> list[int]:
+        """
+        Permanent ids of every markup of interest on the loaded images.
+
+        Examples
+        --------
+        >>> from medicalimageanalysis import Data
+        >>> Data.moi_ids()
+        [5521, 5522]
+        """
+        return cls._markup_ids('moi')
+
+    @classmethod
+    def new_model_id(cls, name=None, item=None) -> int:
+        """
+        Id for a new model; every image's ``model`` registry uses it as its id_source.
+
+        ``model_id_provider(name, item)``, or the next ``model_next_id`` when there is no provider or it returns None.
+
+        Examples
+        --------
+        >>> from medicalimageanalysis import Data
+        >>> Data.new_model_id()
+        3303
+        """
+        return cls._new_markup_id('model', name, item)
+
+    @classmethod
+    def new_moi_id(cls, name=None, item=None) -> int:
+        """
+        Id for a new markup of interest; every image's ``moi`` registry uses it as its id_source.
+
+        ``moi_id_provider(name, item)`` (e.g. the database's id), or the next ``moi_next_id`` when there is no
+        provider or it returns None. Names are not matched across images.
+
+        Raises
+        ------
+        KeyError
+            If the provider returns an id already used by another markup.
+
+        Examples
+        --------
+        >>> from medicalimageanalysis import Data
+        >>> Data.new_moi_id()
+        5523
+        """
+        return cls._new_markup_id('moi', name, item)
+
+    @classmethod
+    def new_planeoi_id(cls, name=None, item=None) -> int:
+        """
+        Id for a new plane of interest; every image's ``planeoi`` registry uses it as its id_source.
+
+        ``planeoi_id_provider(name, item)``, or the next ``planeoi_next_id`` when there is no provider or it
+        returns None. Names are not matched across images.
+
+        Examples
+        --------
+        >>> from medicalimageanalysis import Data
+        >>> Data.new_planeoi_id()
+        813
+        """
+        return cls._new_markup_id('planeoi', name, item)
+
+    @classmethod
     def new_poi_id(cls, name) -> int:
         """
         Id for a POI name being added to an image; every image's ``poi`` registry uses it as its id_source.
@@ -1086,6 +1444,19 @@ class Data(object):
                            f"'{cls.volume_label(volume_id)}'.")
 
         return volume_id
+
+    @classmethod
+    def planeoi_ids(cls) -> list[int]:
+        """
+        Permanent ids of every plane of interest on the loaded images.
+
+        Examples
+        --------
+        >>> from medicalimageanalysis import Data
+        >>> Data.planeoi_ids()
+        [812]
+        """
+        return cls._markup_ids('planeoi')
 
     @classmethod
     def poi_ids(cls) -> list[int]:
@@ -1199,6 +1570,43 @@ class Data(object):
         'Planning CT'
         """
         cls.image.rename(key, new_name)
+
+    @classmethod
+    def rename_model(cls, key, new_name, image_name=None) -> None:
+        """
+        Change a model's name on its image; its id is unchanged.
+
+        Examples
+        --------
+        >>> from medicalimageanalysis import Data
+        >>> Data.rename_model('Model 1', 'Liver FE', image_name='CT 01')
+        """
+        cls._rename_markup('model', key, new_name, image_name)
+
+    @classmethod
+    def rename_moi(cls, key, new_name, image_name=None) -> None:
+        """
+        Change a markup's name on its image; its id is unchanged. Only that image is affected.
+
+        Examples
+        --------
+        >>> from medicalimageanalysis import Data
+        >>> Data.rename_moi('Line 1', 'Tumor length', image_name='CT 01')
+        >>> Data.rename_moi(5521, 'Tumor length')
+        """
+        cls._rename_markup('moi', key, new_name, image_name)
+
+    @classmethod
+    def rename_planeoi(cls, key, new_name, image_name=None) -> None:
+        """
+        Change a plane's name on its image; its id is unchanged. Only that image is affected.
+
+        Examples
+        --------
+        >>> from medicalimageanalysis import Data
+        >>> Data.rename_planeoi('Plane 1', 'Superior cut', image_name='CT 01')
+        """
+        cls._rename_markup('planeoi', key, new_name, image_name)
 
     @classmethod
     def rename_poi(cls, key, new_name) -> None:
