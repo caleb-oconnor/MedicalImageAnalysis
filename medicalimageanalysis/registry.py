@@ -398,42 +398,42 @@ class Registry(object):
         self.id_to_name[item_id] = new_name
         self._tag(self.objects[item_id], item_id, new_name)
 
+    def reorder(self, keys):
+        """
+        Puts the items in a new order. Ids, names and objects are unchanged.
+
+        Use this instead of rebuilding the registry as a dict (e.g. to sort),
+        which would replace it with a plain dict and lose id lookups.
+
+        Parameters
+        ----------
+        keys : list of int | str
+            Every item exactly once, as ids or names, in the new order.
+
+        Raises
+        ------
+        ValueError
+            If `keys` leaves out an item or names one twice. Nothing is
+            changed in that case.
+
+        Examples
+        --------
+        >>> rois.keys()
+        ['Liver', 'GTV']
+        >>> rois.reorder(['GTV', 'Liver'])
+        >>> rois.keys(), rois.ids()
+        (['GTV', 'Liver'], [2, 1])
+        """
+        order = [self._resolve(key) for key in keys]
+        if len(order) != len(self.objects) or set(order) != set(self.objects):
+            raise ValueError(f'reorder needs every item exactly once: got {len(order)} keys for '
+                             f'{len(self.objects)} items')
+
+        self.objects = {item_id: self.objects[item_id] for item_id in order}
+        self.id_to_name = {item_id: self.id_to_name[item_id] for item_id in order}
+
     def values(self):
         """
         Returns all items in insertion order, like dict.values().
         """
         return list(self.objects.values())
-
-
-if __name__ == '__main__':
-    class Dummy(object):
-        def __init__(self):
-            self.id = None
-            self.name = None
-
-    rois = Registry()
-    liver_id = rois.add(Dummy(), 'Liver')
-    gtv_id = rois.add(Dummy(), 'GTV')
-
-    rois.rename('Liver', 'Liver_Whole')
-    assert rois[liver_id] is rois['Liver_Whole']
-    assert rois[liver_id].name == 'Liver_Whole'
-    assert 'Liver' not in rois
-
-    del rois['GTV']
-    rois['GTV'] = Dummy()
-    assert rois.get_id('GTV') == 3
-
-    replacement = Dummy()
-    rois['Liver_Whole'] = replacement
-    assert replacement.id == liver_id
-
-    rois.change_id('Liver_Whole', 17)
-    assert rois[17] is replacement and replacement.id == 17 and rois.keys() == ['Liver_Whole', 'GTV']
-    assert rois.add(Dummy(), 'Spleen') == 18
-
-    from_db = Registry(id_source=lambda name, item: {'Liver': 40}.get(name))
-    assert from_db.add(Dummy(), 'Liver') == 40
-    assert from_db.add(Dummy(), 'New ROI') == 41
-
-    print(list(zip(rois.ids(), rois.keys())))

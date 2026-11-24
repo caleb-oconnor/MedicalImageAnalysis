@@ -574,7 +574,8 @@ def sort_images_by_datetime():
         ),
     )
 
-    Data.image = {key: Data.image[key] for key in ordered_names}
+    # reorder in place: rebuilding Data.image as a dict would replace the Registry and lose id lookups
+    Data.image.reorder(ordered_names)
 
 
 def thread_process_dicom(path, stop_before_pixels=False):
@@ -1032,7 +1033,7 @@ class DicomReader(object):
                     ReadUS(image_set, self.only_tags)
 
         for modality in ['RTSTRUCT']:
-            for image_set in self.ds_modality[modality]:
+            for image_set in self.ds_modality.get(modality, []):     # empty when only_modality leaves it out
                 read_rtstruct = ReadRTStruct(image_set, self.only_tags)
                 if read_rtstruct.match_image_name is not None:
                     Data.image[read_rtstruct.match_image_name].input_rtstruct(read_rtstruct)
@@ -1040,11 +1041,11 @@ class DicomReader(object):
                     print('dicom: rtstruct has no matching image')
 
         for modality in ['REG']:
-            for image_set in self.ds_modality[modality]:
+            for image_set in self.ds_modality.get(modality, []):     # empty when only_modality leaves it out
                 ReadREG(image_set, self.only_tags)
 
         for modality in ['RTDOSE']:
-            for image_set in self.ds_modality[modality]:
+            for image_set in self.ds_modality.get(modality, []):     # empty when only_modality leaves it out
                 ReadRTDose(image_set, self.only_tags)
 
 
@@ -4455,7 +4456,9 @@ def create_image_name(modality):
 
     The index is the number of images already in `Data`, plus one, and is
     zero-padded to two digits. The index is shared across modalities, so a
-    CT followed by an MR gives 'CT 01' and 'MR 02'.
+    CT followed by an MR gives 'CT 01' and 'MR 02'. If that name is already
+    taken (after a delete or rename) the index goes up until it is free, so a
+    new image never replaces an existing one.
 
     Parameters
     ----------
@@ -4488,21 +4491,23 @@ def create_image_name(modality):
     9
     >>> create_image_name('MR')
     'MR 10'
-    """
-    idx = len(Data.image_list())
-    if idx < 9:
-        image_name = modality + ' 0' + str(1 + idx)
-    else:
-        image_name = modality + ' ' + str(1 + idx)
 
-    return image_name
+    A name freed up by a delete is not reused if another image still has it:
+
+    >>> Data.image_list()
+    ['CT 02']
+    >>> create_image_name('CT')
+    'CT 03'
+    """
+    return _next_free_name(modality, Data.image)
 
 
 def create_dose_name(modality):
     """
     Generate the next sequential dose name.
 
-    Same scheme as `create_image_name`, counted over `Data.dose`.
+    Same scheme as `create_image_name`, counted over `Data.dose`, and also
+    skipping names already taken.
 
     Parameters
     ----------
@@ -4530,10 +4535,25 @@ def create_dose_name(modality):
     >>> create_dose_name('RTDOSE')
     'RTDOSE 02'
     """
-    idx = len(Data.dose_list())
-    if idx < 9:
-        image_name = modality + ' 0' + str(1 + idx)
-    else:
-        image_name = modality + ' ' + str(1 + idx)
+    return _next_free_name(modality, Data.dose)
 
-    return image_name
+
+def _next_free_name(modality, registry):
+    """
+    '<modality> NN' with NN = number of entries + 1 (two digits below 10), raised until the name is not in registry.
+
+    Examples
+    --------
+    >>> from medicalimageanalysis import Data
+    >>> from medicalimageanalysis.read.dicom import _next_free_name
+    >>> Data.image_list()
+    ['CT 01', 'CT 03']
+    >>> _next_free_name('CT', Data.image)
+    'CT 04'
+    """
+    idx = len(registry) + 1
+    while True:
+        name = f'{modality} {idx:02d}'
+        if name not in registry:
+            return name
+        idx += 1
