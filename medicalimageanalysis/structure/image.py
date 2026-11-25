@@ -728,7 +728,7 @@ class Image(object):
         has the same id on every image. Rename them with ``Data.rename_roi`` / ``Data.rename_poi``, not on one image.
     moi, planeoi : Registry
         Markups / planes of interest by permanent id or name. Ids come from ``Data.new_moi_id`` /
-        ``Data.new_plane_oi_id`` (unique across every image); names are unique on this image only.
+        ``Data.new_planeoi_id`` (unique across every image); names are unique on this image only.
     model : Registry
         Models (clustered / tetrahedral meshes derived from this image's ROIs) by permanent id or name. Ids come
         from ``Data.new_model_id`` (unique across every image); names are unique on this image only.
@@ -960,7 +960,7 @@ class Image(object):
 
         return moi
 
-    def add_plane_oi(self, origin, normal, x_axis=None, name=None, extent=None, keep_side=None, group=None,
+    def add_planeoi(self, origin, normal, x_axis=None, name=None, extent=None, keep_side=None, group=None,
                      color=None, visible=True):
         """Add a plane of interest (cut plane, reference plane, ...). Nothing is synced to other images.
 
@@ -998,13 +998,13 @@ class Image(object):
         --------
         >>> import medicalimageanalysis as mia
         >>> image = mia.Data.image['CT 01']
-        >>> cut = image.add_plane_oi(origin=[12.0, -80.0, 410.0], normal=[0.0, 0.3, 0.95], extent=(120, 90),
+        >>> cut = image.add_planeoi(origin=[12.0, -80.0, 410.0], normal=[0.0, 0.3, 0.95], extent=(120, 90),
         ...                          keep_side=-1, group='Resection 1', name='Superior cut')
 
         The plane of the view currently shown, through the crosshair:
 
         >>> grid = image.display.get_grid('Sagittal', image.display.position['Sagittal'])
-        >>> image.add_plane_oi(origin=image.display.crosshair, normal=grid['normal'], x_axis=grid['x_axis'])
+        >>> image.add_planeoi(origin=image.display.crosshair, normal=grid['normal'], x_axis=grid['x_axis'])
         """
         plane = PlaneOI(self, origin, normal, x_axis=x_axis, extent=extent, keep_side=keep_side, group=group,
                         color=color, visible=visible)
