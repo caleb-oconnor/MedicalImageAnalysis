@@ -48,6 +48,14 @@ Key Functionalities:
        Their names are unique per image only, so a name needs the image (``image_name=``).
        Models (``image.model``: clustered / tetrahedral meshes derived from ROIs) follow the same rules: `find_model`,
        `rename_model`, `change_model_id`, `delete_model`.
+    7. **Groups**: `group` holds named sets of ROIs, POIs, markups, planes
+       and models ('Liver vessels' > 'Portal'). A group is an overlay: its
+       members stay normal items and only carry ``item.group_id`` (None =
+       ungrouped), so code that ignores groups is unaffected. `add_group`,
+       `set_group`, `group_members`, `ungrouped_members`, `rename_group`,
+       `delete_group`. ROIs/POIs have one group on every image, like their
+       names. An ROI made from another (split, cut) records it in
+       ``roi.source_id`` (`set_roi_source`).
 
 Id Note:
     Without help, new ids come from counters (1, 2, 3, ...) that only go
@@ -58,7 +66,7 @@ Id Note:
     * **Provider (recommended):** set `Data.roi_id_provider` (and
       `volume_id_provider`, `poi_id_provider`, `rigid_id_provider`,
       `deformable_id_provider`, `moi_id_provider`, `planeoi_id_provider`,
-      `model_id_provider`) to a function `provider(name, item)` that
+      `model_id_provider`, `group_id_provider`) to a function `provider(name, item)` that
       returns the database id: the existing one when the name / series is
       already known, otherwise a newly created one. Returning None falls back
       to the counter. Every new ROI anywhere (RTSTRUCT, mask, drawing,
@@ -147,6 +155,14 @@ class Data(object):
         Fallback counters for new markup / plane / model ids (no provider). They themselves live only on images
         (``image.moi`` / ``image.planeoi`` / ``image.model``).
 
+    group : Registry
+        Groups of items (:class:`~medicalimageanalysis.structure.group.Group`); the name is mirrored onto
+        `group.name`. Members carry ``group_id``; see `set_group` and `group_members`.
+
+    saved_group_ids : dict
+        Saved group id -> group id in this session, filled by `add_saved_groups` and read by `live_group_id`, so
+        loaded items find their group even when its id changed on loading. Reset by clear().
+
     Examples
     --------
     Access the registry from any module without passing objects around:
@@ -181,6 +197,10 @@ class Data(object):
     moi_id_provider = None           # item is the Moi (its image, kind, ... are set)
     planeoi_id_provider = None      # item is the PlaneOI
     model_id_provider = None         # item is the Model (its image, roi_ids, recipe are set)
+    group_id_provider = None         # item is the Group (its name, color, parent_id are set)
+
+    # Kinds of item that can be put in a group: the image registry each one lives in
+    GROUP_KINDS = ('roi', 'poi', 'moi', 'planeoi', 'model')
 
     # Fallback counters for new ROI / POI ids when there is no provider (or it returns None). They only go up, so a
     # number is never handed out twice in a session. Reset by clear().
@@ -196,6 +216,13 @@ class Data(object):
     rigid = None
     deformable = None
     dose = None
+    group = None
+    saved_group_ids = {}
+
+    @staticmethod
+    def _group_of(item):
+        """Group id of an item, or None (also for items made before groups existed)."""
+        return getattr(item, 'group_id', None)
 
     @staticmethod
     def _provided_id(provider, name, item):
@@ -294,6 +321,12 @@ class Data(object):
                              f". Fix with Data.change_{kind}_id or Data.rename_{kind} on the image that is wrong.")
 
     @classmethod
+    def _check_group_kind(cls, kind):
+        """Raise ValueError unless kind is one of GROUP_KINDS."""
+        if kind not in cls.GROUP_KINDS:
+            raise ValueError(f"kind must be one of {list(cls.GROUP_KINDS)}; got {kind!r}")
+
+    @classmethod
     def _delete_annotation(cls, kind, key):
         """Remove an ROI/POI from every image. Its id is retired: the counter never hands it out again."""
         annotation_id = cls._resolve_annotation(kind, key)
@@ -350,11 +383,17 @@ class Data(object):
 
         for annotation_id, name in cls._annotation_pairs(kind):
             color, visible = None, False
+            group_id, source_id = None, None
             for image in images:
                 annotation = getattr(image, kind).get(annotation_id)
-                if annotation is not None and annotation.color is not None:
+                if annotation is None:
+                    continue
+                if color is None and annotation.color is not None:
                     color, visible = annotation.color, annotation.visible
-                    break
+                if group_id is None:
+                    group_id = cls._group_of(annotation)
+                if source_id is None:
+                    source_id = getattr(annotation, 'source_id', None)
 
             if color is None:
                 color = [128, 128, 128]
@@ -363,8 +402,10 @@ class Data(object):
                 if annotation_id not in getattr(image, kind):
                     if kind == 'roi':
                         image.add_roi(roi_name=name, color=color, visible=visible, match=False)
+                        image.roi[annotation_id].source_id = source_id
                     else:
                         image.add_poi(poi_name=name, color=color, visible=visible, match=False)
+                    getattr(image, kind)[annotation_id].group_id = group_id
 
     @classmethod
     def _new_annotation_id(cls, kind, name):
@@ -445,6 +486,129 @@ class Data(object):
                 return registry.get_id(key)
 
         raise KeyError(f"No {kind.upper()} {key!r} on any loaded image.")
+
+    @classmethod
+    def add_group(cls, name, color=None, parent=None):
+        """
+        The group with this name, created when missing (then with `color` and `parent`).
+
+        Parameters
+        ----------
+        name : str
+            Group name, unique across the session.
+
+        color : list of int, optional
+            RGB, 0-255. Random if None.
+
+        parent : str | int, optional
+            Group (name or id) to nest the new group in; a name is created when missing. None = top level.
+
+        Returns
+        -------
+        Group
+
+        Examples
+        --------
+        >>> from medicalimageanalysis import Data
+        >>> Data.add_group('Liver vessels')
+        >>> Data.add_group('Portal', parent='Liver vessels').parent_id == Data.group['Liver vessels'].id
+        True
+        """
+        if name in cls.group:
+            return cls.group[name]
+
+        from .structure.group import Group
+
+        group = Group(name=name, color=color, parent_id=cls.resolve_group(parent))
+        cls.group.add(group, name)
+
+        return group
+
+    @classmethod
+    def add_saved_groups(cls, records) -> dict:
+        """
+        Add groups saved with `groups_to_json` and return {saved id: id in this session}.
+
+        A saved group whose name is already in `group` is that group (a name is one group). Otherwise it keeps its
+        saved id unless that id is taken, and is given a new one then. The mapping is kept in `saved_group_ids`, so
+        every loader turns a saved ``group_id`` into the live one with `live_group_id`. Calling it twice with the same
+        records changes nothing.
+
+        Parameters
+        ----------
+        records : list of str
+            Group JSON strings, parents before children (as `groups_to_json` writes them).
+
+        Returns
+        -------
+        dict
+
+        Examples
+        --------
+        >>> from medicalimageanalysis import Data
+        >>> Data.add_saved_groups(Data.groups_to_json())
+        {1: 1, 2: 2}
+        """
+        from .structure.group import Group
+
+        mapping = {}
+        for text in records:
+            group = Group.from_json(text)
+            saved_id = group.id
+
+            if group.name in cls.group:
+                mapping[saved_id] = cls.group.get_id(group.name)
+                continue
+
+            parent_id = group.parent_id
+            group.parent_id = mapping.get(parent_id, cls.live_group_id(parent_id))
+            item_id = saved_id if saved_id is not None and saved_id not in cls.group else None
+            mapping[saved_id] = cls.group.add(group, group.name, item_id=item_id)
+
+        cls.saved_group_ids.update({k: v for k, v in mapping.items() if k is not None})
+
+        return mapping
+
+    @classmethod
+    def change_group_id(cls, key, new_id) -> None:
+        """
+        Give a group a new permanent id (e.g. the database's). The name is unchanged; every member and nested group
+        is updated.
+
+        Parameters
+        ----------
+        key : str | int
+            Group name or current id.
+
+        new_id : int
+            New id, not used by another group.
+
+        Examples
+        --------
+        >>> from medicalimageanalysis import Data
+        >>> Data.change_group_id('Portal', 410)
+        >>> Data.image['CT 01'].roi['Portal vein'].group_id
+        410
+        """
+        old_id = cls.group.get_id(key)
+        new_id = Registry._check_id(new_id)
+        if new_id == old_id:
+            return
+
+        if new_id in cls.group:
+            raise KeyError(f"Group id {new_id} is already used by {cls.group.get_name(new_id)!r}.")
+
+        cls.group.change_id(old_id, new_id)
+
+        for group in cls.group.values():
+            if group.parent_id == old_id:
+                group.parent_id = new_id
+
+        for image in cls.image.values():
+            for kind in cls.GROUP_KINDS:
+                for item in getattr(image, kind).values():
+                    if cls._group_of(item) == old_id:
+                        item.group_id = new_id
 
     @classmethod
     def change_model_id(cls, key, new_id, image_name=None) -> None:
@@ -567,8 +731,8 @@ class Data(object):
         """
         Give an ROI a new permanent id everywhere it is stored. The name is unchanged.
 
-        Updates every image's ROI, every Rigid's ROI pairs, every Deformable's guiding ROIs and warped meshes and every
-        Model's source ROIs. Use it to adopt the database's id for an ROI made before the database knew it.
+        Updates every image's ROI, every Rigid's ROI pairs, every Deformable's guiding ROIs and warped meshes, every
+        Model's source ROIs and every ROI made from it (``source_id``). Use it to adopt the database's id for an ROI made before the database knew it.
 
         Parameters
         ----------
@@ -614,6 +778,9 @@ class Data(object):
             for model in image.model.values():
                 model.roi_ids = [new_id if roi_id == old_id else roi_id for roi_id in model.roi_ids]
                 model.cavity_ids = [new_id if roi_id == old_id else roi_id for roi_id in model.cavity_ids]
+            for roi in image.roi.values():
+                if getattr(roi, 'source_id', None) == old_id:
+                    roi.source_id = new_id
 
     @classmethod
     def change_volume_id(cls, key, new_id) -> None:
@@ -676,8 +843,8 @@ class Data(object):
         Wipe all data from the global registry.
 
         Performs a full reset of the class-level storage, clearing the
-        current session's images, registrations, dose objects and ROI/POI/
-        MOI/PlaneOI/Model ids. Ids start again at 1. This action is
+        current session's images, registrations, dose objects, groups and
+        ROI/POI/MOI/PlaneOI/Model ids. Ids start again at 1. This action is
         non-reversible and affects every module importing `Data`.
 
         Returns
@@ -711,6 +878,9 @@ class Data(object):
                              id_source=lambda name, item: cls._provided_id(cls.rigid_id_provider, name, item))
         cls.deformable = Registry(name_attribute='deformable_name',
                                   id_source=lambda name, item: cls._provided_id(cls.deformable_id_provider, name, item))
+        cls.group = Registry(name_attribute='name',
+                             id_source=lambda name, item: cls._provided_id(cls.group_id_provider, name, item))
+        cls.saved_group_ids = {}
         cls.roi_next_id = 1
         cls.poi_next_id = 1
         cls.moi_next_id = 1
@@ -813,6 +983,36 @@ class Data(object):
             raise ValueError(f"'{name}' is in {found}; pass registry= to choose one.")
 
         del registries[found[0]][name]
+
+    @classmethod
+    def delete_group(cls, key) -> None:
+        """
+        Remove a group. Its members and nested groups move up to its parent (ungrouped / top level when it has none);
+        no item is deleted.
+
+        Parameters
+        ----------
+        key : str | int
+            Group name or id.
+
+        Examples
+        --------
+        >>> from medicalimageanalysis import Data
+        >>> Data.delete_group('Portal')            # the portal vein and its points are now in 'Liver vessels'
+        """
+        group = cls.group[key]
+
+        for other in cls.group.values():
+            if other.parent_id == group.id:
+                other.parent_id = group.parent_id
+
+        for image in cls.image.values():
+            for kind in cls.GROUP_KINDS:
+                for item in getattr(image, kind).values():
+                    if cls._group_of(item) == group.id:
+                        item.group_id = group.parent_id
+
+        del cls.group[group.id]
 
     @classmethod
     def delete_image(cls, image_name) -> None:
@@ -935,7 +1135,12 @@ class Data(object):
         >>> Data.has_roi('Liver')
         False
         """
-        cls._delete_annotation('roi', key)
+        roi_id = cls._delete_annotation('roi', key)
+
+        for image in cls.image.values():
+            for roi in image.roi.values():
+                if getattr(roi, 'source_id', None) == roi_id:
+                    roi.source_id = None
 
     @classmethod
     def dose_list(cls) -> list[str]:
@@ -1137,6 +1342,122 @@ class Data(object):
         return cls._annotation_name('roi', key)
 
     @classmethod
+    def group_descendants(cls, key) -> list[int]:
+        """
+        Id of a group followed by the ids of every group nested under it (any depth).
+
+        Examples
+        --------
+        >>> from medicalimageanalysis import Data
+        >>> Data.group_descendants('Liver vessels')
+        [1, 2, 3, 4]
+        """
+        found = [cls.group.get_id(key)]
+        index = 0
+        while index < len(found):
+            for group in cls.group.values():
+                if group.parent_id == found[index] and group.id not in found:
+                    found.append(group.id)
+            index += 1
+
+        return found
+
+    @classmethod
+    def group_list(cls) -> list[str]:
+        """
+        Names of every group, in insertion order.
+
+        Examples
+        --------
+        >>> from medicalimageanalysis import Data
+        >>> Data.group_list()
+        ['Liver vessels', 'Portal', 'Airways']
+        """
+        return cls.group.keys()
+
+    @classmethod
+    def group_members(cls, key, kind, include_children=True, image_name=None) -> list[int]:
+        """
+        Ids of the items of one kind in a group, each id once.
+
+        Parameters
+        ----------
+        key : str | int
+            Group name or id.
+
+        kind : {'roi', 'poi', 'moi', 'planeoi', 'model'}
+
+        include_children : bool, default True
+            Also the members of the groups nested in it.
+
+        image_name : str | int, optional
+            Only this image. None = every loaded image (ROI/POI ids are the same on every image).
+
+        Returns
+        -------
+        list[int]
+
+        Examples
+        --------
+        >>> from medicalimageanalysis import Data
+        >>> Data.group_members('Airways', 'poi')
+        >>> Data.group_members('Resection 1', 'planeoi', image_name='CT 01')
+        >>> [Data.get_roi_name(i) for i in Data.group_members('Liver vessels', 'roi')]
+        ['Portal vein', 'Hepatic artery', 'Hepatic vein']
+        """
+        cls._check_group_kind(kind)
+        group_ids = set(cls.group_descendants(key)) if include_children else {cls.group.get_id(key)}
+        images = cls.image.values() if image_name is None else [cls.image[image_name]]
+
+        found = []
+        for image in images:
+            registry = getattr(image, kind)
+            for item_id in registry.ids():
+                if cls._group_of(registry[item_id]) in group_ids and item_id not in found:
+                    found.append(item_id)
+
+        return found
+
+    @classmethod
+    def groups_to_json(cls, image_name=None) -> list[str]:
+        """
+        Groups as JSON strings (one per group, parents before children), for saving next to their members.
+
+        Parameters
+        ----------
+        image_name : str | int, optional
+            Only the groups used by an item on this image (any kind), with the groups they are nested in. None = every
+            group.
+
+        Examples
+        --------
+        >>> from medicalimageanalysis import Data
+        >>> records = Data.groups_to_json('CT 01')
+        >>> Data.add_saved_groups(records)        # when loading
+        """
+        if image_name is None:
+            group_ids = list(cls.group.ids())
+        else:
+            image = cls.volume(image_name)          # a dose too: its empty containers give no groups
+            group_ids = []
+            for kind in cls.GROUP_KINDS:
+                for item in getattr(image, kind).values():
+                    group_id = cls._group_of(item)
+                    while group_id is not None and group_id in cls.group and group_id not in group_ids:
+                        group_ids.append(group_id)
+                        group_id = cls.group[group_id].parent_id
+
+        def depth(group_id):
+            level = 0
+            parent_id = cls.group[group_id].parent_id
+            while parent_id is not None and parent_id in cls.group and level < len(cls.group):
+                level += 1
+                parent_id = cls.group[parent_id].parent_id
+            return level
+
+        return [cls.group[group_id].to_json() for group_id in sorted(group_ids, key=depth)]
+
+    @classmethod
     def has_poi(cls, key) -> bool:
         """
         True when some loaded image has the POI (name or id).
@@ -1198,13 +1519,32 @@ class Data(object):
         return cls.image.keys()
 
     @classmethod
+    def live_group_id(cls, saved_id):
+        """
+        Group id in this session of a saved ``group_id``: mapped by `add_saved_groups`, else kept when that group
+        exists, else None (its group was not loaded). Every loader passes saved group ids through this.
+
+        Examples
+        --------
+        >>> from medicalimageanalysis import Data
+        >>> Data.add_saved_groups(records)
+        >>> roi.group_id = Data.live_group_id(saved_group_id)
+        """
+        if saved_id is None:
+            return None
+        if saved_id in cls.saved_group_ids:
+            return cls.saved_group_ids[saved_id]
+
+        return saved_id if saved_id in cls.group else None
+
+    @classmethod
     def match_pois(cls) -> None:
         """
         Synchronize POI definitions across all loaded images.
 
         Gives every image an entry for every POI found on any image, under the same permanent id. Existing POIs
         keep their own color and visibility; a copy added to an image takes the color/visibility of the first image
-        where the POI has a color, else grey [128, 128, 128] and hidden.
+        where the POI has a color, else grey [128, 128, 128] and hidden, and the POI's group.
 
         Raises
         ------
@@ -1236,7 +1576,7 @@ class Data(object):
 
         Gives every image an entry for every ROI found on any image, under the same permanent id. Existing ROIs
         keep their own color and visibility; a copy added to an image takes the color/visibility of the first image
-        where the ROI has a color, else grey [128, 128, 128] and hidden.
+        where the ROI has a color, else grey [128, 128, 128] and hidden, and the ROI's group and source.
 
         Raises
         ------
@@ -1542,6 +1882,18 @@ class Data(object):
         cls.dose[dose_id].dose_name = new_name
 
     @classmethod
+    def rename_group(cls, key, new_name) -> None:
+        """
+        Change a group's name; its id and members are unchanged.
+
+        Examples
+        --------
+        >>> from medicalimageanalysis import Data
+        >>> Data.rename_group('Portal', 'Portal venous system')
+        """
+        cls.group.rename(key, new_name)
+
+    @classmethod
     def rename_image(cls, key, new_name) -> None:
         """
         Change an image's user name; its id is unchanged.
@@ -1703,6 +2055,32 @@ class Data(object):
         cls._rename_annotation('roi', key, new_name)
 
     @classmethod
+    def resolve_group(cls, group):
+        """
+        Group id from whatever was passed: None stays None, a name gives that group's id (created when missing), an id
+        must exist.
+
+        Raises
+        ------
+        KeyError
+            If `group` is an id no group has.
+
+        Examples
+        --------
+        >>> from medicalimageanalysis import Data
+        >>> Data.resolve_group('Airways')          # created on first use
+        3
+        >>> Data.resolve_group(3), Data.resolve_group(None)
+        (3, None)
+        """
+        if group is None:
+            return None
+        if isinstance(group, str):
+            return cls.add_group(group).id
+
+        return cls.group.get_id(group)
+
+    @classmethod
     def rigid_list(cls) -> list[str]:
         """
         Return the names of all stored rigid registrations.
@@ -1763,6 +2141,130 @@ class Data(object):
         []
         """
         return [name for _, name in cls._annotation_pairs('roi')]
+
+    @classmethod
+    def set_group(cls, kind, key, group, image_name=None) -> None:
+        """
+        Put one or more items in a group, or take them out (group=None).
+
+        An ROI or POI is set on every image that has it (its group is part of its identity, like its name). A markup,
+        plane or model is set on its one item.
+
+        Parameters
+        ----------
+        kind : {'roi', 'poi', 'moi', 'planeoi', 'model'}
+
+        key : str | int | list of them
+            Item name(s) or id(s). Markup / plane / model names need `image_name`.
+
+        group : str | int | None
+            Group name (created when missing) or id. None = ungrouped.
+
+        image_name : str | int, optional
+            Image holding the markups / planes / models; needed when `key` is a name.
+
+        Examples
+        --------
+        >>> from medicalimageanalysis import Data
+        >>> Data.set_group('roi', 'Portal vein', 'Portal')
+        >>> Data.set_group('poi', Data.poi_list()[:20], 'Portal')
+        >>> Data.set_group('planeoi', ['Superior cut', 'Inferior cut'], 'Resection 1', image_name='CT 01')
+        >>> Data.set_group('roi', 'GTV_2', None)              # ungrouped
+        """
+        cls._check_group_kind(kind)
+        group_id = cls.resolve_group(group)
+        keys = list(key) if isinstance(key, (list, tuple, set)) else [key]
+
+        if kind in ('roi', 'poi'):
+            item_ids = [cls._resolve_annotation(kind, k) for k in keys]       # all checked before anything changes
+            for image in cls.image.values():
+                registry = getattr(image, kind)
+                for item_id in item_ids:
+                    if item_id in registry:
+                        registry[item_id].group_id = group_id
+        else:
+            items = [cls._find_markup(kind, k, image_name) for k in keys]
+            for item in items:
+                item.group_id = group_id
+
+    @classmethod
+    def set_group_parent(cls, key, parent) -> None:
+        """
+        Nest a group in another one (parent=None = top level).
+
+        Raises
+        ------
+        ValueError
+            If `parent` is the group itself or nested in it.
+
+        Examples
+        --------
+        >>> from medicalimageanalysis import Data
+        >>> Data.set_group_parent('Hepatic artery', 'Liver vessels')
+        >>> Data.set_group_parent('Hepatic artery', None)
+        """
+        group = cls.group[key]
+        parent_id = cls.resolve_group(parent)
+        if parent_id is not None and parent_id in cls.group_descendants(group.id):
+            raise ValueError(f"Group {cls.group.get_name(parent_id)!r} is {group.name!r} or nested in it.")
+
+        group.parent_id = parent_id
+
+    @classmethod
+    def set_roi_source(cls, key, source) -> None:
+        """
+        Record that an ROI was made from another one (``roi.source_id``), on every image that has it.
+
+        Used by ``Image.split_roi`` and ``PlaneOI.cut_roi``. A viewer can nest the ROI under its source; nothing
+        else changes. source=None clears it.
+
+        Parameters
+        ----------
+        key : str | int
+            ROI name or id.
+
+        source : str | int | None
+            The ROI it was made from (name or id).
+
+        Examples
+        --------
+        >>> from medicalimageanalysis import Data
+        >>> Data.set_roi_source('GTV_1', 'GTV')
+        >>> Data.image['CT 01'].roi['GTV_1'].source_id == Data.get_roi_id('GTV')
+        True
+        """
+        roi_id = cls._resolve_annotation('roi', key)
+        source_id = None if source is None else cls._resolve_annotation('roi', source)
+        if source_id == roi_id:
+            raise ValueError("An ROI cannot be made from itself.")
+
+        for image in cls.image.values():
+            if roi_id in image.roi:
+                image.roi[roi_id].source_id = source_id
+
+    @classmethod
+    def ungrouped_members(cls, kind, image_name=None) -> list[int]:
+        """
+        Ids of the items of one kind that are in no group (or in a group that no longer exists), each id once.
+
+        Examples
+        --------
+        >>> from medicalimageanalysis import Data
+        >>> [Data.get_roi_name(i) for i in Data.ungrouped_members('roi')]
+        ['Liver', 'GTV', 'GTV_1', 'GTV_2']
+        """
+        cls._check_group_kind(kind)
+        images = cls.image.values() if image_name is None else [cls.image[image_name]]
+
+        found = []
+        for image in images:
+            registry = getattr(image, kind)
+            for item_id in registry.ids():
+                group_id = cls._group_of(registry[item_id])
+                if (group_id is None or group_id not in cls.group) and item_id not in found:
+                    found.append(item_id)
+
+        return found
 
     @classmethod
     def volume(cls, name):
