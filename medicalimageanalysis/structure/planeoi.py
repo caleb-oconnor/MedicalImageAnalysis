@@ -18,7 +18,10 @@ Description:
     * ``extent`` is (width, height) in mm along x_axis and y_axis, or None for an infinite plane. It only bounds
       the display; cutting always uses the whole plane.
     * ``keep_side`` is +1 (keep the side the normal points to), -1 (keep the other side) or None (not a cut plane).
-    * ``group`` is a free label tying planes together, e.g. the two to four planes of one resection.
+    * ``group_id`` ties planes together through a group (``Data.group``), e.g. the two to four planes of one
+      resection. ``group=`` takes the group's name (created when missing) or id. A copy made with
+      :meth:`PlaneOI.copy_to` stays in the same group. Records before schema 2 stored a free-text ``group`` label;
+      reading one puts the plane in the group of that name.
     * Display: a plane crosses any view that is not parallel to it in a straight line, so it is shown on every view
       (:meth:`PlaneOI.compute_display`, analytic: no mesh slicing). A view lying in the plane shows its extent (or the
       whole view for an infinite plane); a parallel view elsewhere shows nothing. :meth:`PlaneOI.go_to` turns a view
@@ -49,9 +52,8 @@ Look straight at it (the other two views turn with it, perpendicular to the cut)
 Cut the bone with every plane of the resection
 
 >>> mesh = image.roi['Pelvis_L'].mesh
->>> for plane in image.planeoi.values():
-...     if plane.group == 'Resection 1':
-...         mesh = plane.cut_mesh(mesh)
+>>> for plane_id in mia.Data.group_members('Resection 1', 'planeoi', image_name='CT 01'):
+...     mesh = image.planeoi[plane_id].cut_mesh(mesh)
 
 Plane from three clicked points, then copied to the MR through a registration
 
@@ -73,7 +75,7 @@ class PlaneOI(object):
     """One plane of interest on one image.
 
     Made by the image (:meth:`Image.add_planeoi`) and stored in ``image.planeoi``, which looks it up by permanent id
-    or by name (``image.planeoi[4]``, ``image.planeoiplaneoi['Superior cut']``).
+    or by name (``image.planeoi[4]``, ``image.planeoi['Superior cut']``).
 
     Parameters
     ----------
@@ -91,8 +93,9 @@ class PlaneOI(object):
         (width, height) in mm along x_axis / y_axis. None = infinite.
     keep_side : {1, -1, None}, optional
         Side kept when cutting: +1 the side the normal points to, -1 the other. None = not a cut plane.
-    group : str, optional
-        Label tying planes together (e.g. one resection).
+    group : str or int, optional
+        Group (name or id) tying planes together (e.g. one resection); a name is created when missing. None =
+        ungrouped.
     color : list of int, optional
         RGB, 0-255. Random if None.
     visible : bool, default True
@@ -104,6 +107,8 @@ class PlaneOI(object):
         Permanent id, written by ``image.planeoi``. None until the plane is added.
     y_axis : (3,) ndarray
         normal x x_axis.
+    group_id : int or None
+        Group the plane is in (``Data.group``), None = ungrouped.
     misc : dict
         Free space for the application.
 
@@ -114,7 +119,7 @@ class PlaneOI(object):
     >>> plane = mia.PlaneOI(image, origin=image.display.crosshair, normal=[0, 0, 1])
     >>> image.planeoi.add(plane, 'Axial reference')
     """
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
 
     def __init__(self, image, origin, normal, x_axis=None, name=None, extent=None, keep_side=None, group=None,
                  color=None, visible=True):
@@ -132,7 +137,7 @@ class PlaneOI(object):
         self.x_axis, self.y_axis, self.normal = self._orthonormal(normal, x_axis)
         self.extent = None if extent is None else (float(extent[0]), float(extent[1]))
         self.keep_side = keep_side
-        self.group = group
+        self.group_id = Data.resolve_group(group)
 
         self.misc = {}
 
@@ -180,7 +185,9 @@ class PlaneOI(object):
         """Rebuild a plane from :meth:`to_json` output, not yet added to the image.
 
         ``id`` and ``name`` hold the saved values; :meth:`Image.markups_from_json` adds it with them (or with a new id
-        when the saved one is taken).
+        when the saved one is taken). The saved group goes through ``Data.live_group_id``, so load the groups first
+        (``Data.add_saved_groups``; :meth:`Image.markups_from_json` does). A schema 1 record's ``group`` label puts the
+        plane in the group of that name.
 
         Examples
         --------
@@ -194,10 +201,13 @@ class PlaneOI(object):
         if schema > cls.SCHEMA_VERSION:
             raise ValueError(f"Record schema {schema} is newer than supported ({cls.SCHEMA_VERSION}).")
 
+        group = record.get('group') if schema == 1 else None          # schema 1: a free-text label
         plane = cls(image, record['origin'], record['normal'], x_axis=record['x_axis'], name=record['name'],
-                    extent=record['extent'], keep_side=record['keep_side'], group=record['group'],
+                    extent=record['extent'], keep_side=record['keep_side'], group=group,
                     color=record['color'], visible=record['visible'])
         plane.id = record.get('id')
+        if schema > 1:
+            plane.group_id = Data.live_group_id(record.get('group_id'))
 
         return plane
 
@@ -259,7 +269,7 @@ class PlaneOI(object):
                 'image_id': getattr(self.image, 'id', None), 'origin': self.origin.tolist(),
                 'normal': self.normal.tolist(), 'x_axis': self.x_axis.tolist(),
                 'extent': None if self.extent is None else list(self.extent), 'keep_side': self.keep_side,
-                'group': self.group, 'color': [int(c) for c in self.color], 'visible': bool(self.visible)}
+                'group_id': self.group_id, 'color': [int(c) for c in self.color], 'visible': bool(self.visible)}
 
     def _registration_matrix(self, target, rigid_name=None):
         """4x4 this image's world -> target image's world (target is an Image).
@@ -457,7 +467,7 @@ class PlaneOI(object):
 
         return target.add_planeoi(origin=rotation @ self.origin + matrix[:3, 3], normal=rotation @ self.normal,
                                   x_axis=rotation @ self.x_axis, name=self.name if name is None else name,
-                                  extent=self.extent, keep_side=self.keep_side, group=self.group,
+                                  extent=self.extent, keep_side=self.keep_side, group=self.group_id,
                                   color=list(self.color), visible=self.visible)
 
     def cut_mesh(self, mesh, cap=True):
@@ -506,7 +516,8 @@ class PlaneOI(object):
     def cut_roi(self, roi_name, new_name=None, color=None, cap=True):
         """Cut one of this image's ROIs with the plane and store the kept part as an ROI on the image.
 
-        The result is mesh only (``update_mesh`` drops contours), like any ROI replaced by a mesh.
+        The result is mesh only (``update_mesh`` drops contours), like any ROI replaced by a mesh. It records the
+        source ROI (``roi.source_id``, see ``Data.set_roi_source``).
 
         Parameters
         ----------
@@ -540,6 +551,8 @@ class PlaneOI(object):
         if new_name not in self.image.roi:
             self.image.add_roi(roi_name=new_name, color=roi.color if color is None else color, visible=True)
         self.image.roi[new_name].update_mesh(mesh)
+        if self.image.roi[new_name].id != roi.id:
+            Data.set_roi_source(new_name, roi.id)
 
         return self.image.roi[new_name]
 

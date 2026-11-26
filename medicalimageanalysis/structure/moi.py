@@ -19,6 +19,8 @@ Description:
     * A markup is shown only on views that lie in its plane (within half a slice by default, :meth:`Moi.is_on_view`).
       Other views hide it; :meth:`Moi.go_to` takes the image's display back to the view it was drawn on.
     * Measurements (:meth:`Moi.compute_measurement`) are in the image's own world: mm, mm^2 and degrees.
+    * ``group_id`` puts the markup in a group (``Data.group``, None = ungrouped), e.g. every measurement of one
+      lesion. Set it with ``group=`` here or ``Data.set_group('moi', ...)``.
     * ``id`` is permanent and unique across every image (``Data.new_moi_id``). ``name`` is unique on its image only,
       so two images can each have a 'Line 1'. Rename with ``Data.rename_moi`` (or ``image.moi.rename``); no other image
       has to follow.
@@ -58,6 +60,8 @@ import json
 
 import numpy as np
 
+from ..data import Data
+
 
 class Moi(object):
     """One markup of interest on one image.
@@ -85,11 +89,15 @@ class Moi(object):
         Show in the views.
     text : str, optional
         Label drawn with the markup (the whole content for kind 'text').
+    group : str or int, optional
+        Group (name or id) to put the markup in; a name is created when missing. None = ungrouped.
 
     Attributes
     ----------
     id : int or None
         Permanent id, written by ``image.moi``. None until the markup is added.
+    group_id : int or None
+        Group the markup is in (``Data.group``), None = ungrouped.
     misc : dict
         Free space for the application.
 
@@ -112,7 +120,7 @@ class Moi(object):
     SCHEMA_VERSION = 1
 
     def __init__(self, image, kind, points, view_plane='Axial', plane_origin=None, plane_x_axis=None,
-                 plane_y_axis=None, plane_normal=None, name=None, color=None, visible=True, text=None):
+                 plane_y_axis=None, plane_normal=None, name=None, color=None, visible=True, text=None, group=None):
         if kind not in self.POINTS:
             raise ValueError(f"kind must be one of {list(self.POINTS)}; got {kind!r}")
         if view_plane not in self.NORMAL_INDEX:
@@ -129,6 +137,7 @@ class Moi(object):
         self.color = [255, 255, 0] if color is None else list(color)
         self.visible = visible
         self.text = text
+        self.group_id = Data.resolve_group(group)
 
         self.view_plane = view_plane
         self.plane_origin = np.asarray(plane_origin, dtype=float)
@@ -190,7 +199,8 @@ class Moi(object):
         """Rebuild a markup from :meth:`to_json` output, not yet added to the image.
 
         ``id`` and ``name`` hold the saved values; :meth:`Image.markups_from_json` adds it with them (or with a new id
-        when the saved one is taken).
+        when the saved one is taken). The saved group goes through ``Data.live_group_id``, so load the groups first
+        (``Data.add_saved_groups``; :meth:`Image.markups_from_json` does).
 
         Examples
         --------
@@ -209,6 +219,7 @@ class Moi(object):
                   plane_y_axis=record['plane_y_axis'], plane_normal=record['plane_normal'], name=record['name'],
                   color=record['color'], visible=record['visible'], text=record['text'])
         moi.id = record.get('id')
+        moi.group_id = Data.live_group_id(record.get('group_id'))
 
         return moi
 
@@ -259,7 +270,8 @@ class Moi(object):
                 'points': self.points.tolist(), 'view_plane': self.view_plane,
                 'plane_origin': self.plane_origin.tolist(), 'plane_x_axis': self.plane_x_axis.tolist(),
                 'plane_y_axis': self.plane_y_axis.tolist(), 'plane_normal': self.plane_normal.tolist(),
-                'color': [int(c) for c in self.color], 'visible': bool(self.visible), 'text': self.text}
+                'color': [int(c) for c in self.color], 'visible': bool(self.visible), 'text': self.text,
+                'group_id': self.group_id}
 
     def _tolerance(self):
         """Default distance (mm) a view may be from the drawing plane and still show the markup: half a slice."""

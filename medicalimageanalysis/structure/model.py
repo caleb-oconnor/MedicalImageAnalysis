@@ -31,6 +31,8 @@ Description:
       and is saved. The id stays the same through a rebuild, so anything that used the model records the build_count
       it saw (``Deformable.set_model``) and can tell when the model has been rebuilt since
       (``Deformable.check_model``). To keep an old mesh next to a new recipe, make a new model instead of rebuilding.
+    * ``group_id`` puts the model in a group (``Data.group``, None = ungrouped), like any other item. Set it with
+      ``group=`` here or ``Data.set_group('model', ...)``.
     * Results that belong to the mesh (temperature, material maps) go in ``mesh.point_data`` / ``mesh.cell_data`` and
       are saved with it. Results that belong to one registration (nodal displacements, the DVF) stay in that
       Deformable, which refers to the model by id and keeps a frozen copy of the mesh it used.
@@ -106,11 +108,15 @@ class Model(object):
         RGB, 0-255. Random if None.
     visible : bool, default True
         Show in the views.
+    group : str or int, optional
+        Group (name or id) to put the model in; a name is created when missing. None = ungrouped.
 
     Attributes
     ----------
     id : int or None
         Permanent id, written by ``image.model``. None until the model is added.
+    group_id : int or None
+        Group the model is in (``Data.group``), None = ungrouped.
     surfaces : list of pyvista.PolyData or None
         Clustered surface of each source ROI, in region order. None until built.
     mesh : pyvista.UnstructuredGrid, pyvista.PolyData or None
@@ -136,7 +142,8 @@ class Model(object):
 
     def __init__(self, image, roi_names, kind='tet', name=None, cavities=None, cluster_points=None,
                  edge_length_fac=0.05, edge_length_abs=None, region_edge_lengths=None, epsilon=1e-3, optimize=True,
-                 simplify=True, coarsen=False, stop_energy=10.0, num_opt_iter=80, color=None, visible=True):
+                 simplify=True, coarsen=False, stop_energy=10.0, num_opt_iter=80, color=None, visible=True,
+                 group=None):
         if kind not in self.KINDS:
             raise ValueError(f"kind must be one of {list(self.KINDS)}; got {kind!r}")
 
@@ -147,6 +154,7 @@ class Model(object):
         self.kind = kind
         self.color = list(random_color()) if color is None else list(color)
         self.visible = visible
+        self.group_id = Data.resolve_group(group)
 
         self.roi_ids = [Data.get_roi_id(roi) for roi in self._as_list(roi_names)]
         self.cavity_ids = [] if cavities is None else [Data.get_roi_id(roi) for roi in self._as_list(cavities)]
@@ -225,7 +233,8 @@ class Model(object):
         """Rebuild a model from :meth:`to_bytes` output, not yet added to the image.
 
         ``id`` and ``name`` hold the saved values; :meth:`Image.add_saved_model` adds it with them (or a new id when the
-        saved one is taken). The source ROIs do not have to be loaded.
+        saved one is taken). The source ROIs do not have to be loaded. The saved group goes through
+        ``Data.live_group_id``, so load the groups first (:meth:`Image.load_markups` before :meth:`Image.load_models`).
 
         Examples
         --------
@@ -247,6 +256,7 @@ class Model(object):
             model.kind = record['kind']
             model.color = record['color']
             model.visible = record['visible']
+            model.group_id = Data.live_group_id(record.get('group_id'))
             model.roi_ids = list(record['roi_ids'])
             model.cavity_ids = list(record['cavity_ids'])
             for key in ('cluster_points', 'edge_length_fac', 'edge_length_abs', 'region_edge_lengths', 'epsilon',
@@ -293,7 +303,7 @@ class Model(object):
         """State as plain JSON types (everything but the arrays)."""
         return {'schema': self.SCHEMA_VERSION, 'id': self.id, 'name': self.name,
                 'image_id': getattr(self.image, 'id', None), 'kind': self.kind,
-                'color': [int(c) for c in self.color], 'visible': bool(self.visible),
+                'color': [int(c) for c in self.color], 'visible': bool(self.visible), 'group_id': self.group_id,
                 'roi_ids': list(self.roi_ids), 'cavity_ids': list(self.cavity_ids),
                 'cluster_points': self.cluster_points, 'edge_length_fac': self.edge_length_fac,
                 'edge_length_abs': self.edge_length_abs, 'region_edge_lengths': self.region_edge_lengths,

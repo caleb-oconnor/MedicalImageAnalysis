@@ -152,6 +152,15 @@ class Roi(object):
         User name, written by the image's ROI registry. Change it with
         `Data.rename_roi`, never by assigning `roi.name`.
 
+    group_id : int | None
+        Group the ROI is in (`Data.group`), the same on every image. None =
+        ungrouped. Set it with `Data.set_group('roi', ...)`.
+
+    source_id : int | None
+        Id of the ROI this one was made from (`Image.split_roi`,
+        `PlaneOI.cut_roi`), the same on every image. None = drawn, read or
+        segmented directly. Set it with `Data.set_roi_source`.
+
     contour_position : list[np.ndarray] | None
         World contours, (N, 3) in mm.
 
@@ -245,6 +254,9 @@ class Roi(object):
         self.color = color
         self.filepaths = filepaths
 
+        self.group_id = None
+        self.source_id = None
+
         self._slice_cache = OrderedDict()
 
         if plane is not None:
@@ -333,7 +345,7 @@ class Roi(object):
         """
         Remove the contours, mesh and derived geometry.
 
-        Name, color, visibility and file paths are kept.
+        Name, color, visibility, file paths, group and source are kept.
 
         Returns
         -------

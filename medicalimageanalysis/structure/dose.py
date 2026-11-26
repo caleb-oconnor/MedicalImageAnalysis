@@ -348,7 +348,7 @@ class Dose(Image):
     # ------------------------------------------------------------------------------------------------------------
     def add_model(self, roi_names, kind='tet', name=None, cavities=None, cluster_points=None, edge_length_fac=0.05,
                   edge_length_abs=None, region_edge_lengths=None, epsilon=1e-3, optimize=True, simplify=True,
-                  coarsen=False, stop_energy=10.0, num_opt_iter=80, color=None, visible=True, build=False):
+                  coarsen=False, stop_energy=10.0, num_opt_iter=80, color=None, visible=True, build=False, group=None):
         """Not available on a dose; raises TypeError. Build the model from an image's ROIs instead.
 
         Examples
@@ -359,7 +359,7 @@ class Dose(Image):
         self._raise_no_annotations()
 
     def add_moi(self, kind, points, view_plane='Axial', position=None, name=None, color=None, visible=True,
-                text=None):
+                text=None, group=None):
         """Not available on a dose; raises TypeError. Add the markup to an image in the dose's frame instead.
 
         Examples
@@ -380,7 +380,7 @@ class Dose(Image):
         """
         self._raise_no_annotations()
 
-    def add_poi(self, poi_name=None, color=None, visible=False, path=None, point=None, match=True):
+    def add_poi(self, poi_name=None, color=None, visible=False, path=None, point=None, match=True, group=None):
         """Not available on a dose; raises TypeError. Add the POI to an image in the dose's frame instead.
 
         Examples
@@ -390,7 +390,8 @@ class Dose(Image):
         """
         self._raise_no_annotations()
 
-    def add_roi(self, roi_name=None, color=None, visible=False, path=None, contour=None, plane='Axial', match=True):
+    def add_roi(self, roi_name=None, color=None, visible=False, path=None, contour=None, plane='Axial', match=True,
+                group=None):
         """Not available on a dose; raises TypeError. Add the ROI to an image in the dose's frame instead.
 
         Examples
@@ -537,7 +538,7 @@ class Dose(Image):
         """
         self._raise_no_annotations()
 
-    def create_roi(self, name=None, color=None, visible=False, filepath=None):
+    def create_roi(self, name=None, color=None, visible=False, filepath=None, group=None):
         """Not available on a dose; raises TypeError. Create the ROI on an image in the dose's frame instead.
 
         Examples

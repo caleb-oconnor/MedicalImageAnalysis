@@ -16,7 +16,16 @@ import numpy as np
 
 class Poi(object):
     """Represent a named point of interest attached to an image.
-    
+
+    Attributes
+    ----------
+    id : int | None
+        Permanent POI id, written by the image's POI registry. The same POI has the same id on every image.
+
+    group_id : int | None
+        Group the POI is in (``Data.group``), the same on every image. None = ungrouped. Set it with
+        ``Data.set_group('poi', ...)``.
+
     Examples
     --------
     >>> import medicalimageanalysis as mia
@@ -26,7 +35,7 @@ class Poi(object):
 
     def __init__(self, image, position=None, name=None, color=None, visible=None, filepaths=None):
         """Create a POI using world coordinates and optional display metadata.
-        
+
         Examples
         --------
         >>> obj = Poi(...)
@@ -34,10 +43,13 @@ class Poi(object):
         """
         self.image = image
 
+        self.id = None
         self.name = name
         self.visible = visible
         self.color = color
         self.filepaths = filepaths
+
+        self.group_id = None
 
         self.point_position = position
         self.point_pixel = None
