@@ -18,10 +18,10 @@ Description:
     * ``extent`` is (width, height) in mm along x_axis and y_axis, or None for an infinite plane. It only bounds
       the display; cutting always uses the whole plane.
     * ``keep_side`` is +1 (keep the side the normal points to), -1 (keep the other side) or None (not a cut plane).
-    * ``group_id`` ties planes together through a group (``Data.group``), e.g. the two to four planes of one
-      resection. ``group=`` takes the group's name (created when missing) or id. A copy made with
-      :meth:`PlaneOI.copy_to` stays in the same group. Records before schema 2 stored a free-text ``group`` label;
-      reading one puts the plane in the group of that name.
+    * ``group_id`` ties planes together through a plane group (``image.planeoi_group``), e.g. the two to four planes
+      of one resection. ``group=`` takes the group's path (created when missing) or id. Groups exist on every image,
+      so a copy made with :meth:`PlaneOI.copy_to` stays in the same group. Records before schema 2 stored a free-text
+      ``group`` label; reading one puts the plane in the group of that name.
     * Display: a plane crosses any view that is not parallel to it in a straight line, so it is shown on every view
       (:meth:`PlaneOI.compute_display`, analytic: no mesh slicing). A view lying in the plane shows its extent (or the
       whole view for an infinite plane); a parallel view elsewhere shows nothing. :meth:`PlaneOI.go_to` turns a view
@@ -94,7 +94,7 @@ class PlaneOI(object):
     keep_side : {1, -1, None}, optional
         Side kept when cutting: +1 the side the normal points to, -1 the other. None = not a cut plane.
     group : str or int, optional
-        Group (name or id) tying planes together (e.g. one resection); a name is created when missing. None =
+        Plane group (path or id) tying planes together (e.g. one resection); a path is created when missing. None =
         ungrouped.
     color : list of int, optional
         RGB, 0-255. Random if None.
@@ -108,7 +108,7 @@ class PlaneOI(object):
     y_axis : (3,) ndarray
         normal x x_axis.
     group_id : int or None
-        Group the plane is in (``Data.group``), None = ungrouped.
+        Plane group the plane is in (``image.planeoi_group``), None = ungrouped.
     misc : dict
         Free space for the application.
 
@@ -137,9 +137,11 @@ class PlaneOI(object):
         self.x_axis, self.y_axis, self.normal = self._orthonormal(normal, x_axis)
         self.extent = None if extent is None else (float(extent[0]), float(extent[1]))
         self.keep_side = keep_side
-        self.group_id = Data.resolve_group(group)
+        self.group_id = Data.resolve_group('planeoi', group)
 
         self.misc = {}
+
+    # ---- Compute ----
 
     @staticmethod
     def _clip_interval(offsets, slopes, lows, highs):
@@ -180,69 +182,6 @@ class PlaneOI(object):
 
         return x_axis, np.cross(normal, x_axis), normal
 
-    @classmethod
-    def from_json(cls, image, text):
-        """Rebuild a plane from :meth:`to_json` output, not yet added to the image.
-
-        ``id`` and ``name`` hold the saved values; :meth:`Image.markups_from_json` adds it with them (or with a new id
-        when the saved one is taken). The saved group goes through ``Data.live_group_id``, so load the groups first
-        (``Data.add_saved_groups``; :meth:`Image.markups_from_json` does). A schema 1 record's ``group`` label puts the
-        plane in the group of that name.
-
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image['CT 01']
-        >>> plane = mia.PlaneOI.from_json(image, text)
-        >>> image.planeoi.add(plane, plane.name)
-        """
-        record = json.loads(text)
-        schema = record.get('schema', 1)
-        if schema > cls.SCHEMA_VERSION:
-            raise ValueError(f"Record schema {schema} is newer than supported ({cls.SCHEMA_VERSION}).")
-
-        group = record.get('group') if schema == 1 else None          # schema 1: a free-text label
-        plane = cls(image, record['origin'], record['normal'], x_axis=record['x_axis'], name=record['name'],
-                    extent=record['extent'], keep_side=record['keep_side'], group=group,
-                    color=record['color'], visible=record['visible'])
-        plane.id = record.get('id')
-        if schema > 1:
-            plane.group_id = Data.live_group_id(record.get('group_id'))
-
-        return plane
-
-    @classmethod
-    def from_points(cls, image, points, name=None, extent=None, keep_side=None, group=None, color=None,
-                    visible=True):
-        """Plane through three or more world points (least squares for more than three), not yet added to the image.
-
-        The origin is the points' centroid and x_axis their main in-plane direction. The normal's sign follows the
-        right-hand rule around the first three points (counter-clockwise seen from the side the normal points to);
-        use :meth:`flip` to turn it.
-
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image['CT 01']
-        >>> plane = mia.PlaneOI.from_points(image, [p0, p1, p2], name='Osteotomy', keep_side=1)
-        >>> image.planeoi.add(plane, plane.name)
-        """
-        points = np.asarray(points, dtype=float).reshape(-1, 3)
-        if len(points) < 3:
-            raise ValueError(f"A plane needs at least 3 points; got {len(points)}.")
-
-        center = points.mean(axis=0)
-        _, singular, vt = np.linalg.svd(points - center)
-        if singular[1] < 1e-9 * max(singular[0], 1.0):
-            raise ValueError("The points lie on one line; they do not define a plane.")
-
-        normal = vt[2]
-        if np.dot(normal, np.cross(points[1] - points[0], points[2] - points[0])) < 0:
-            normal = -normal
-
-        return cls(image, center, normal, x_axis=vt[0], name=name, extent=extent, keep_side=keep_side, group=group,
-                   color=color, visible=visible)
-
     def _clip_mesh(self, mesh, normal, cap):
         """One pyvista clip of mesh by the plane with this normal. Which side pyvista keeps is checked by cut_mesh."""
         origin = tuple(float(v) for v in self.origin)
@@ -262,14 +201,6 @@ class PlaneOI(object):
         b = 0.5 * height * self.y_axis
 
         return np.array([self.origin - a - b, self.origin + a - b, self.origin + a + b, self.origin - a + b])
-
-    def _record(self):
-        """State as plain JSON types."""
-        return {'schema': self.SCHEMA_VERSION, 'id': self.id, 'name': self.name,
-                'image_id': getattr(self.image, 'id', None), 'origin': self.origin.tolist(),
-                'normal': self.normal.tolist(), 'x_axis': self.x_axis.tolist(),
-                'extent': None if self.extent is None else list(self.extent), 'keep_side': self.keep_side,
-                'group_id': self.group_id, 'color': [int(c) for c in self.color], 'visible': bool(self.visible)}
 
     def _registration_matrix(self, target, rigid_name=None):
         """4x4 this image's world -> target image's world (target is an Image).
@@ -442,34 +373,6 @@ class PlaneOI(object):
 
         return pv.PolyData(self._corners(width, height), faces=np.array([4, 0, 1, 2, 3]))
 
-    def copy_to(self, image_name, rigid_name=None, name=None):
-        """Copy the plane onto another image as a new, independent plane (no live link), and return it.
-
-        Parameters
-        ----------
-        image_name : str or int
-            Target image in ``Data.image`` (name or id).
-        rigid_name : str or int, optional
-            Registration in ``Data.rigid`` connecting the two frames of reference. None = same frame (no transform).
-        name : str, optional
-            Name on the target image. None = this plane's name.
-
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> plane = mia.Data.image['MR 01'].planeoi['Margin plane']
-        >>> on_ct = plane.copy_to('CT 01', rigid_name='CT 01_MR 01')
-        >>> on_ct.cut_roi('Pelvis_L')
-        """
-        target = Data.image[image_name]
-        matrix = self._registration_matrix(target, rigid_name)
-        rotation = matrix[:3, :3]
-
-        return target.add_planeoi(origin=rotation @ self.origin + matrix[:3, 3], normal=rotation @ self.normal,
-                                  x_axis=rotation @ self.x_axis, name=self.name if name is None else name,
-                                  extent=self.extent, keep_side=self.keep_side, group=self.group_id,
-                                  color=list(self.color), visible=self.visible)
-
     def cut_mesh(self, mesh, cap=True):
         """The part of a mesh on the ``keep_side`` of the plane.
 
@@ -516,8 +419,7 @@ class PlaneOI(object):
     def cut_roi(self, roi_name, new_name=None, color=None, cap=True):
         """Cut one of this image's ROIs with the plane and store the kept part as an ROI on the image.
 
-        The result is mesh only (``update_mesh`` drops contours), like any ROI replaced by a mesh. It records the
-        source ROI (``roi.source_id``, see ``Data.set_roi_source``).
+        The result is mesh only (``update_mesh`` drops contours), like any ROI replaced by a mesh.
 
         Parameters
         ----------
@@ -551,10 +453,10 @@ class PlaneOI(object):
         if new_name not in self.image.roi:
             self.image.add_roi(roi_name=new_name, color=roi.color if color is None else color, visible=True)
         self.image.roi[new_name].update_mesh(mesh)
-        if self.image.roi[new_name].id != roi.id:
-            Data.set_roi_source(new_name, roi.id)
 
         return self.image.roi[new_name]
+
+    # ---- Set ----
 
     def flip(self):
         """Turn the normal around. keep_side flips with it, so the kept half of a cut stays the same.
@@ -568,29 +470,6 @@ class PlaneOI(object):
         self.y_axis = np.cross(self.normal, self.x_axis)
         if self.keep_side is not None:
             self.keep_side = -self.keep_side
-
-    def go_to(self, view_plane='Axial'):
-        """Turn the image's display so view_plane looks straight at the plane, centered on its origin.
-
-        The other two planes turn with the shared rotation, so they show the plane edge-on (perpendicular cuts
-        through it). Returns the new position of view_plane.
-
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> position = mia.Data.image['CT 01'].planeoi['Superior cut'].go_to('Axial')
-        """
-        return self.image.display.go_to_plane(view_plane, self.origin, self.normal, x_axis=self.x_axis)
-
-    def to_json(self):
-        """State as one JSON string (one database row or one line in a file). Read it back with :meth:`from_json`.
-
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> text = mia.Data.image['CT 01'].planeoi['Superior cut'].to_json()
-        """
-        return json.dumps(self._record(), separators=(',', ':'))
 
     def update_geometry(self, origin=None, normal=None, x_axis=None):
         """Move or turn the plane (e.g. dragging it in a view). Anything left as None is kept; a new normal keeps the
@@ -608,3 +487,130 @@ class PlaneOI(object):
 
         self.x_axis, self.y_axis, self.normal = self._orthonormal(self.normal if normal is None else normal,
                                                                   self.x_axis if x_axis is None else x_axis)
+
+    # ---- Load ----
+
+    @classmethod
+    def from_json(cls, image, text):
+        """Rebuild a plane from :meth:`to_json` output, not yet added to the image.
+
+        ``id`` and ``name`` hold the saved values; :meth:`Image.markups_from_json` adds it with them (or with a new id
+        when the saved one is taken). ``group_id`` holds the saved value; :meth:`Image.markups_from_json` maps it onto
+        the session's group. A schema 1 record's ``group`` label puts the plane in the group of that name.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> image = mia.Data.image['CT 01']
+        >>> plane = mia.PlaneOI.from_json(image, text)
+        >>> image.planeoi.add(plane, plane.name)
+        """
+        record = json.loads(text)
+        schema = record.get('schema', 1)
+        if schema > cls.SCHEMA_VERSION:
+            raise ValueError(f"Record schema {schema} is newer than supported ({cls.SCHEMA_VERSION}).")
+
+        group = record.get('group') if schema == 1 else None          # schema 1: a free-text label
+        plane = cls(image, record['origin'], record['normal'], x_axis=record['x_axis'], name=record['name'],
+                    extent=record['extent'], keep_side=record['keep_side'], group=group,
+                    color=record['color'], visible=record['visible'])
+        plane.id = record.get('id')
+        if schema > 1:
+            plane.group_id = record.get('group_id')
+
+        return plane
+
+    # ---- Save ----
+
+    def _record(self):
+        """State as plain JSON types."""
+        return {'schema': self.SCHEMA_VERSION, 'id': self.id, 'name': self.name,
+                'image_id': getattr(self.image, 'id', None), 'origin': self.origin.tolist(),
+                'normal': self.normal.tolist(), 'x_axis': self.x_axis.tolist(),
+                'extent': None if self.extent is None else list(self.extent), 'keep_side': self.keep_side,
+                'group_id': self.group_id, 'color': [int(c) for c in self.color], 'visible': bool(self.visible)}
+
+    def to_json(self):
+        """State as one JSON string (one database row or one line in a file). Read it back with :meth:`from_json`.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> text = mia.Data.image['CT 01'].planeoi['Superior cut'].to_json()
+        """
+        return json.dumps(self._record(), separators=(',', ':'))
+
+    # ---- Other ----
+
+    def copy_to(self, image_name, rigid_name=None, name=None):
+        """Copy the plane onto another image as a new, independent plane (no live link), and return it.
+
+        Parameters
+        ----------
+        image_name : str or int
+            Target image in ``Data.image`` (name or id).
+        rigid_name : str or int, optional
+            Registration in ``Data.rigid`` connecting the two frames of reference. None = same frame (no transform).
+        name : str, optional
+            Name on the target image. None = this plane's name.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> plane = mia.Data.image['MR 01'].planeoi['Margin plane']
+        >>> on_ct = plane.copy_to('CT 01', rigid_name='CT 01_MR 01')
+        >>> on_ct.cut_roi('Pelvis_L')
+        """
+        target = Data.image[image_name]
+        matrix = self._registration_matrix(target, rigid_name)
+        rotation = matrix[:3, :3]
+
+        return target.add_planeoi(origin=rotation @ self.origin + matrix[:3, 3], normal=rotation @ self.normal,
+                                  x_axis=rotation @ self.x_axis, name=self.name if name is None else name,
+                                  extent=self.extent, keep_side=self.keep_side, group=self.group_id,
+                                  color=list(self.color), visible=self.visible)
+
+    @classmethod
+    def from_points(cls, image, points, name=None, extent=None, keep_side=None, group=None, color=None,
+                    visible=True):
+        """Plane through three or more world points (least squares for more than three), not yet added to the image.
+
+        The origin is the points' centroid and x_axis their main in-plane direction. The normal's sign follows the
+        right-hand rule around the first three points (counter-clockwise seen from the side the normal points to);
+        use :meth:`flip` to turn it.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> image = mia.Data.image['CT 01']
+        >>> plane = mia.PlaneOI.from_points(image, [p0, p1, p2], name='Osteotomy', keep_side=1)
+        >>> image.planeoi.add(plane, plane.name)
+        """
+        points = np.asarray(points, dtype=float).reshape(-1, 3)
+        if len(points) < 3:
+            raise ValueError(f"A plane needs at least 3 points; got {len(points)}.")
+
+        center = points.mean(axis=0)
+        _, singular, vt = np.linalg.svd(points - center)
+        if singular[1] < 1e-9 * max(singular[0], 1.0):
+            raise ValueError("The points lie on one line; they do not define a plane.")
+
+        normal = vt[2]
+        if np.dot(normal, np.cross(points[1] - points[0], points[2] - points[0])) < 0:
+            normal = -normal
+
+        return cls(image, center, normal, x_axis=vt[0], name=name, extent=extent, keep_side=keep_side, group=group,
+                   color=color, visible=visible)
+
+    def go_to(self, view_plane='Axial'):
+        """Turn the image's display so view_plane looks straight at the plane, centered on its origin.
+
+        The other two planes turn with the shared rotation, so they show the plane edge-on (perpendicular cuts
+        through it). Returns the new position of view_plane.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> position = mia.Data.image['CT 01'].planeoi['Superior cut'].go_to('Axial')
+        """
+        return self.image.display.go_to_plane(view_plane, self.origin, self.normal, x_axis=self.x_axis)

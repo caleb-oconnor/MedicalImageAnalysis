@@ -502,18 +502,54 @@ class Deformable(object):
         if self.dvf is not None and self.moving.image_id in Data.image:
             self.update_rois()
 
-    @staticmethod
-    def _apply_affine(matrix, points):
-        """4x4 affine applied to (N, 3) points."""
-        points = np.asarray(points, dtype=float)
-        return points @ matrix[:3, :3].T + matrix[:3, 3]
+    # ---- Registry ----
 
     @staticmethod
-    def _as_list(names):
-        """None stays None, a single name or id becomes a one-item list, anything else becomes a list."""
-        if names is None:
-            return None
-        return [names] if isinstance(names, (str, int, np.integer)) else list(names)
+    def find_deformables(image_a, image_b):
+        """Names of every registration in ``Data.deformable`` that connects the frames of two images (either
+        direction).
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> mia.Deformable.find_deformables('Dose 01', 'CT 01')
+        ['DVF_CT 01_CBCT 01']
+        """
+        return [name for name, deform in Data.deformable.items() if deform.connects(image_a, image_b)]
+
+    def add_deformable(self, deformable_name, deformable_id=None):
+        """Store this registration in ``Data.deformable`` and return its name; None builds a unique name from the
+        current image names. A name already in use is replaced and its id taken over.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> mia.Deformable(reference_name='CT 01', moving_name='CBCT 01').deformable_name
+        'DVF_CT 01_CBCT 01'
+        >>> mia.Deformable(reference_name='CT 01', moving_name='CBCT 01').deformable_name     # second one
+        'DVF_CT 01_CBCT 01_1'
+        """
+        if deformable_name is None:
+            if self.reference.image_id is None and self.moving.image_id is None:
+                deformable_name = 'DVF_Unknown'
+            else:
+                deformable_name = ('DVF_' + Data.volume_label(self.reference.image_id) + '_' +
+                                   Data.volume_label(self.moving.image_id))
+
+            if deformable_name in Data.deformable:
+                n = 1
+                while deformable_name + '_' + str(n) in Data.deformable:
+                    n += 1
+                deformable_name = deformable_name + '_' + str(n)
+
+        if deformable_name in Data.deformable:
+            Data.deformable[deformable_name] = self
+        else:
+            Data.deformable.add(self, deformable_name, item_id=deformable_id)
+
+        return deformable_name
+
+    # ---- Compute ----
 
     @staticmethod
     def _invert_field(field, origin, spacing, iterations=50, mean_tolerance=1e-3, max_tolerance=1e-1):
@@ -542,49 +578,6 @@ class Deformable(object):
         image = sitk.GetImageFromArray((np.asarray(mask) != 0).astype(np.uint8))
         image.CopyInformation(like)
         return image
-
-    @staticmethod
-    def _mesh_arrays(prefix, mesh):
-        """Arrays to save a tet UnstructuredGrid or a PolyData (with its point / cell data) under prefix."""
-        arrays = {prefix + 'points': np.asarray(mesh.points)}
-        if isinstance(mesh, pv.UnstructuredGrid):
-            arrays[prefix + 'tets'] = np.asarray(mesh.cells_dict[pv.CellType.TETRA])
-        else:
-            arrays[prefix + 'faces'] = np.asarray(mesh.faces)
-        for key in mesh.point_data.keys():
-            arrays[prefix + 'point_data_' + key] = np.asarray(mesh.point_data[key])
-        for key in mesh.cell_data.keys():
-            arrays[prefix + 'cell_data_' + key] = np.asarray(mesh.cell_data[key])
-
-        return arrays
-
-    @staticmethod
-    def _mesh_from_arrays(prefix, data):
-        """Mesh saved by _mesh_arrays under prefix, or None when there is none."""
-        if prefix + 'points' not in data:
-            return None
-
-        if prefix + 'tets' in data:
-            mesh = pv.UnstructuredGrid({pv.CellType.TETRA: data[prefix + 'tets']}, data[prefix + 'points'])
-        else:
-            faces = data[prefix + 'faces']
-            mesh = pv.PolyData(data[prefix + 'points'], faces if faces.size else None)
-
-        for key in data.files:
-            if key.startswith(prefix + 'point_data_'):
-                mesh.point_data[key[len(prefix + 'point_data_'):]] = data[key]
-            elif key.startswith(prefix + 'cell_data_'):
-                mesh.cell_data[key[len(prefix + 'cell_data_'):]] = data[key]
-
-        return mesh
-
-    @staticmethod
-    def _rigid_inv(mat):
-        """Exact inverse of a rigid 4x4 (avoids drift from repeated np.linalg.inv)."""
-        inv = np.identity(4)
-        inv[:3, :3] = mat[:3, :3].T
-        inv[:3, 3] = -mat[:3, :3].T @ mat[:3, 3]
-        return inv
 
     @staticmethod
     def correct_dvf_direction(dvf, spacing, origin, matrix):
@@ -645,83 +638,6 @@ class Deformable(object):
 
         return dvf_new, tuple(float(v) for v in spacing), low, dvf_new.shape[:3]
 
-    @staticmethod
-    def find_deformables(image_a, image_b):
-        """Names of every registration in ``Data.deformable`` that connects the frames of two images (either
-        direction).
-
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> mia.Deformable.find_deformables('Dose 01', 'CT 01')
-        ['DVF_CT 01_CBCT 01']
-        """
-        return [name for name, deform in Data.deformable.items() if deform.connects(image_a, image_b)]
-
-    @classmethod
-    def load(cls, path):
-        """Rebuild a registration from :meth:`save` output and register it in ``Data.deformable``.
-
-        Works before (or without) its images being loaded: the saved frames and ids are kept (the image ids must be
-        the ones the images are restored with), the reference and moving meshes come from the file, and the warped
-        ROIs (``roi``) are only built when the moving image is present.
-
-        Schema 1 files (saved with image and ROI names) are read too: the names are looked up, so their images and
-        ROIs must be loaded first. Schema 2 files simply have no models.
-
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> deform = mia.Deformable.load('C:/Data/ct_cbct.npz')
-        >>> deform.reference.mesh                   # still viewable if 'CT 01' was deleted
-        """
-        with np.load(path, allow_pickle=False) as data:
-            record = json.loads(str(data['record']))
-            schema = record.get('schema', 1)
-            if schema > cls.SCHEMA_VERSION:
-                raise ValueError(f"Record schema {schema} is newer than supported ({cls.SCHEMA_VERSION}).")
-
-            dvf = data['dvf'] if 'dvf' in data else None
-            meshes = {}
-            for side in ('reference', 'moving'):
-                meshes[side] = None
-                if side + '_points' in data:
-                    faces = data[side + '_faces']
-                    meshes[side] = pv.PolyData(data[side + '_points'], faces if faces.size else None)
-            model_meshes = {side: cls._mesh_from_arrays(side + '_model_', data) for side in ('reference', 'moving')}
-
-        if schema == 1:
-            reference_id = Data.volume_id(record['reference']['image_name'])
-            moving_id = Data.volume_id(record['moving']['image_name'])
-            roi_ids = record['roi_names']
-        else:
-            reference_id = record['reference']['image_id']
-            moving_id = record['moving']['image_id']
-            roi_ids = record['roi_ids']
-
-        deformable_id = record.get('id')
-        if deformable_id is not None and deformable_id in Data.deformable:
-            deformable_id = None
-
-        deform = cls(dvf=dvf, origin=record['origin'], spacing=record['spacing'],
-                     dimensions=None if dvf is None else dvf.shape[:3], roi_names=roi_ids,
-                     rigid_matrix=np.reshape(record['rigid_matrix'], (4, 4)), registration_name=record['name'],
-                     reference_name=reference_id, moving_name=moving_id,
-                     reference_meshes=meshes['reference'], moving_meshes=meshes['moving'], local_uid=record['uid'],
-                     deformable_id=deformable_id)
-
-        # the images may not be loaded, so keep the saved frames instead of the placeholders __init__ derived
-        deform.reference.frame = record['reference'].get('frame', deform.reference.frame)
-        deform.moving.frame = record['moving'].get('frame', deform.moving.frame)
-        deform.reference.model_id = record['reference'].get('model_id')
-        deform.moving.model_id = record['moving'].get('model_id')
-        deform.reference.model_build = record['reference'].get('model_build')
-        deform.moving.model_build = record['moving'].get('model_build')
-        deform.reference.model_mesh = model_meshes['reference']
-        deform.moving.model_mesh = model_meshes['moving']
-
-        return deform
-
     def _collect_masks(self, reference_rois=None, moving_rois=None):
         """(reference mask, moving mask) as (z, y, x) bool arrays on each image's own grid: the union of the ROI pairs
         (paired by position) that have a shape on both images, or (None, None) when there are none.
@@ -781,18 +697,6 @@ class Deformable(object):
             self._display_cache['field'] = cached
 
         return cached[1]
-
-    def _record(self):
-        """Registration state as plain JSON types. The DVF and the meshes are stored as arrays next to it by save."""
-        return {'schema': self.SCHEMA_VERSION, 'id': self.id, 'uid': self.local_uid, 'name': self.deformable_name,
-                'reference': {'image_id': self.reference.image_id, 'frame': self.reference.frame,
-                              'model_id': self.reference.model_id, 'model_build': self.reference.model_build},
-                'moving': {'image_id': self.moving.image_id, 'frame': self.moving.frame,
-                           'model_id': self.moving.model_id, 'model_build': self.moving.model_build},
-                'roi_ids': None if self.roi_ids is None else list(self.roi_ids),
-                'rigid_matrix': np.asarray(self.rigid_matrix, dtype=float).ravel().tolist(),
-                'origin': None if self.origin is None else [float(v) for v in self.origin],
-                'spacing': None if self.spacing is None else [float(v) for v in self.spacing]}
 
     def _registration_images(self, reference_rois=None, moving_rois=None, reference_mask=None, moving_mask=None,
                              images=True):
@@ -999,89 +903,6 @@ class Deformable(object):
         """Moving native world -> reference world (rigid^-1, then solve r + dvf(r) = a)."""
         a = self._apply_affine(self._rigid_inv(self.rigid_matrix), points)
         return self._solve_points(a, percent / 100)
-
-    def add_deformable(self, deformable_name, deformable_id=None):
-        """Store this registration in ``Data.deformable`` and return its name; None builds a unique name from the
-        current image names. A name already in use is replaced and its id taken over.
-
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> mia.Deformable(reference_name='CT 01', moving_name='CBCT 01').deformable_name
-        'DVF_CT 01_CBCT 01'
-        >>> mia.Deformable(reference_name='CT 01', moving_name='CBCT 01').deformable_name     # second one
-        'DVF_CT 01_CBCT 01_1'
-        """
-        if deformable_name is None:
-            if self.reference.image_id is None and self.moving.image_id is None:
-                deformable_name = 'DVF_Unknown'
-            else:
-                deformable_name = ('DVF_' + Data.volume_label(self.reference.image_id) + '_' +
-                                   Data.volume_label(self.moving.image_id))
-
-            if deformable_name in Data.deformable:
-                n = 1
-                while deformable_name + '_' + str(n) in Data.deformable:
-                    n += 1
-                deformable_name = deformable_name + '_' + str(n)
-
-        if deformable_name in Data.deformable:
-            Data.deformable[deformable_name] = self
-        else:
-            Data.deformable.add(self, deformable_name, item_id=deformable_id)
-
-        return deformable_name
-
-    def check_model(self, side='reference'):
-        """Whether the live Model is still the mesh this side was computed with.
-
-        Returns
-        -------
-        str or None
-            None when the side has no model. Otherwise:
-
-            * 'current' : same build, and its source ROIs are unchanged.
-            * 'rebuilt' : the model was rebuilt (or given another mesh) since :meth:`set_model`; this registration
-              still holds the old mesh in ``side.model_mesh``.
-            * 'stale'   : same build, but a source ROI was edited since the model was built.
-            * 'deleted' : the model is gone (or its image is not loaded); ``side.model_mesh`` is all that is left.
-
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> deform = mia.Data.deformable['DVF_CT 01_CT 02']
-        >>> deform.check_model('reference')
-        'rebuilt'
-        """
-        target = getattr(self, side)
-        if target.model_id is None:
-            return None
-
-        try:
-            model = Data.find_model(target.model_id)
-        except KeyError:
-            return 'deleted'
-
-        if model.build_count != target.model_build:
-            return 'rebuilt'
-        if model.is_stale():
-            return 'stale'
-
-        return 'current'
-
-    def clear_mesh_slice_cache(self, plane=None):
-        """Drop cached mesh slices for one plane, or all planes when plane is None.
-
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> deform = mia.Data.deformable['DVF_CT 01_CBCT 01']
-        >>> deform.clear_mesh_slice_cache('Axial')
-        >>> deform.clear_mesh_slice_cache()
-        """
-        caches = self._display_cache.get('mesh_slices', {})
-        for key in [k for k in caches if plane is None or k[0] == plane]:
-            del caches[key]
 
     def compute_array(self, plane, position, base_name=None, image_name=None, spacing=None, percent=None,
                       background=None):
@@ -1513,19 +1334,6 @@ class Deformable(object):
 
         self.update_rois()
 
-    def connects(self, image_a, image_b):
-        """True when the two images are on opposite sides of this registration (by name or frame of reference).
-
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> mia.Data.deformable['DVF_CT 01_CBCT 01'].connects('Dose 01', 'CT 01')
-        True
-        """
-        side_a, side_b = self._side_of(image_a), self._side_of(image_b)
-
-        return side_a is not None and side_b is not None and side_a is not side_b
-
     def create_image(self, ratio=1):
         """Moving image rigidly + deformably resampled onto the reference grid (full 3D, for export).
 
@@ -1629,20 +1437,6 @@ class Deformable(object):
         else:
             return mask
 
-    def export_image(self, path=None):
-        """Write the deformed moving image (create_image) to any format SimpleITK can write. Nothing is written when
-        path is None.
-
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> mia.Data.deformable['DVF_CT 01_CBCT 01'].export_image('C:/Data/cbct_deformed.mhd')
-        """
-        if self.moving.image_id is not None and path is not None:
-            image = self.create_image()
-
-            sitk.WriteImage(image, path)
-
     def get_display_mesh(self, roi_name, base_name=None, image_name=None, percent=None):
         """image_name's ROI warped into base_name's world, or None (no mesh, or no DVF yet).
 
@@ -1734,18 +1528,46 @@ class Deformable(object):
 
         return float(d @ grid['x_axis']) / grid['sx'], float(d @ grid['y_axis']) / grid['sy']
 
-    def invalidate_display(self):
-        """Drop cached display fields and warped meshes. Only needed after editing ``dvf`` or ``rigid_matrix`` in place
-        (replacing them is detected automatically).
+    def warp_points(self, points, to_reference=True, percent=100):
+        """World points carried across the registration: moving native world -> reference world (to_reference=True,
+        solved per point) or reference world -> moving native world (False, direct). The same relation the display
+        and the ROI warping use; ``Data.map_points`` uses it for chains of registrations.
+
+        Parameters
+        ----------
+        points : (N, 3) array_like
+            World points (mm) on the side they come from.
+        to_reference : bool, default True
+            Direction: True = moving -> reference, False = reference -> moving.
+        percent : float, default 100
+            Deformation level (0 = rigid only, 100 = full).
+
+        Returns
+        -------
+        (N, 3) ndarray
+
+        Raises
+        ------
+        ValueError
+            If there is no DVF yet.
 
         Examples
         --------
         >>> import medicalimageanalysis as mia
         >>> deform = mia.Data.deformable['DVF_CT 01_CBCT 01']
-        >>> deform.dvf *= 0.5
-        >>> deform.invalidate_display()
+        >>> on_ct = deform.warp_points(cbct_points)                          # CBCT -> CT
+        >>> on_cbct = deform.warp_points(ct_points, to_reference=False)      # CT -> CBCT
         """
-        self._display_cache = {}
+        if self.dvf is None:
+            raise ValueError(f"'{self.deformable_name}' has no DVF yet.")
+
+        points = np.asarray(points, dtype=float).reshape(-1, 3)
+        if to_reference:
+            return self._warp_to_reference(points, percent=percent)
+
+        return self._warp_to_moving(points, percent=percent)
+
+    # ---- Set ----
 
     def map_mesh(self, roi_name, set_moving=True, return_mesh=False):
         """Map a deformed ROI (``self.roi``, reference world) back into the moving image's native world.
@@ -1785,34 +1607,6 @@ class Deformable(object):
             return mapped_mesh
         else:
             return None
-
-    def save(self, path):
-        """Write the registration to one .npz file: the JSON state, the DVF, the reference / moving meshes (points
-        and faces) and the frozen copy of each side's Model mesh. Written to a temporary name and swapped in, so a
-        crash never leaves a half-written file. No pickle, so loading never runs code from the file.
-
-        Warped ROIs (``roi``), display settings and caches are not saved; they are rebuilt on demand.
-
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> mia.Data.deformable['DVF_CT 01_CBCT 01'].save('C:/Data/ct_cbct.npz')
-        """
-        arrays = {'record': np.array(json.dumps(self._record(), separators=(',', ':')))}
-        if self.dvf is not None:
-            arrays['dvf'] = np.asarray(self.dvf)
-
-        for name, side in (('reference', self.reference), ('moving', self.moving)):
-            if side.mesh is not None:
-                arrays[name + '_points'] = np.asarray(side.mesh.points)
-                arrays[name + '_faces'] = np.asarray(side.mesh.faces)
-            if side.model_mesh is not None:
-                arrays.update(self._mesh_arrays(name + '_model_', side.model_mesh))
-
-        temp = path + '.tmp'
-        with open(temp, 'wb') as f:      # a file object stops numpy from appending .npz to the temporary name
-            np.savez(f, **arrays)
-        os.replace(temp, path)
 
     def set_model(self, model_name, side='reference'):
         """Record the Model a side is computed with and freeze a copy of its mesh (``side.model_mesh``).
@@ -1904,3 +1698,260 @@ class Deformable(object):
                     mesh = roi.mesh.copy()
                     mesh.points = self._warp_to_reference(roi.mesh.points, percent=self.visual.percent)
                     self.roi[roi_id] = mesh
+
+    # ---- Load ----
+
+    @staticmethod
+    def _mesh_from_arrays(prefix, data):
+        """Mesh saved by _mesh_arrays under prefix, or None when there is none."""
+        if prefix + 'points' not in data:
+            return None
+
+        if prefix + 'tets' in data:
+            mesh = pv.UnstructuredGrid({pv.CellType.TETRA: data[prefix + 'tets']}, data[prefix + 'points'])
+        else:
+            faces = data[prefix + 'faces']
+            mesh = pv.PolyData(data[prefix + 'points'], faces if faces.size else None)
+
+        for key in data.files:
+            if key.startswith(prefix + 'point_data_'):
+                mesh.point_data[key[len(prefix + 'point_data_'):]] = data[key]
+            elif key.startswith(prefix + 'cell_data_'):
+                mesh.cell_data[key[len(prefix + 'cell_data_'):]] = data[key]
+
+        return mesh
+
+    @classmethod
+    def load(cls, path):
+        """Rebuild a registration from :meth:`save` output and register it in ``Data.deformable``.
+
+        Works before (or without) its images being loaded: the saved frames and ids are kept (the image ids must be
+        the ones the images are restored with), the reference and moving meshes come from the file, and the warped
+        ROIs (``roi``) are only built when the moving image is present.
+
+        Schema 1 files (saved with image and ROI names) are read too: the names are looked up, so their images and
+        ROIs must be loaded first. Schema 2 files simply have no models.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> deform = mia.Deformable.load('C:/Data/ct_cbct.npz')
+        >>> deform.reference.mesh                   # still viewable if 'CT 01' was deleted
+        """
+        with np.load(path, allow_pickle=False) as data:
+            record = json.loads(str(data['record']))
+            schema = record.get('schema', 1)
+            if schema > cls.SCHEMA_VERSION:
+                raise ValueError(f"Record schema {schema} is newer than supported ({cls.SCHEMA_VERSION}).")
+
+            dvf = data['dvf'] if 'dvf' in data else None
+            meshes = {}
+            for side in ('reference', 'moving'):
+                meshes[side] = None
+                if side + '_points' in data:
+                    faces = data[side + '_faces']
+                    meshes[side] = pv.PolyData(data[side + '_points'], faces if faces.size else None)
+            model_meshes = {side: cls._mesh_from_arrays(side + '_model_', data) for side in ('reference', 'moving')}
+
+        if schema == 1:
+            reference_id = Data.volume_id(record['reference']['image_name'])
+            moving_id = Data.volume_id(record['moving']['image_name'])
+            roi_ids = record['roi_names']
+        else:
+            reference_id = record['reference']['image_id']
+            moving_id = record['moving']['image_id']
+            roi_ids = record['roi_ids']
+
+        deformable_id = record.get('id')
+        if deformable_id is not None and deformable_id in Data.deformable:
+            deformable_id = None
+
+        deform = cls(dvf=dvf, origin=record['origin'], spacing=record['spacing'],
+                     dimensions=None if dvf is None else dvf.shape[:3], roi_names=roi_ids,
+                     rigid_matrix=np.reshape(record['rigid_matrix'], (4, 4)), registration_name=record['name'],
+                     reference_name=reference_id, moving_name=moving_id,
+                     reference_meshes=meshes['reference'], moving_meshes=meshes['moving'], local_uid=record['uid'],
+                     deformable_id=deformable_id)
+
+        # the images may not be loaded, so keep the saved frames instead of the placeholders __init__ derived
+        deform.reference.frame = record['reference'].get('frame', deform.reference.frame)
+        deform.moving.frame = record['moving'].get('frame', deform.moving.frame)
+        deform.reference.model_id = record['reference'].get('model_id')
+        deform.moving.model_id = record['moving'].get('model_id')
+        deform.reference.model_build = record['reference'].get('model_build')
+        deform.moving.model_build = record['moving'].get('model_build')
+        deform.reference.model_mesh = model_meshes['reference']
+        deform.moving.model_mesh = model_meshes['moving']
+
+        return deform
+
+    # ---- Save ----
+
+    @staticmethod
+    def _mesh_arrays(prefix, mesh):
+        """Arrays to save a tet UnstructuredGrid or a PolyData (with its point / cell data) under prefix."""
+        arrays = {prefix + 'points': np.asarray(mesh.points)}
+        if isinstance(mesh, pv.UnstructuredGrid):
+            arrays[prefix + 'tets'] = np.asarray(mesh.cells_dict[pv.CellType.TETRA])
+        else:
+            arrays[prefix + 'faces'] = np.asarray(mesh.faces)
+        for key in mesh.point_data.keys():
+            arrays[prefix + 'point_data_' + key] = np.asarray(mesh.point_data[key])
+        for key in mesh.cell_data.keys():
+            arrays[prefix + 'cell_data_' + key] = np.asarray(mesh.cell_data[key])
+
+        return arrays
+
+    def _record(self):
+        """Registration state as plain JSON types. The DVF and the meshes are stored as arrays next to it by save."""
+        return {'schema': self.SCHEMA_VERSION, 'id': self.id, 'uid': self.local_uid, 'name': self.deformable_name,
+                'reference': {'image_id': self.reference.image_id, 'frame': self.reference.frame,
+                              'model_id': self.reference.model_id, 'model_build': self.reference.model_build},
+                'moving': {'image_id': self.moving.image_id, 'frame': self.moving.frame,
+                           'model_id': self.moving.model_id, 'model_build': self.moving.model_build},
+                'roi_ids': None if self.roi_ids is None else list(self.roi_ids),
+                'rigid_matrix': np.asarray(self.rigid_matrix, dtype=float).ravel().tolist(),
+                'origin': None if self.origin is None else [float(v) for v in self.origin],
+                'spacing': None if self.spacing is None else [float(v) for v in self.spacing]}
+
+    def export_image(self, path=None):
+        """Write the deformed moving image (create_image) to any format SimpleITK can write. Nothing is written when
+        path is None.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> mia.Data.deformable['DVF_CT 01_CBCT 01'].export_image('C:/Data/cbct_deformed.mhd')
+        """
+        if self.moving.image_id is not None and path is not None:
+            image = self.create_image()
+
+            sitk.WriteImage(image, path)
+
+    def save(self, path):
+        """Write the registration to one .npz file: the JSON state, the DVF, the reference / moving meshes (points
+        and faces) and the frozen copy of each side's Model mesh. Written to a temporary name and swapped in, so a
+        crash never leaves a half-written file. No pickle, so loading never runs code from the file.
+
+        Warped ROIs (``roi``), display settings and caches are not saved; they are rebuilt on demand.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> mia.Data.deformable['DVF_CT 01_CBCT 01'].save('C:/Data/ct_cbct.npz')
+        """
+        arrays = {'record': np.array(json.dumps(self._record(), separators=(',', ':')))}
+        if self.dvf is not None:
+            arrays['dvf'] = np.asarray(self.dvf)
+
+        for name, side in (('reference', self.reference), ('moving', self.moving)):
+            if side.mesh is not None:
+                arrays[name + '_points'] = np.asarray(side.mesh.points)
+                arrays[name + '_faces'] = np.asarray(side.mesh.faces)
+            if side.model_mesh is not None:
+                arrays.update(self._mesh_arrays(name + '_model_', side.model_mesh))
+
+        temp = path + '.tmp'
+        with open(temp, 'wb') as f:      # a file object stops numpy from appending .npz to the temporary name
+            np.savez(f, **arrays)
+        os.replace(temp, path)
+
+    # ---- Other ----
+
+    @staticmethod
+    def _apply_affine(matrix, points):
+        """4x4 affine applied to (N, 3) points."""
+        points = np.asarray(points, dtype=float)
+        return points @ matrix[:3, :3].T + matrix[:3, 3]
+
+    @staticmethod
+    def _as_list(names):
+        """None stays None, a single name or id becomes a one-item list, anything else becomes a list."""
+        if names is None:
+            return None
+        return [names] if isinstance(names, (str, int, np.integer)) else list(names)
+
+    @staticmethod
+    def _rigid_inv(mat):
+        """Exact inverse of a rigid 4x4 (avoids drift from repeated np.linalg.inv)."""
+        inv = np.identity(4)
+        inv[:3, :3] = mat[:3, :3].T
+        inv[:3, 3] = -mat[:3, :3].T @ mat[:3, 3]
+        return inv
+
+    def check_model(self, side='reference'):
+        """Whether the live Model is still the mesh this side was computed with.
+
+        Returns
+        -------
+        str or None
+            None when the side has no model. Otherwise:
+
+            * 'current' : same build, and its source ROIs are unchanged.
+            * 'rebuilt' : the model was rebuilt (or given another mesh) since :meth:`set_model`; this registration
+              still holds the old mesh in ``side.model_mesh``.
+            * 'stale'   : same build, but a source ROI was edited since the model was built.
+            * 'deleted' : the model is gone (or its image is not loaded); ``side.model_mesh`` is all that is left.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> deform = mia.Data.deformable['DVF_CT 01_CT 02']
+        >>> deform.check_model('reference')
+        'rebuilt'
+        """
+        target = getattr(self, side)
+        if target.model_id is None:
+            return None
+
+        try:
+            model = Data.find_model(target.model_id)
+        except KeyError:
+            return 'deleted'
+
+        if model.build_count != target.model_build:
+            return 'rebuilt'
+        if model.is_stale():
+            return 'stale'
+
+        return 'current'
+
+    def clear_mesh_slice_cache(self, plane=None):
+        """Drop cached mesh slices for one plane, or all planes when plane is None.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> deform = mia.Data.deformable['DVF_CT 01_CBCT 01']
+        >>> deform.clear_mesh_slice_cache('Axial')
+        >>> deform.clear_mesh_slice_cache()
+        """
+        caches = self._display_cache.get('mesh_slices', {})
+        for key in [k for k in caches if plane is None or k[0] == plane]:
+            del caches[key]
+
+    def connects(self, image_a, image_b):
+        """True when the two images are on opposite sides of this registration (by name or frame of reference).
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> mia.Data.deformable['DVF_CT 01_CBCT 01'].connects('Dose 01', 'CT 01')
+        True
+        """
+        side_a, side_b = self._side_of(image_a), self._side_of(image_b)
+
+        return side_a is not None and side_b is not None and side_a is not side_b
+
+    def invalidate_display(self):
+        """Drop cached display fields and warped meshes. Only needed after editing ``dvf`` or ``rigid_matrix`` in place
+        (replacing them is detected automatically).
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> deform = mia.Data.deformable['DVF_CT 01_CBCT 01']
+        >>> deform.dvf *= 0.5
+        >>> deform.invalidate_display()
+        """
+        self._display_cache = {}

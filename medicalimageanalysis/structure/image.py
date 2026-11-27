@@ -35,10 +35,13 @@ Description:
     * Models (``image.model``) are meshes derived from this image's ROIs for one computation (clustered surfaces,
       tetrahedral FE meshes). They never replace ``roi.mesh`` and are never synced to other images. Ids are unique
       across every image (``Data.new_model_id``), names only on this image.
-    * Groups (``Data.group``) are an overlay on all of the above: an item only carries ``group_id`` (None =
-      ungrouped) and stays a normal entry in its registry. Every ``add_*`` method takes an optional ``group`` (name,
-      created when missing, or id). ROIs/POIs keep one group on every image: replacing one (RTSTRUCT, ``add_roi``)
-      keeps the group it had. An ROI made from another (:meth:`Image.split_roi`) records it in ``roi.source_id``.
+    * Groups are an overlay on all of the above: each image has one container per kind (``image.roi_group``,
+      ``poi_group``, ``moi_group``, ``planeoi_group``, ``model_group``) of nested groups, looked up by path
+      ('Liver/GTV') or id. Like ROIs, every group exists on every image (``Data.match_groups``). An item only carries
+      ``group_id`` (None = ungrouped) and stays a normal entry in its registry. Every ``add_*`` method takes an
+      optional ``group`` (path, created when missing, or id). ROIs/POIs keep one group on every image: replacing one
+      (RTSTRUCT, ``add_roi``) keeps the group it had. A composite ROI group is the parts of one main ROI; making
+      and updating the parts is up to the application (``convert_mask`` / ``update_position``, ``Data.set_group``).
 
 Structure:
     - _fused_oblique_sample_kernel: numba kernel that trilinearly samples one oblique slice.
@@ -73,7 +76,6 @@ import pyvista as pv
 import SimpleITK as sitk
 
 from numba import njit, prange
-from scipy import ndimage
 from scipy.spatial.transform import Rotation
 
 import vtk
@@ -229,6 +231,8 @@ class Display(object):
 
         self._warm_up_kernel()
 
+    # ---- Compute ----
+
     @staticmethod
     def _intersection_line(active_plane, crossing_plane):
         """Line where crossing_plane cuts active_plane, in active_plane's pixel coordinates.
@@ -296,26 +300,6 @@ class Display(object):
             return self.image.array[:, :, x_idx] if 0 <= x_idx < nx else None
 
         return None
-
-    def _warm_up_kernel(self):
-        """Compile the sampling kernel now instead of on the first scroll/rotate.
-
-        Numba compiles a separate specialization per input dtype and layout. Running it once on a throwaway 2x2 array
-        of the SAME dtype as the real volume (and a strided channel view for color) moves the ~1-1.5 s one-time cost to
-        construction.
-        """
-        if self.image.array.ndim == 4:
-            dummy_vol = np.zeros((2, 2, 2, 3), dtype=self.image.array.dtype)[..., 0]
-        else:
-            dummy_vol = np.zeros((2, 2, 2), dtype=self.image.array.dtype)
-        M = self._image_matrix_f32
-        _fused_oblique_sample_kernel(
-            dummy_vol, 2, 2, np.float32(1), np.float32(1),
-            np.float32(0), np.float32(0), np.float32(0),
-            np.float32(1), np.float32(0), np.float32(0),
-            np.float32(0), np.float32(1), np.float32(0),
-            np.float32(0), np.float32(0), np.float32(0),
-            M, np.float32(1), np.float32(1), np.float32(1), 0.0)
 
     def compute_array(self, plane, position, matrix_override=None, rigid_matrix=None, grid=None, as_array=True,
                       as_vtk=False, copy_array=False, force_reslice=False, background=None):
@@ -531,6 +515,8 @@ class Display(object):
                 'sx': float(self.spacing[xi]), 'sy': float(self.spacing[yi]),
                 'shape': tuple(self.oblique_shape[plane])}
 
+    # ---- Set ----
+
     def go_to_plane(self, plane, origin, normal, x_axis=None):
         """Rotate the shared view so `plane` lies in a world plane, then scroll every plane through `origin`.
 
@@ -598,22 +584,6 @@ class Display(object):
         self.crosshair = origin.copy()
 
         return self.position[plane]
-
-    def pivot_position(self, position, R):
-        """Rotate one widget's position about rotation_center by R (the value returned by :meth:`update_rotation`).
-
-        update_rotation already moves ``self.position``; use this for positions the caller keeps itself.
-
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> display = mia.Data.image['CT 01'].display
-        >>> R = display.update_rotation(r_z=5)
-        >>> widget_position = display.pivot_position(widget_position, R)
-        """
-        position = np.asarray(position, dtype=float)
-
-        return R.dot(position - self.rotation_center) + self.rotation_center
 
     def reset(self):
         """Back to the native orientation: no rotation, pivot and crosshair at the image center, every plane at its
@@ -710,6 +680,44 @@ class Display(object):
 
         return new_position
 
+    # ---- Other ----
+
+    def _warm_up_kernel(self):
+        """Compile the sampling kernel now instead of on the first scroll/rotate.
+
+        Numba compiles a separate specialization per input dtype and layout. Running it once on a throwaway 2x2 array
+        of the SAME dtype as the real volume (and a strided channel view for color) moves the ~1-1.5 s one-time cost to
+        construction.
+        """
+        if self.image.array.ndim == 4:
+            dummy_vol = np.zeros((2, 2, 2, 3), dtype=self.image.array.dtype)[..., 0]
+        else:
+            dummy_vol = np.zeros((2, 2, 2), dtype=self.image.array.dtype)
+        M = self._image_matrix_f32
+        _fused_oblique_sample_kernel(
+            dummy_vol, 2, 2, np.float32(1), np.float32(1),
+            np.float32(0), np.float32(0), np.float32(0),
+            np.float32(1), np.float32(0), np.float32(0),
+            np.float32(0), np.float32(1), np.float32(0),
+            np.float32(0), np.float32(0), np.float32(0),
+            M, np.float32(1), np.float32(1), np.float32(1), 0.0)
+
+    def pivot_position(self, position, R):
+        """Rotate one widget's position about rotation_center by R (the value returned by :meth:`update_rotation`).
+
+        update_rotation already moves ``self.position``; use this for positions the caller keeps itself.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> display = mia.Data.image['CT 01'].display
+        >>> R = display.update_rotation(r_z=5)
+        >>> widget_position = display.pivot_position(widget_position, R)
+        """
+        position = np.asarray(position, dtype=float)
+
+        return R.dot(position - self.rotation_center) + self.rotation_center
+
 
 class Image(object):
     """One image volume with its DICOM tags, geometry, ROIs, POIs and display.
@@ -737,6 +745,9 @@ class Image(object):
     model : Registry
         Models (clustered / tetrahedral meshes derived from this image's ROIs) by permanent id or name. Ids come
         from ``Data.new_model_id`` (unique across every image); names are unique on this image only.
+    roi_group, poi_group, moi_group, planeoi_group, model_group : Registry
+        Groups of each kind (:class:`~medicalimageanalysis.structure.group.Group`) by permanent id or path. The same
+        groups, under the same ids, are on every image (``Data.match_groups``).
 
     Examples
     --------
@@ -760,6 +771,9 @@ class Image(object):
         self.moi = Registry(id_source=lambda name, item: Data.new_moi_id(name, item))
         self.planeoi = Registry(id_source=lambda name, item: Data.new_planeoi_id(name, item))
         self.model = Registry(id_source=lambda name, item: Data.new_model_id(name, item))
+        for kind in Data.GROUP_KINDS:
+            setattr(self, kind + '_group', Registry(name_attribute='path',
+                                                    id_source=lambda name, item: Data.new_group_id(name, item)))
 
         self.tags = image.image_set
         self.array = np.ascontiguousarray(image.array)
@@ -802,9 +816,9 @@ class Image(object):
         self.display = Display(self)
 
     def __getstate__(self):
-        """Metadata-only state for pickling (array, ROIs, POIs, markups, planes and models are left out)."""
+        """Metadata-only state for pickling (array, ROIs, POIs, markups, planes, models and groups are left out)."""
         state = self.__dict__.copy()
-        for key in ('array', 'roi', 'poi', 'moi', 'planeoi', 'model'):
+        for key in ('array', 'roi', 'poi', 'moi', 'planeoi', 'model') + tuple(k + '_group' for k in Data.GROUP_KINDS):
             state.pop(key, None)
 
         return state
@@ -818,6 +832,9 @@ class Image(object):
         self.moi = Registry(id_source=lambda name, item: Data.new_moi_id(name, item))
         self.planeoi = Registry(id_source=lambda name, item: Data.new_planeoi_id(name, item))
         self.model = Registry(id_source=lambda name, item: Data.new_model_id(name, item))
+        for kind in Data.GROUP_KINDS:
+            setattr(self, kind + '_group', Registry(name_attribute='path',
+                                                    id_source=lambda name, item: Data.new_group_id(name, item)))
         if 'id' not in state:
             self.id = None   # metadata saved before ids existed
 
@@ -825,6 +842,8 @@ class Image(object):
         display = self.__dict__.get('display')
         if display is not None:
             display.image = self
+
+    # ---- Registry ----
 
     @staticmethod
     def _next_markup_name(registry, prefix):
@@ -837,7 +856,7 @@ class Image(object):
 
     def _find_annotation(self, kind, name):
         """The ROI (kind='roi') or POI ('poi') with this name on this image, else on another loaded image, else None.
-        Used to keep its group (and an ROI's source) when a new object takes its place."""
+        Used to keep its group when a new object takes its place."""
         registry = getattr(self, kind)
         if name in registry:
             return registry[name]
@@ -848,32 +867,29 @@ class Image(object):
 
         return None
 
-    def _first_tag(self, keywords, default=None):
-        """Value of the first DICOM keyword present in the first file's tags, else default."""
-        for keyword in keywords:
-            if keyword in self.tags[0]:
-                return getattr(self.tags[0], keyword)
-
-        return default
-
     def _register(self):
         """Store this image in its registry (``Data.image``). Subclasses override it (Dose -> ``Data.dose``).
 
-        A loaded image keeps its saved id. If its name is already registered, it replaces that entry and takes its id.
+        A loaded image keeps its saved id unless another image or dose already uses it (then it gets a new one). If
+        its name is already registered, it replaces that entry and takes its id. An image that was registered before
+        loading (under another name or id) is moved, never held twice.
         """
+        for name, item in list(Data.image.items()):
+            if item is self and name != self.image_name:
+                del Data.image[name]
+
         if self.image_name in Data.image:
             Data.image[self.image_name] = self
         else:
-            Data.image.add(self, self.image_name, item_id=self.id)
+            taken = self.id is not None and (self.id in Data.image or self.id in Data.dose)
+            Data.image.add(self, self.image_name, item_id=None if taken else self.id)
 
     def _store_annotation(self, kind, name, item):
-        """Store a new Roi / Poi under name in self.roi / self.poi, keeping the group (and an ROI's source) of the
-        entry it replaces, or of the same ROI/POI on another image, so replacing never ungroups it."""
+        """Store a new Roi / Poi under name in self.roi / self.poi, keeping the group of the entry it replaces, or of
+        the same ROI/POI on another image, so replacing never ungroups it."""
         previous = self._find_annotation(kind, name)
         if previous is not None:
             item.group_id = getattr(previous, 'group_id', None)
-            if kind == 'roi':
-                item.source_id = getattr(previous, 'source_id', None)
 
         getattr(self, kind)[name] = item
 
@@ -901,7 +917,7 @@ class Image(object):
         build : bool, default False
             Run the recipe now.
         group : str or int, optional
-            Group (name or id) to put the model in; a name is created when missing. None = ungrouped.
+            Model group (path or id) to put the model in; a path is created when missing. None = ungrouped.
 
         Returns
         -------
@@ -959,7 +975,7 @@ class Image(object):
         text : str, optional
             Label (the content for kind 'text').
         group : str or int, optional
-            Group (name or id) to put the markup in; a name is created when missing. None = ungrouped.
+            Markup group (path or id) to put the markup in; a path is created when missing. None = ungrouped.
 
         Returns
         -------
@@ -1012,8 +1028,8 @@ class Image(object):
         keep_side : {1, -1, None}, optional
             Side kept when cutting (+1 = the side the normal points to).
         group : str or int, optional
-            Group (name or id) tying planes together (e.g. one resection); a name is created when missing. None =
-            ungrouped.
+            Plane group (path or id) tying planes together (e.g. one resection); a path is created when missing.
+            None = ungrouped.
         color : list of int, optional
             RGB, 0-255. Random if None.
         visible : bool, default True
@@ -1067,8 +1083,8 @@ class Image(object):
         match : bool, default True
             Run ``Data.match_pois`` afterwards. ``match_pois`` itself passes False.
         group : str or int, optional
-            Group (name or id) to put the POI in, on every image; a name is created when missing. None keeps the group
-            the POI already has (ungrouped for a new name).
+            POI group (path or id) to put the POI in, on every image; a path is created when missing. None keeps the
+            group the POI already has (ungrouped for a new name).
 
         Examples
         --------
@@ -1106,8 +1122,8 @@ class Image(object):
         match : bool, default True
             Run ``Data.match_rois`` afterwards. ``match_rois`` itself passes False.
         group : str or int, optional
-            Group (name or id) to put the ROI in, on every image; a name is created when missing. None keeps the group
-            the ROI already has (ungrouped for a new name).
+            ROI group (path or id) to put the ROI in, on every image; a path is created when missing. None keeps the
+            group the ROI already has (ungrouped for a new name).
 
         Examples
         --------
@@ -1123,9 +1139,10 @@ class Image(object):
         if match:
             Data.match_rois()
 
-    def add_saved_model(self, model):
+    def add_saved_model(self, model, group_map=None):
         """Add a model read with ``Model.load`` / ``Model.from_bytes``, keeping its saved id unless another model on
-        any loaded image already uses it; a name already on this image gets the next free '<name> <n>'.
+        any loaded image already uses it; a name already on this image gets the next free '<name> <n>'. Its saved
+        group goes through group_map (from :meth:`load_groups` / :meth:`groups_from_json`).
 
         Examples
         --------
@@ -1136,9 +1153,136 @@ class Image(object):
         used = set(Data.model_ids()) | set(self.model.ids())
         item_id = None if model.id is None or model.id in used else model.id
         name = model.name if model.name not in self.model else self._next_markup_name(self.model, model.name)
+        model.group_id = self._live_group_id(self.model_group, group_map, getattr(model, 'group_id', None))
         self.model.add(model, name, item_id=item_id)
 
         return model
+
+    # ---- Group ----
+
+    @staticmethod
+    def _live_group_id(registry, group_map, saved_id):
+        """Group id in this session of a saved group id: through group_map ({saved: live}, from
+        :meth:`groups_from_json`) when given, else kept when registry (this image's container of that kind) has it,
+        else None."""
+        if saved_id is None:
+            return None
+        if group_map is not None:
+            return group_map.get(int(saved_id))
+
+        return int(saved_id) if int(saved_id) in registry else None
+
+    def groups_from_json(self, text):
+        """Add the groups in :meth:`groups_to_json` output to this image and return {saved id: id in this session},
+        for the loaders of this image's ROIs, POIs, markups, planes and models.
+
+        A saved group is a group already in the session (same kind) when, in this order:
+
+        1. it has the same id and ``Data.group_id_provider`` is set (ids then come from the database, so they are
+           global; without a provider two unrelated files can both hold id 5),
+        2. it is a composite of the same main ROI (one composite per main ROI), or
+        3. it has the same path.
+
+        That covers a group renamed in the session since the file was saved. The saved group then takes the session
+        group's id, path and identity (name, parent, main, method) and keeps this image's saved color, visibility and
+        match record. Otherwise it is new and keeps its saved id unless another group uses it. The groups are then
+        added to every other image (``Data.match_groups``). Main ROI ids are kept as saved.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> with open('C:/Data/CT 01/groups.json') as f:
+        ...     group_map = mia.Data.image['CT 01'].groups_from_json(f.read())
+        """
+        from .group import Group
+
+        record = json.loads(text)
+        used = set()
+        for kind in Data.GROUP_KINDS:
+            used |= set(Data._group_templates(kind)) | set(getattr(self, kind + '_group').ids())
+
+        mapping = {}
+        for kind in Data.GROUP_KINDS:
+            registry = getattr(self, kind + '_group')
+            groups = [Group.from_json(item_text) for item_text in record.get(kind, [])]
+            for group in sorted(groups, key=lambda g: g.path.count('/')):          # parents before children
+                saved_id, path = group.id, group.path
+                group.parent_id = None if group.parent_id is None else mapping.get(group.parent_id)
+
+                template = None
+                if Data.group_id_provider is not None and saved_id is not None and Data.has_group(kind, saved_id):
+                    template = Data._group_template(kind, saved_id)
+                if template is None and group.main_id is not None:
+                    for other in Data._group_templates(kind).values():
+                        if other.main_id == group.main_id:
+                            template = other
+                if template is None and Data.has_group(kind, path):
+                    template = Data._group_template(kind, path)
+                if template is None and path in registry:
+                    template = registry[path]
+
+                if template is not None:
+                    mapping[saved_id] = template.id
+                    if template.id in registry:                   # already on this image (e.g. made by matching)
+                        continue
+                    group.copy_identity(template)
+                    registry.add(group, template.path, item_id=template.id)
+                    continue
+
+                item_id = saved_id if saved_id is not None and saved_id not in used else None
+                mapping[saved_id] = registry.add(group, path, item_id=item_id)
+                used.add(mapping[saved_id])
+
+        Data.match_groups()
+
+        return mapping
+
+    def groups_to_json(self):
+        """Every group of this image, of every kind, as one JSON string: {'schema', 'roi': [...], 'poi': [...], ...},
+        parents before children, each entry that group's own ``to_json`` string (including this image's match
+        record). Empty groups are saved too: like an ROI, a group exists on every image.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> text = mia.Data.image['CT 01'].groups_to_json()
+        """
+        record = {'schema': 1}
+        for kind in Data.GROUP_KINDS:
+            groups = sorted(getattr(self, kind + '_group').values(), key=lambda g: g.path.count('/'))
+            record[kind] = [group.to_json() for group in groups]
+
+        return json.dumps(record)
+
+    def load_groups(self, groups_path, key):
+        """Decrypt and add the groups written by :meth:`save` (groups.enc) and return {saved id: id in this session}
+        for the loaders that follow (see :meth:`groups_from_json`). Call after :meth:`load_metadata` and before
+        loading this image's ROIs, POIs, markups and models.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> image.load_metadata('C:/Data/CT 01/metadata.enc', key)
+        >>> group_map = image.load_groups('C:/Data/CT 01/groups.enc', key)
+        >>> image.load_markups('C:/Data/CT 01/markups.enc', key, group_map=group_map)
+        >>> image.load_models('C:/Data/CT 01', key, group_map=group_map)
+        """
+        with open(groups_path, "rb") as f:
+            data = f.read()
+
+        nonce, encrypted = data[:12], data[12:]
+
+        return self.groups_from_json(AESGCM(key).decrypt(nonce, encrypted, None).decode('utf-8'))
+
+    # ---- Compute ----
+
+    def _first_tag(self, keywords, default=None):
+        """Value of the first DICOM keyword present in the first file's tags, else default."""
+        for keyword in keywords:
+            if keyword in self.tags[0]:
+                return getattr(self.tags[0], keyword)
+
+        return default
 
     def compute_corner_positions(self):
         """(8, 3) world positions of the corner voxel centers.
@@ -1259,14 +1403,14 @@ class Image(object):
         self.roi[name].create_mesh(reduction=0.50)
 
     def create_roi(self, name=None, color=None, visible=False, filepath=None, group=None):
-        """Add an empty ROI (to be drawn or filled later). group (name or id) puts it in a group on every image;
+        """Add an empty ROI (to be drawn or filled later). group (path or id) puts it in an ROI group on every image;
         None keeps the group the ROI already has.
 
         Examples
         --------
         >>> import medicalimageanalysis as mia
         >>> mia.Data.image['CT 01'].create_roi('GTV', color=[255, 0, 0])
-        >>> mia.Data.image['CT 01'].create_roi('Hepatic artery', group='Liver vessels')
+        >>> mia.Data.image['CT 01'].create_roi('Hepatic artery', group='Liver/Vessels')
         """
         self._store_annotation('roi', name, Roi(self, name=name, color=color, visible=visible, filepaths=filepath))
         if group is not None:
@@ -1436,6 +1580,8 @@ class Image(object):
         else:
             return [0, 1]
 
+    # ---- Load ----
+
     def input_mhd(self, filename, roi_names, values, plane='Axial'):
         """Add ROIs from a MetaImage (.mhd/.raw) label map: each value in values becomes the ROI of the same position.
 
@@ -1493,23 +1639,24 @@ class Image(object):
         raw = blosc2.decompress(AESGCM(key).decrypt(nonce, encrypted, None))
         self.array = np.frombuffer(raw, dtype=self.array_dtype).reshape(self.dimensions).copy()
 
-    def load_markups(self, markups_path, key):
-        """Decrypt and add the groups, markups and planes written by :meth:`save` (markups.enc). Call after
-        :meth:`load_metadata`, so the image is registered and ids are checked against every loaded image, and before
-        :meth:`load_models` or the application's own ROI / POI loading, so those find their groups.
+    def load_markups(self, markups_path, key, group_map=None):
+        """Decrypt and add the markups and planes written by :meth:`save` (markups.enc). Call after
+        :meth:`load_metadata`, so the image is registered and ids are checked against every loaded image. group_map
+        (from :meth:`load_groups`) maps their saved groups.
 
         Examples
         --------
         >>> import medicalimageanalysis as mia
         >>> image.load_metadata('C:/Data/CT 01/metadata.enc', key)
         >>> image.load_array('C:/Data/CT 01/array.enc', key)
-        >>> image.load_markups('C:/Data/CT 01/markups.enc', key)
+        >>> group_map = image.load_groups('C:/Data/CT 01/groups.enc', key)
+        >>> image.load_markups('C:/Data/CT 01/markups.enc', key, group_map=group_map)
         """
         with open(markups_path, "rb") as f:
             data = f.read()
 
         nonce, encrypted = data[:12], data[12:]
-        self.markups_from_json(AESGCM(key).decrypt(nonce, encrypted, None).decode('utf-8'))
+        self.markups_from_json(AESGCM(key).decrypt(nonce, encrypted, None).decode('utf-8'), group_map=group_map)
 
     def load_metadata(self, metadata_path, key):
         """Decrypt the metadata written by :meth:`save` into this image and register it (``Data.image``, or
@@ -1533,9 +1680,9 @@ class Image(object):
 
         self._register()
 
-    def load_models(self, folder_path, key):
+    def load_models(self, folder_path, key, group_map=None):
         """Decrypt and add every model written by :meth:`save` (model_<id>.enc files). Call after
-        :meth:`load_metadata`.
+        :meth:`load_metadata`; group_map (from :meth:`load_groups`) maps their saved groups.
 
         Examples
         --------
@@ -1550,11 +1697,16 @@ class Image(object):
                 with open(os.path.join(folder_path, file_name), "rb") as f:
                     data = f.read()
                 nonce, encrypted = data[:12], data[12:]
-                self.add_saved_model(Model.from_bytes(self, aes.decrypt(nonce, encrypted, None)))
+                self.add_saved_model(Model.from_bytes(self, aes.decrypt(nonce, encrypted, None)), group_map=group_map)
 
     def load_unencrypted_image(self, image_path, rois=True, pois=True):
-        """Load an image folder written by :meth:`save_unencrypted`, optionally with its ROIs and POIs. The groups in
-        markups.json are added first, so every item finds its group.
+        """Load an image folder written by :meth:`save_unencrypted`, optionally with its ROIs and POIs.
+
+        The image is registered in ``Data.image`` straight after its attributes are restored, under its saved id and
+        name (a new id when the saved one is taken in this session), the same as :meth:`load_metadata`. It does not
+        need to be registered first; if it was, it is moved, not held twice. The groups (groups.json) are added next,
+        so every item finds its group, and at the end every image gets its ROIs / POIs (``Data.match_rois`` /
+        ``match_pois``).
 
         Examples
         --------
@@ -1567,41 +1719,48 @@ class Image(object):
         for column in list(info.columns):
             setattr(self, column, info.at[0, column])
 
+        # registered now (saved id and name, see _register), so every lookup by image.id below finds this image
+        self._register()
+
         # groups first, so every ROI, POI, markup and model below finds its group
-        markups_text = None
-        markups_path = os.path.join(image_path, 'markups.json')
-        if os.path.exists(markups_path):
-            with open(markups_path) as f:
-                markups_text = f.read()
-            Data.add_saved_groups(json.loads(markups_text).get('groups', []))
+        group_map = None
+        groups_path = os.path.join(image_path, 'groups.json')
+        if os.path.exists(groups_path):
+            with open(groups_path) as f:
+                group_map = self.groups_from_json(f.read())
 
         if rois:
             roi_names = os.listdir(os.path.join(image_path, 'ROIs'))
             for name in roi_names:
-                self.load_unencrypted_rois(os.path.join(image_path, 'ROIs', name))
+                self.load_unencrypted_rois(os.path.join(image_path, 'ROIs', name), group_map=group_map)
 
         if pois:
             roi_names = os.listdir(os.path.join(image_path, 'POIs'))
             for name in roi_names:
-                self.load_unencrypted_pois(os.path.join(image_path, 'POIs', name))
+                self.load_unencrypted_pois(os.path.join(image_path, 'POIs', name), group_map=group_map)
 
-        if markups_text is not None:
-            self.markups_from_json(markups_text)
+        markups_path = os.path.join(image_path, 'markups.json')
+        if os.path.exists(markups_path):
+            with open(markups_path) as f:
+                self.markups_from_json(f.read(), group_map=group_map)
 
         models_path = os.path.join(image_path, 'Models')
         if os.path.exists(models_path):
             for file_name in sorted(os.listdir(models_path)):
-                self.add_saved_model(Model.load(self, os.path.join(models_path, file_name)))
+                self.add_saved_model(Model.load(self, os.path.join(models_path, file_name)), group_map=group_map)
 
-    def load_unencrypted_pois(self, poi_path):
+        Data.match_rois()                   # every image gets this image's ROIs / POIs (and groups), as on any read
+        Data.match_pois()
+
+    def load_unencrypted_pois(self, poi_path, group_map=None):
         """Load one POI folder, keeping its saved id when it doesn't clash.
 
         A name already on this image gets a _1, _2, ... suffix and a new id. A name already on another image takes
         that image's id, so one name never has two ids. The saved id is also dropped when another POI already uses it.
         Folders saved before ids existed get a new id.
 
-        A POI already on another image keeps that image's group; otherwise the saved group (group_id.npy, through
-        ``Data.live_group_id``) is used, so add the saved groups first (:meth:`load_unencrypted_image` does).
+        A POI already on another image keeps that image's group; otherwise the saved group (group_id.npy) is used,
+        mapped through group_map (from :meth:`groups_from_json`; :meth:`load_unencrypted_image` passes it).
 
         Examples
         --------
@@ -1634,8 +1793,8 @@ class Image(object):
         if inherited is not None:
             self.poi[name].group_id = getattr(inherited, 'group_id', None)
         elif os.path.exists(os.path.join(poi_path, 'group_id.npy')):
-            self.poi[name].group_id = Data.live_group_id(int(np.load(os.path.join(poi_path, 'group_id.npy'),
-                                                                     allow_pickle=True)))
+            saved = int(np.load(os.path.join(poi_path, 'group_id.npy'), allow_pickle=True))
+            self.poi[name].group_id = self._live_group_id(self.poi_group, group_map, saved)
         self.poi[name].visible = bool(np.load(os.path.join(poi_path, 'visible.npy'), allow_pickle=True))
         color = np.load(os.path.join(poi_path, 'color.npy'), allow_pickle=True)
         self.poi[name].color = None if color.ndim == 0 else list(color)          # a POI saved with no color
@@ -1645,16 +1804,15 @@ class Image(object):
             self.poi[name].point_position = list(np.load(os.path.join(poi_path, 'point_position.npy'),
                                                          allow_pickle=True))
 
-    def load_unencrypted_rois(self, roi_path):
+    def load_unencrypted_rois(self, roi_path, group_map=None):
         """Load one ROI folder, keeping its saved id when it doesn't clash.
 
         A name already on this image gets a _1, _2, ... suffix and a new id. A name already on another image takes
         that image's id, so one name never has two ids. The saved id is also dropped when another ROI already uses it.
         Folders saved before ids existed get a new id.
 
-        An ROI already on another image keeps that image's group and source; otherwise the saved ones are used
-        (group_id.npy through ``Data.live_group_id``, so add the saved groups first, as :meth:`load_unencrypted_image`
-        does; source_id.npy as saved).
+        An ROI already on another image keeps that image's group; otherwise the saved group (group_id.npy) is used,
+        mapped through group_map (from :meth:`groups_from_json`; :meth:`load_unencrypted_image` passes it).
 
         Examples
         --------
@@ -1686,13 +1844,9 @@ class Image(object):
         self.roi.add(Roi(self), name, item_id=roi_id)        # None -> Data.new_roi_id
         if inherited is not None:
             self.roi[name].group_id = getattr(inherited, 'group_id', None)
-            self.roi[name].source_id = getattr(inherited, 'source_id', None)
-        else:
-            if os.path.exists(os.path.join(roi_path, 'group_id.npy')):
-                self.roi[name].group_id = Data.live_group_id(int(np.load(os.path.join(roi_path, 'group_id.npy'),
-                                                                         allow_pickle=True)))
-            if os.path.exists(os.path.join(roi_path, 'source_id.npy')):
-                self.roi[name].source_id = int(np.load(os.path.join(roi_path, 'source_id.npy'), allow_pickle=True))
+        elif os.path.exists(os.path.join(roi_path, 'group_id.npy')):
+            saved = int(np.load(os.path.join(roi_path, 'group_id.npy'), allow_pickle=True))
+            self.roi[name].group_id = self._live_group_id(self.roi_group, group_map, saved)
         self.roi[name].visible = bool(np.load(os.path.join(roi_path, 'visible.npy'), allow_pickle=True))
         self.roi[name].color = list(np.load(os.path.join(roi_path, 'color.npy'), allow_pickle=True))
         self.roi[name].filepaths = str(np.load(os.path.join(roi_path, 'filepaths.npy'), allow_pickle=True))
@@ -1701,12 +1855,12 @@ class Image(object):
             self.roi[name].contour_position = list(np.load(os.path.join(roi_path, 'contour_position.npy'),
                                                             allow_pickle=True))
 
-    def markups_from_json(self, text):
-        """Add the groups, markups and planes in :meth:`markups_to_json` output to this image.
+    def markups_from_json(self, text, group_map=None):
+        """Add the markups and planes in :meth:`markups_to_json` output to this image.
 
-        The groups go first (``Data.add_saved_groups``: a name already in ``Data.group`` is that group). A saved id is
-        kept unless another markup (plane) on any loaded image already uses it; a name already on this image gets the
-        next free '<name> <n>'.
+        A saved id is kept unless another markup (plane) on any loaded image already uses it; a name already on this
+        image gets the next free '<name> <n>'. Saved groups go through group_map (from :meth:`groups_from_json`); with
+        None a saved group id is kept when this image has that group.
 
         Examples
         --------
@@ -1715,7 +1869,6 @@ class Image(object):
         ...     mia.Data.image['CT 01'].markups_from_json(f.read())
         """
         record = json.loads(text)
-        Data.add_saved_groups(record.get('groups', []))
 
         for kind, markup_class in (('moi', Moi), ('planeoi', PlaneOI)):
             registry = getattr(self, kind)
@@ -1723,15 +1876,17 @@ class Image(object):
 
             for item_text in record.get(kind, []):
                 item = markup_class.from_json(self, item_text)
+                item.group_id = self._live_group_id(getattr(self, kind + '_group'), group_map, item.group_id)
                 item_id = None if item.id is None or item.id in used else item.id
                 name = item.name if item.name not in registry else self._next_markup_name(registry, item.name)
                 used.add(registry.add(item, name, item_id=item_id))
 
+    # ---- Save ----
+
     def markups_to_json(self):
-        """Every markup and plane of this image as one JSON string: {'schema', 'groups': [...], 'moi': [...],
-        'planeoi': [...]}, where each entry is that item's own ``to_json`` string (so it can also be stored one database
-        row per item). 'groups' holds every group used by an item of any kind on this image (ROIs, POIs and models
-        too), with the groups they are nested in, so whatever loads this image's items finds their groups.
+        """Every markup and plane of this image as one JSON string: {'schema', 'moi': [...], 'planeoi': [...]}, where
+        each entry is that item's own ``to_json`` string (so it can also be stored one database row per item). Their
+        groups are saved by :meth:`groups_to_json`.
 
         Examples
         --------
@@ -1739,37 +1894,13 @@ class Image(object):
         >>> text = mia.Data.image['CT 01'].markups_to_json()
         """
         return json.dumps({'schema': 1,
-                           'groups': [] if self.id is None else Data.groups_to_json(self.id),
                            'moi': [moi.to_json() for moi in self.moi.values()],
                            'planeoi': [plane.to_json() for plane in self.planeoi.values()]})
 
-    def reset_display(self):
-        """Clear the view rotation and put every plane back at its initial slice (see :meth:`Display.reset`).
-
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> mia.Data.image['CT 01'].reset_display()
-        """
-        self.display.reset()
-
-    def retrieve_angles(self, order='ZXY'):
-        """Euler angles (degrees) of the display's view rotation.
-
-        The display builds its rotation from Euler 'xyz', so the angles differ from rotation_totals unless order='xyz'.
-
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> mia.Data.image['CT 01'].retrieve_angles()
-        """
-        rotation = Rotation.from_matrix(self.display.matrix[:3, :3])
-
-        return rotation.as_euler(order, degrees=True)
-
     def save(self, folder_path, key, clevel=5):
-        """Write encrypted metadata.enc (pickled, no array/ROIs/POIs), array.enc (blosc2 ZSTD), markups.enc (groups,
-        markups and planes, JSON) and one model_<id>.enc per model (npz) into folder_path.
+        """Write encrypted metadata.enc (pickled, no array/ROIs/POIs), array.enc (blosc2 ZSTD), groups.enc (groups of
+        every kind, JSON), markups.enc (markups and planes, JSON) and one model_<id>.enc per model (npz) into
+        folder_path. Load the groups back first (:meth:`load_groups`).
 
         Parameters
         ----------
@@ -1803,6 +1934,11 @@ class Image(object):
             f.write(encrypted)
 
         nonce = os.urandom(12)
+        encrypted = nonce + aes.encrypt(nonce, self.groups_to_json().encode('utf-8'), None)
+        with open(os.path.join(folder_path, 'groups.enc'), "wb") as f:
+            f.write(encrypted)
+
+        nonce = os.urandom(12)
         encrypted = nonce + aes.encrypt(nonce, self.markups_to_json().encode('utf-8'), None)
         with open(os.path.join(folder_path, 'markups.enc'), "wb") as f:
             f.write(encrypted)
@@ -1814,8 +1950,8 @@ class Image(object):
                 f.write(encrypted)
 
     def save_unencrypted(self, path, rois=True, pois=True):
-        """Write the image to a folder: info.p (attributes), tags.npy, array.npy, markups.json (groups, markups and
-        planes), plus ROIs/, POIs/ and Models/ folders.
+        """Write the image to a folder: info.p (attributes), tags.npy, array.npy, groups.json, markups.json (markups
+        and planes), plus ROIs/, POIs/ and Models/ folders.
 
         Examples
         --------
@@ -1824,7 +1960,8 @@ class Image(object):
         """
         variable_names = self.__dict__.keys()
         column_names = [name for name in variable_names
-                        if name not in ['roi', 'poi', 'moi', 'planeoi', 'model', 'tags', 'array', 'display']]
+                        if name not in ['roi', 'poi', 'moi', 'planeoi', 'model', 'tags', 'array', 'display']
+                        and not name.endswith('_group')]
 
         df = pd.DataFrame(index=[0], columns=column_names)
         for name in column_names:
@@ -1833,6 +1970,8 @@ class Image(object):
         df.to_pickle(os.path.join(path, 'info.p'))
         np.save(os.path.join(path, 'tags.npy'), self.tags, allow_pickle=True)
         np.save(os.path.join(path, 'array.npy'), self.array, allow_pickle=True)
+        with open(os.path.join(path, 'groups.json'), 'w') as f:
+            f.write(self.groups_to_json())
         with open(os.path.join(path, 'markups.json'), 'w') as f:
             f.write(self.markups_to_json())
 
@@ -1878,8 +2017,8 @@ class Image(object):
                 np.save(os.path.join(poi_path, 'group_id.npy'), poi.group_id, allow_pickle=True)
 
     def save_unencrypted_rois(self, path, create_main_folder=False):
-        """Write one folder per ROI (id, name, visible, color, filepaths, contour_position, group_id / source_id when
-        set) under path.
+        """Write one folder per ROI (id, name, visible, color, filepaths, contour_position, group_id when grouped)
+        under path.
 
         Folders are named by the permanent ROI id, so renaming an ROI never moves its folder.
         create_main_folder=True puts them in a new 'ROIs' subfolder.
@@ -1905,74 +2044,33 @@ class Image(object):
             np.save(os.path.join(roi_path, 'filepaths.npy'), roi.filepaths, allow_pickle=True)
             if getattr(roi, 'group_id', None) is not None:
                 np.save(os.path.join(roi_path, 'group_id.npy'), roi.group_id, allow_pickle=True)
-            if getattr(roi, 'source_id', None) is not None:
-                np.save(os.path.join(roi_path, 'source_id.npy'), roi.source_id, allow_pickle=True)
             if roi.contour_position is not None:
                 np.save(os.path.join(roi_path, 'contour_position.npy'),
                         np.array(roi.contour_position, dtype=object),
                         allow_pickle=True)
 
-    def split_roi(self, roi_name, min_volume=0.0, group=None):
-        """Split an ROI into its connected parts, each written as its own ROI '<name>_1', '<name>_2', ... (largest
-        first).
+    # ---- Other ----
 
-        The parts come from the ROI's mask (26-connected), so each one has contours, a mesh, a mask and DVH metrics
-        like any other ROI. Every part records the ROI as its source (``roi.source_id``, see ``Data.set_roi_source``),
-        so a viewer can show it under the ROI. The ROI itself is not changed. A part name that already exists (an
-        earlier split) is overwritten; parts left over from an earlier split with more parts are kept.
-
-        Parameters
-        ----------
-        roi_name : str or int
-            ROI (name or id) on this image, with contours.
-        min_volume : float, default 0.0
-            Smallest part kept (mm^3), e.g. 50 to drop specks of an AI segmentation.
-        group : str or int, optional
-            Also put the parts in this group (name, created when missing, or id). None = not grouped.
-
-        Returns
-        -------
-        list of Roi
-            The parts on this image, largest first.
+    def reset_display(self):
+        """Clear the view rotation and put every plane back at its initial slice (see :meth:`Display.reset`).
 
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image['CT 01']
-        >>> parts = image.split_roi('GTV', min_volume=50)
-        >>> [(part.name, round(part.volume / 1000, 1)) for part in parts]          # mL
-        [('GTV_1', 12.4), ('GTV_2', 3.1), ('GTV_3', 0.6)]
-        >>> image.split_roi('GTV', group='GTV parts')
+        >>> mia.Data.image['CT 01'].reset_display()
         """
-        roi = self.roi[roi_name]
-        if roi.contour_position is None or len(roi.contour_position) == 0:
-            raise ValueError(f"ROI '{roi.name}' has no contours to split.")
+        self.display.reset()
 
-        mask = np.asarray(roi.compute_mask())
-        peak = float(mask.max()) if mask.size else 0.0
-        if peak <= 0:
-            return []
-        inside = mask >= 0.5 * peak                     # works for 0/1 and 0-255 masks
+    def retrieve_angles(self, order='ZXY'):
+        """Euler angles (degrees) of the display's view rotation.
 
-        labels, count = ndimage.label(inside, structure=np.ones((3, 3, 3), dtype=bool))
-        sizes = np.bincount(labels.ravel())[1:]
-        voxel_mm3 = float(np.prod(np.asarray(self.spacing, dtype=float)))
-        order = [int(i) + 1 for i in np.argsort(-sizes, kind='stable') if sizes[i] * voxel_mm3 >= min_volume]
+        The display builds its rotation from Euler 'xyz', so the angles differ from rotation_totals unless order='xyz'.
 
-        parts = []
-        for n, label in enumerate(order, start=1):
-            name = f'{roi.name}_{n}'
-            if name not in self.roi:
-                self.add_roi(roi_name=name, color=list(roi.color), visible=roi.visible, plane=roi.plane, match=False)
-            part = self.roi[name]
-            part.plane = roi.plane
-            part.convert_mask((labels == label).astype(np.uint8))
-            parts.append(part)
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> mia.Data.image['CT 01'].retrieve_angles()
+        """
+        rotation = Rotation.from_matrix(self.display.matrix[:3, :3])
 
-        Data.match_rois()
-        for part in parts:
-            Data.set_roi_source(part.id, roi.id)
-        if group is not None and parts:
-            Data.set_group('roi', [part.id for part in parts], group)
-
-        return parts
+        return rotation.as_euler(order, degrees=True)

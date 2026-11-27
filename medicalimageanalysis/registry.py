@@ -134,6 +134,8 @@ class Registry(object):
         self.objects[item_id] = item
         self._tag(item, item_id, self.id_to_name[item_id])
 
+    # ---- Registry ----
+
     @staticmethod
     def _check_id(item_id):
         """

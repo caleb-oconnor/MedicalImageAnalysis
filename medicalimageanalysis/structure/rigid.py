@@ -191,23 +191,62 @@ class Rigid(object):
 
         self.rigid_name = self.add_rigid(rigid_name, rigid_id=rigid_id)
 
+    # ---- Registry ----
+
     @staticmethod
-    def _as_list(names):
-        """None stays None, a single name or id becomes a one-item list, anything else becomes a list."""
-        if names is None:
+    def find_rigids(image_a, image_b):
+        """Names of every registration in ``Data.rigid`` that connects the frames of two images (name or id, either
+        direction). Use ``Data.rigid.get_id`` on a result for its id.
+
+        Several can match, e.g. 'right hip' and 'left hip' between the same CT and CBCT.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> mia.Rigid.find_rigids('Dose 01', 'MR 01')
+        ['CT 01_MR 01']
+        """
+        return [name for name, rigid in Data.rigid.items() if rigid.connects(image_a, image_b)]
+
+    def _find_parent(self):
+        """Parent Rigid by uid, or None if there is no parent or it no longer exists."""
+        if self.parent_uid is None:
             return None
-        return [names] if isinstance(names, (str, int, np.integer)) else list(names)
 
-    @staticmethod
-    def _make_side(image_id, indices=None, frame=None):
-        """RigidSide with clean int indices; frame read from the image (``Data.frame_of``) unless given."""
-        return RigidSide(image_id, Data.frame_of(image_id) if frame is None else frame,
-                         None if indices is None else [int(i) for i in indices])
+        for rigid in Data.rigid.values():
+            if rigid.local_uid == self.parent_uid and rigid is not self:
+                return rigid
 
-    @staticmethod
-    def _matrix_list(mat):
-        """4x4 matrix to a flat list of 16 floats for JSON."""
-        return np.asarray(mat, dtype=float).ravel().tolist()
+        return None
+
+    def add_rigid(self, rigid_name, rigid_id=None):
+        """Store this registration in ``Data.rigid`` and return its name; None builds a unique name from the current
+        image names. A name already in use is replaced and its id taken over.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> rigid = mia.Rigid('CT 01', 'MR 01')
+        >>> rigid.rigid_name, rigid.id
+        ('CT 01_MR 01', 1)
+        """
+        if rigid_name is None:
+            rigid_name = (Data.volume_label(self.reference.image_id) + '_' +
+                          Data.volume_label(self.moving.image_id))
+            if rigid_name in Data.rigid:
+                n = 1
+                while rigid_name + '_' + str(n) in Data.rigid:
+                    n += 1
+                rigid_name = rigid_name + '_' + str(n)
+
+        if rigid_name in Data.rigid:
+            Data.rigid[rigid_name] = self
+        else:
+            Data.rigid.add(self, rigid_name, item_id=rigid_id)
+
+        return rigid_name
+
+    # ---- Compute ----
 
     @staticmethod
     def _matrix_to_sitk(mat, center):
@@ -286,67 +325,6 @@ class Rigid(object):
         vtk_matrix.DeepCopy(tuple(np.asarray(mat, dtype=float).ravel()))
         return vtk_matrix
 
-    @staticmethod
-    def find_rigids(image_a, image_b):
-        """Names of every registration in ``Data.rigid`` that connects the frames of two images (name or id, either
-        direction). Use ``Data.rigid.get_id`` on a result for its id.
-
-        Several can match, e.g. 'right hip' and 'left hip' between the same CT and CBCT.
-
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> mia.Rigid.find_rigids('Dose 01', 'MR 01')
-        ['CT 01_MR 01']
-        """
-        return [name for name, rigid in Data.rigid.items() if rigid.connects(image_a, image_b)]
-
-    @classmethod
-    def from_json(cls, text):
-        """Rebuild a registration from :meth:`to_json` output and register it in ``Data.rigid``.
-
-        The saved frames and ids are kept, so it works before its images are loaded (the image ids must be the ones
-        the images are restored with). The parent is found again by uid when it is loaded too; otherwise the saved
-        base matrix is used.
-
-        Schema 1 records (saved with image and ROI names) are read too: the names are looked up, so their images and
-        ROIs must be loaded first.
-
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> with open('C:/Data/ct_mr.json') as f:
-        ...     rigid = mia.Rigid.from_json(f.read())
-        """
-        record = json.loads(text)
-        schema = record.get('schema', 1)
-        if schema > cls.SCHEMA_VERSION:
-            raise ValueError(f"Record schema {schema} is newer than supported ({cls.SCHEMA_VERSION}).")
-
-        reference, moving = record['reference'], record['moving']
-        if schema == 1:
-            image_ids = [Data.volume_id(reference['image_name']), Data.volume_id(moving['image_name'])]
-            roi_ids = [[Data.get_roi_id(name) for name in side['rois']] for side in (reference, moving)]
-        else:
-            image_ids = [reference['image_id'], moving['image_id']]
-            roi_ids = [list(side['rois']) for side in (reference, moving)]
-
-        rigid_id = record.get('id')
-        if rigid_id is not None and rigid_id in Data.rigid:
-            rigid_id = None
-
-        rigid = cls(image_ids[0], image_ids[1], rigid_name=record['name'],
-                    matrix=np.reshape(record['matrix'], (4, 4)), local_uid=record['uid'], rigid_id=rigid_id)
-
-        rigid.reference = cls._make_side(image_ids[0], reference['indices'], reference.get('frame'))
-        rigid.moving = cls._make_side(image_ids[1], moving['indices'], moving.get('frame'))
-        rigid.reference.rois = roi_ids[0]
-        rigid.moving.rois = roi_ids[1]
-        rigid.parent_uid = record['parent_uid']
-        rigid.base_matrix = np.reshape(np.asarray(record['base_matrix'], dtype=float), (4, 4))
-
-        return rigid
-
     def _apply_display_transform(self, T, base_name, image_name):
         """Apply T (in the base image's world) to the resliced image: A_new = T @ A, then solve back for self.matrix
         so the parent's base stays untouched. Manual edits act on the full registration, so the animation snaps to 1."""
@@ -411,17 +389,6 @@ class Rigid(object):
 
         return new, (col0, row0)
 
-    def _find_parent(self):
-        """Parent Rigid by uid, or None if there is no parent or it no longer exists."""
-        if self.parent_uid is None:
-            return None
-
-        for rigid in Data.rigid.values():
-            if rigid.local_uid == self.parent_uid and rigid is not self:
-                return rigid
-
-        return None
-
     def _merge_roi_meshes(self, image_id, roi_ids):
         """One PolyData from several ROI meshes on the same image (world coordinates, never modified)."""
         meshes = []
@@ -461,13 +428,6 @@ class Rigid(object):
             return (bounds[:, 0::2].min(axis=0) + bounds[:, 1::2].max(axis=0)) / 2
 
         return np.asarray(image.get_center(), dtype=float)
-
-    def _record(self):
-        """Registration state as plain JSON types (no arrays other than the 4x4 matrices as lists)."""
-        return {'schema': self.SCHEMA_VERSION, 'id': self.id, 'uid': self.local_uid, 'name': self.rigid_name,
-                'reference': asdict(self.reference), 'moving': asdict(self.moving),
-                'matrix': self._matrix_list(self.matrix), 'parent_uid': self.parent_uid,
-                'base_matrix': self._matrix_list(self.get_base_matrix())}
 
     def _roi_label(self, roi_id):
         """Current ROI name for messages, or 'id <n>' when the ROI no longer exists."""
@@ -547,47 +507,6 @@ class Rigid(object):
             return float(spacing), float(spacing)
 
         return float(spacing[0]), float(spacing[1])
-
-    def add_rigid(self, rigid_name, rigid_id=None):
-        """Store this registration in ``Data.rigid`` and return its name; None builds a unique name from the current
-        image names. A name already in use is replaced and its id taken over.
-
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> rigid = mia.Rigid('CT 01', 'MR 01')
-        >>> rigid.rigid_name, rigid.id
-        ('CT 01_MR 01', 1)
-        """
-        if rigid_name is None:
-            rigid_name = (Data.volume_label(self.reference.image_id) + '_' +
-                          Data.volume_label(self.moving.image_id))
-            if rigid_name in Data.rigid:
-                n = 1
-                while rigid_name + '_' + str(n) in Data.rigid:
-                    n += 1
-                rigid_name = rigid_name + '_' + str(n)
-
-        if rigid_name in Data.rigid:
-            Data.rigid[rigid_name] = self
-        else:
-            Data.rigid.add(self, rigid_name, item_id=rigid_id)
-
-        return rigid_name
-
-    def align_origins(self):
-        """Set this step so the two registered images' origins coincide (a rough start before compute_registration).
-
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> mia.Data.rigid['CT 01_MR 01'].align_origins()
-        """
-        combined = np.identity(4)
-        combined[:3, 3] = (np.asarray(Data.image[self.moving.image_id].origin, dtype=float) -
-                           np.asarray(Data.image[self.reference.image_id].origin, dtype=float))
-
-        self.matrix = combined @ self._rigid_inv(self.get_base_matrix())
 
     def compute_array(self, plane, position, base_name=None, image_name=None, spacing=None, extend=True):
         """image_name resliced onto base_name's view: Display.compute_array's result plus 'scale' and 'offset'.
@@ -774,19 +693,6 @@ class Rigid(object):
 
         return info
 
-    def connects(self, image_a, image_b):
-        """True when the two images are on opposite sides of this registration (by name or frame of reference).
-
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> mia.Data.rigid['CT 01_MR 01'].connects('Dose 01', 'MR 01')
-        True
-        """
-        side_a, side_b = self._side_of(image_a), self._side_of(image_b)
-
-        return side_a is not None and side_b is not None and side_a is not side_b
-
     def create_image(self, base_name=None, image_name=None):
         """Resample image_name onto base_name's world (same convention as the display). Color keeps channels; outside
         image_name is its ``background`` (0 for color).
@@ -829,19 +735,6 @@ class Rigid(object):
         reslice.Update()
 
         return reslice.GetOutput()
-
-    def export_image(self, path, base_name=None, image_name=None):
-        """Write the resampled image (create_image) as an mhd/raw MetaImage pair.
-
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> mia.Data.rigid['CT 01_MR 01'].export_image('C:/Data/aligned.mhd')
-        """
-        writer = vtk.vtkMetaImageWriter()
-        writer.SetInputData(self.create_image(base_name, image_name))
-        writer.SetFileName(path)
-        writer.Write()
 
     def get_base_matrix(self):
         """reference -> moving result of the parent (identity without a parent).
@@ -996,23 +889,21 @@ class Rigid(object):
         """Translation of this registration's own step."""
         return self.matrix[:3, 3]
 
-    def save(self, path):
-        """Write the JSON state to a file. Written to a temporary name and swapped in, so a crash never leaves a
-        half-written file.
+    # ---- Set ----
+
+    def align_origins(self):
+        """Set this step so the two registered images' origins coincide (a rough start before compute_registration).
 
         Examples
         --------
         >>> import medicalimageanalysis as mia
-        >>> mia.Data.rigid['CT 01_MR 01'].save('C:/Data/ct_mr.json')
+        >>> mia.Data.rigid['CT 01_MR 01'].align_origins()
         """
-        temp = path + '.tmp'
-        with open(temp, 'w') as f:
-            f.write(self.to_json())
-        os.replace(temp, path)
+        combined = np.identity(4)
+        combined[:3, 3] = (np.asarray(Data.image[self.moving.image_id].origin, dtype=float) -
+                           np.asarray(Data.image[self.reference.image_id].origin, dtype=float))
 
-    def to_json(self):
-        """Compact JSON of the registration state (no images, meshes or display settings), typically under 1 KB."""
-        return json.dumps(self._record(), separators=(',', ':'))
+        self.matrix = combined @ self._rigid_inv(self.get_base_matrix())
 
     def update_rotation(self, base_name=None, image_name=None, center=None, r_x=0, r_y=0, r_z=0, plane=None,
                         position=None, axis=None, angle=None):
@@ -1060,3 +951,124 @@ class Rigid(object):
         T[:3, 3] = [t_x, t_y, t_z]
 
         self._apply_display_transform(T, base_name, image_name)
+
+    # ---- Load ----
+
+    @classmethod
+    def from_json(cls, text):
+        """Rebuild a registration from :meth:`to_json` output and register it in ``Data.rigid``.
+
+        The saved frames and ids are kept, so it works before its images are loaded (the image ids must be the ones
+        the images are restored with). The parent is found again by uid when it is loaded too; otherwise the saved
+        base matrix is used.
+
+        Schema 1 records (saved with image and ROI names) are read too: the names are looked up, so their images and
+        ROIs must be loaded first.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> with open('C:/Data/ct_mr.json') as f:
+        ...     rigid = mia.Rigid.from_json(f.read())
+        """
+        record = json.loads(text)
+        schema = record.get('schema', 1)
+        if schema > cls.SCHEMA_VERSION:
+            raise ValueError(f"Record schema {schema} is newer than supported ({cls.SCHEMA_VERSION}).")
+
+        reference, moving = record['reference'], record['moving']
+        if schema == 1:
+            image_ids = [Data.volume_id(reference['image_name']), Data.volume_id(moving['image_name'])]
+            roi_ids = [[Data.get_roi_id(name) for name in side['rois']] for side in (reference, moving)]
+        else:
+            image_ids = [reference['image_id'], moving['image_id']]
+            roi_ids = [list(side['rois']) for side in (reference, moving)]
+
+        rigid_id = record.get('id')
+        if rigid_id is not None and rigid_id in Data.rigid:
+            rigid_id = None
+
+        rigid = cls(image_ids[0], image_ids[1], rigid_name=record['name'],
+                    matrix=np.reshape(record['matrix'], (4, 4)), local_uid=record['uid'], rigid_id=rigid_id)
+
+        rigid.reference = cls._make_side(image_ids[0], reference['indices'], reference.get('frame'))
+        rigid.moving = cls._make_side(image_ids[1], moving['indices'], moving.get('frame'))
+        rigid.reference.rois = roi_ids[0]
+        rigid.moving.rois = roi_ids[1]
+        rigid.parent_uid = record['parent_uid']
+        rigid.base_matrix = np.reshape(np.asarray(record['base_matrix'], dtype=float), (4, 4))
+
+        return rigid
+
+    # ---- Save ----
+
+    def _record(self):
+        """Registration state as plain JSON types (no arrays other than the 4x4 matrices as lists)."""
+        return {'schema': self.SCHEMA_VERSION, 'id': self.id, 'uid': self.local_uid, 'name': self.rigid_name,
+                'reference': asdict(self.reference), 'moving': asdict(self.moving),
+                'matrix': self._matrix_list(self.matrix), 'parent_uid': self.parent_uid,
+                'base_matrix': self._matrix_list(self.get_base_matrix())}
+
+    def export_image(self, path, base_name=None, image_name=None):
+        """Write the resampled image (create_image) as an mhd/raw MetaImage pair.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> mia.Data.rigid['CT 01_MR 01'].export_image('C:/Data/aligned.mhd')
+        """
+        writer = vtk.vtkMetaImageWriter()
+        writer.SetInputData(self.create_image(base_name, image_name))
+        writer.SetFileName(path)
+        writer.Write()
+
+    def save(self, path):
+        """Write the JSON state to a file. Written to a temporary name and swapped in, so a crash never leaves a
+        half-written file.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> mia.Data.rigid['CT 01_MR 01'].save('C:/Data/ct_mr.json')
+        """
+        temp = path + '.tmp'
+        with open(temp, 'w') as f:
+            f.write(self.to_json())
+        os.replace(temp, path)
+
+    def to_json(self):
+        """Compact JSON of the registration state (no images, meshes or display settings), typically under 1 KB."""
+        return json.dumps(self._record(), separators=(',', ':'))
+
+    # ---- Other ----
+
+    @staticmethod
+    def _as_list(names):
+        """None stays None, a single name or id becomes a one-item list, anything else becomes a list."""
+        if names is None:
+            return None
+        return [names] if isinstance(names, (str, int, np.integer)) else list(names)
+
+    @staticmethod
+    def _make_side(image_id, indices=None, frame=None):
+        """RigidSide with clean int indices; frame read from the image (``Data.frame_of``) unless given."""
+        return RigidSide(image_id, Data.frame_of(image_id) if frame is None else frame,
+                         None if indices is None else [int(i) for i in indices])
+
+    @staticmethod
+    def _matrix_list(mat):
+        """4x4 matrix to a flat list of 16 floats for JSON."""
+        return np.asarray(mat, dtype=float).ravel().tolist()
+
+    def connects(self, image_a, image_b):
+        """True when the two images are on opposite sides of this registration (by name or frame of reference).
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> mia.Data.rigid['CT 01_MR 01'].connects('Dose 01', 'MR 01')
+        True
+        """
+        side_a, side_b = self._side_of(image_a), self._side_of(image_b)
+
+        return side_a is not None and side_b is not None and side_a is not side_b

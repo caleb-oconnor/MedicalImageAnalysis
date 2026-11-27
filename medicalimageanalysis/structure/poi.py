@@ -23,7 +23,7 @@ class Poi(object):
         Permanent POI id, written by the image's POI registry. The same POI has the same id on every image.
 
     group_id : int | None
-        Group the POI is in (``Data.group``), the same on every image. None = ungrouped. Set it with
+        POI group the POI is in (``image.poi_group``), the same on every image. None = ungrouped. Set it with
         ``Data.set_group('poi', ...)``.
 
     Examples

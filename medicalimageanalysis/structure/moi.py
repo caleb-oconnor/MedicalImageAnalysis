@@ -19,8 +19,8 @@ Description:
     * A markup is shown only on views that lie in its plane (within half a slice by default, :meth:`Moi.is_on_view`).
       Other views hide it; :meth:`Moi.go_to` takes the image's display back to the view it was drawn on.
     * Measurements (:meth:`Moi.compute_measurement`) are in the image's own world: mm, mm^2 and degrees.
-    * ``group_id`` puts the markup in a group (``Data.group``, None = ungrouped), e.g. every measurement of one
-      lesion. Set it with ``group=`` here or ``Data.set_group('moi', ...)``.
+    * ``group_id`` puts the markup in a markup group (``image.moi_group``, None = ungrouped), e.g. every measurement
+      of one lesion. Set it with ``group=`` here or ``Data.set_group('moi', ...)``.
     * ``id`` is permanent and unique across every image (``Data.new_moi_id``). ``name`` is unique on its image only,
       so two images can each have a 'Line 1'. Rename with ``Data.rename_moi`` (or ``image.moi.rename``); no other image
       has to follow.
@@ -90,14 +90,14 @@ class Moi(object):
     text : str, optional
         Label drawn with the markup (the whole content for kind 'text').
     group : str or int, optional
-        Group (name or id) to put the markup in; a name is created when missing. None = ungrouped.
+        Markup group (path or id) to put the markup in; a path is created when missing. None = ungrouped.
 
     Attributes
     ----------
     id : int or None
         Permanent id, written by ``image.moi``. None until the markup is added.
     group_id : int or None
-        Group the markup is in (``Data.group``), None = ungrouped.
+        Markup group the markup is in (``image.moi_group``), None = ungrouped.
     misc : dict
         Free space for the application.
 
@@ -137,7 +137,7 @@ class Moi(object):
         self.color = [255, 255, 0] if color is None else list(color)
         self.visible = visible
         self.text = text
-        self.group_id = Data.resolve_group(group)
+        self.group_id = Data.resolve_group('moi', group)
 
         self.view_plane = view_plane
         self.plane_origin = np.asarray(plane_origin, dtype=float)
@@ -148,6 +148,8 @@ class Moi(object):
         self.points = self._clean_points(points)
 
         self.misc = {}
+
+    # ---- Compute ----
 
     @staticmethod
     def _ellipse_outline(center, axis_a, axis_b, samples=64):
@@ -194,35 +196,6 @@ class Moi(object):
         return (np.asarray(grid['origin'], dtype=float) + np.outer(pixel[:, 0] * grid['sx'], x_axis) +
                 np.outer(pixel[:, 1] * grid['sy'], y_axis))
 
-    @classmethod
-    def from_json(cls, image, text):
-        """Rebuild a markup from :meth:`to_json` output, not yet added to the image.
-
-        ``id`` and ``name`` hold the saved values; :meth:`Image.markups_from_json` adds it with them (or with a new id
-        when the saved one is taken). The saved group goes through ``Data.live_group_id``, so load the groups first
-        (``Data.add_saved_groups``; :meth:`Image.markups_from_json` does).
-
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image['CT 01']
-        >>> moi = mia.Moi.from_json(image, text)
-        >>> image.moi.add(moi, moi.name)
-        """
-        record = json.loads(text)
-        schema = record.get('schema', 1)
-        if schema > cls.SCHEMA_VERSION:
-            raise ValueError(f"Record schema {schema} is newer than supported ({cls.SCHEMA_VERSION}).")
-
-        moi = cls(image, record['kind'], record['points'], view_plane=record['view_plane'],
-                  plane_origin=record['plane_origin'], plane_x_axis=record['plane_x_axis'],
-                  plane_y_axis=record['plane_y_axis'], plane_normal=record['plane_normal'], name=record['name'],
-                  color=record['color'], visible=record['visible'], text=record['text'])
-        moi.id = record.get('id')
-        moi.group_id = Data.live_group_id(record.get('group_id'))
-
-        return moi
-
     def _clean_points(self, points):
         """(N, 3) float points checked against the kind's point count and projected onto the drawing plane."""
         points = np.asarray(points, dtype=float).reshape(-1, 3)
@@ -262,16 +235,6 @@ class Moi(object):
             return self._ellipse_outline(center, self.points[1] - center, self.points[2] - center)
 
         return self.points
-
-    def _record(self):
-        """State as plain JSON types."""
-        return {'schema': self.SCHEMA_VERSION, 'id': self.id, 'name': self.name,
-                'image_id': getattr(self.image, 'id', None), 'kind': self.kind,
-                'points': self.points.tolist(), 'view_plane': self.view_plane,
-                'plane_origin': self.plane_origin.tolist(), 'plane_x_axis': self.plane_x_axis.tolist(),
-                'plane_y_axis': self.plane_y_axis.tolist(), 'plane_normal': self.plane_normal.tolist(),
-                'color': [int(c) for c in self.color], 'visible': bool(self.visible), 'text': self.text,
-                'group_id': self.group_id}
 
     def _tolerance(self):
         """Default distance (mm) a view may be from the drawing plane and still show the markup: half a slice."""
@@ -398,20 +361,6 @@ class Moi(object):
 
         return None
 
-    def go_to(self):
-        """Turn the image's display back to the view the markup was drawn on, centered on it.
-
-        Rotates the shared view (so an oblique markup comes back oblique), scrolls every plane through the markup's
-        center and puts the crosshair there. Returns the new position of ``view_plane``.
-
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> position = mia.Data.image['CT 01'].moi['Line 1'].go_to()
-        """
-        return self.image.display.go_to_plane(self.view_plane, self.points.mean(axis=0), self.plane_normal,
-                                              x_axis=self.plane_x_axis)
-
     def is_on_view(self, grid, tolerance=None):
         """True when the view is parallel to the drawing plane and within tolerance (mm, None = half a slice) of it.
 
@@ -432,15 +381,7 @@ class Moi(object):
 
         return bool(distance <= tolerance)
 
-    def to_json(self):
-        """State as one JSON string (one database row or one line in a file). Read it back with :meth:`from_json`.
-
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> text = mia.Data.image['CT 01'].moi['Line 1'].to_json()
-        """
-        return json.dumps(self._record(), separators=(',', ':'))
+    # ---- Set ----
 
     def update_points(self, points):
         """Replace the points (e.g. after dragging a handle); checked and projected onto the drawing plane again.
@@ -452,3 +393,72 @@ class Moi(object):
         >>> moi.update_points([moi.points[0], new_end])
         """
         self.points = self._clean_points(points)
+
+    # ---- Load ----
+
+    @classmethod
+    def from_json(cls, image, text):
+        """Rebuild a markup from :meth:`to_json` output, not yet added to the image.
+
+        ``id`` and ``name`` hold the saved values; :meth:`Image.markups_from_json` adds it with them (or with a new id
+        when the saved one is taken). ``group_id`` holds the saved value; :meth:`Image.markups_from_json` maps it onto
+        the session's group.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> image = mia.Data.image['CT 01']
+        >>> moi = mia.Moi.from_json(image, text)
+        >>> image.moi.add(moi, moi.name)
+        """
+        record = json.loads(text)
+        schema = record.get('schema', 1)
+        if schema > cls.SCHEMA_VERSION:
+            raise ValueError(f"Record schema {schema} is newer than supported ({cls.SCHEMA_VERSION}).")
+
+        moi = cls(image, record['kind'], record['points'], view_plane=record['view_plane'],
+                  plane_origin=record['plane_origin'], plane_x_axis=record['plane_x_axis'],
+                  plane_y_axis=record['plane_y_axis'], plane_normal=record['plane_normal'], name=record['name'],
+                  color=record['color'], visible=record['visible'], text=record['text'])
+        moi.id = record.get('id')
+        moi.group_id = record.get('group_id')
+
+        return moi
+
+    # ---- Save ----
+
+    def _record(self):
+        """State as plain JSON types."""
+        return {'schema': self.SCHEMA_VERSION, 'id': self.id, 'name': self.name,
+                'image_id': getattr(self.image, 'id', None), 'kind': self.kind,
+                'points': self.points.tolist(), 'view_plane': self.view_plane,
+                'plane_origin': self.plane_origin.tolist(), 'plane_x_axis': self.plane_x_axis.tolist(),
+                'plane_y_axis': self.plane_y_axis.tolist(), 'plane_normal': self.plane_normal.tolist(),
+                'color': [int(c) for c in self.color], 'visible': bool(self.visible), 'text': self.text,
+                'group_id': self.group_id}
+
+    def to_json(self):
+        """State as one JSON string (one database row or one line in a file). Read it back with :meth:`from_json`.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> text = mia.Data.image['CT 01'].moi['Line 1'].to_json()
+        """
+        return json.dumps(self._record(), separators=(',', ':'))
+
+    # ---- Other ----
+
+    def go_to(self):
+        """Turn the image's display back to the view the markup was drawn on, centered on it.
+
+        Rotates the shared view (so an oblique markup comes back oblique), scrolls every plane through the markup's
+        center and puts the crosshair there. Returns the new position of ``view_plane``.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> position = mia.Data.image['CT 01'].moi['Line 1'].go_to()
+        """
+        return self.image.display.go_to_plane(self.view_plane, self.points.mean(axis=0), self.plane_normal,
+                                              x_axis=self.plane_x_axis)

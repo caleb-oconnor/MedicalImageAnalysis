@@ -153,13 +153,8 @@ class Roi(object):
         `Data.rename_roi`, never by assigning `roi.name`.
 
     group_id : int | None
-        Group the ROI is in (`Data.group`), the same on every image. None =
-        ungrouped. Set it with `Data.set_group('roi', ...)`.
-
-    source_id : int | None
-        Id of the ROI this one was made from (`Image.split_roi`,
-        `PlaneOI.cut_roi`), the same on every image. None = drawn, read or
-        segmented directly. Set it with `Data.set_roi_source`.
+        ROI group the ROI is in (`image.roi_group`), the same on every image.
+        None = ungrouped. Set it with `Data.set_group('roi', ...)`.
 
     contour_position : list[np.ndarray] | None
         World contours, (N, 3) in mm.
@@ -255,7 +250,6 @@ class Roi(object):
         self.filepaths = filepaths
 
         self.group_id = None
-        self.source_id = None
 
         self._slice_cache = OrderedDict()
 
@@ -305,424 +299,12 @@ class Roi(object):
             else:
                 self.cutter.update_mesh(value)
 
+    # ---- Compute ----
+
     @staticmethod
     def _key_bytes(values, decimals):
         """Rounded bytes for cache keys. + 0.0 folds -0.0 into 0.0 so tiny sign flips don't cause misses."""
         return (np.round(np.asarray(values, dtype=float), decimals) + 0.0).tobytes()
-
-    def add_mesh(self, mesh):
-        """
-        Attach an existing mesh and read its volume, center and bounds.
-
-        Unlike `update_mesh`, the contours are kept.
-
-        Parameters
-        ----------
-        mesh : pv.PolyData
-            Closed surface in mm, in this image's world.
-
-        Returns
-        -------
-        None
-
-        Examples
-        --------
-        Attach a mesh loaded from disk:
-
-        >>> import pyvista as pv
-        >>> import medicalimageanalysis as mia
-        >>> roi = mia.Data.image['CT 01'].roi['Liver']
-        >>> roi.add_mesh(pv.read('C:/Data/liver.stl'))
-        >>> roi.volume / 1000   # mL
-        """
-        self.mesh = mesh
-
-        self.volume = mesh.volume
-        self.com = mesh.center
-        self.bounds = mesh.bounds
-
-    def clear(self):
-        """
-        Remove the contours, mesh and derived geometry.
-
-        Name, color, visibility, file paths, group and source are kept.
-
-        Returns
-        -------
-        None
-
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> roi = mia.Data.image['CT 01'].roi['Liver']
-        >>> roi.clear()
-        >>> roi.contour_position is None, roi.mesh is None, roi.volume is None
-        (True, True, True)
-        """
-        self.contour_position = None
-        self.contour_pixel = None
-
-        self.mesh = None
-        self.cutter = None
-        self.volume = None
-        self.com = None
-        self.bounds = None
-
-        self.fixed_name = False
-        self.visual = {'2d': None, '3d': None, 'opacity': None, 'multicolor': None}
-        self.misc = {}
-
-    def clear_slice_cache(self):
-        """
-        Drop cached mesh slices.
-
-        Only needed if the mesh is edited in place (mesh.points = ...,
-        transform with inplace=True); replacing the mesh through the setter
-        or `update_mesh` clears it automatically.
-
-        Returns
-        -------
-        None
-
-        Examples
-        --------
-        Shift the mesh 2 mm in place, then clear the stale slices:
-
-        >>> import medicalimageanalysis as mia
-        >>> roi = mia.Data.image['CT 01'].roi['Liver']
-        >>> roi.mesh.points += [0.0, 0.0, 2.0]
-        >>> roi.clear_slice_cache()
-        """
-        self._slice_cache.clear()
-
-    def convert_position_to_pixel(self, points, base=True, plane=None, origin=None):
-        """
-        Convert world contours to pixel coordinates.
-
-        With `base=True` the result is the image's own x-y-z pixel index.
-        With `base=False` it is the 2D (column, row) pixel of a displayed
-        plane, using the current view rotation (`image.display.matrix`) and
-        the plane's top-left `origin`. Each returned loop is closed by
-        repeating its first point.
-
-        Parameters
-        ----------
-        points : list[np.ndarray]
-            World contours, (N, 3) in mm.
-
-        base : bool
-            True for image pixel indices, False for display pixels.
-
-        plane : str | None
-            'Axial', 'Sagittal' or 'Coronal'. Required when `base=False`.
-
-        origin : array-like (3,) | None
-            World position of the plane's top-left pixel, e.g.
-            `image.display.position[plane]`. Required when `base=False`.
-
-        Returns
-        -------
-        list[np.ndarray]
-            (N + 1, 3) x-y-z indices if `base=True`, else (N + 1, 2)
-            (column, row).
-
-        Examples
-        --------
-        Image pixel indices; the loop gains a closing point:
-
-        >>> import numpy as np
-        >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image['CT 01']
-        >>> roi = image.roi['Liver']
-        >>> square = np.array([[-20, -20, 50], [20, -20, 50], [20, 20, 50], [-20, 20, 50]], dtype=float)
-        >>> pixel = roi.convert_position_to_pixel([square])
-        >>> pixel[0].shape
-        (5, 3)
-
-        Display pixels on the axial slice currently shown:
-
-        >>> xy = roi.convert_position_to_pixel([square], base=False, plane='Axial',
-        ...                                    origin=image.display.position['Axial'])
-        >>> xy[0].shape
-        (5, 2)
-        """
-        if base:
-            position_to_pixel_matrix = self.image.compute_matrix_position_to_pixel()
-            pixel = []
-            for pos in points:
-                p_concat = np.concatenate((pos, np.ones((pos.shape[0], 1))), axis=1)
-                pixel_3_axis = p_concat.dot(position_to_pixel_matrix.T)[:, :3]
-                pixel += [np.vstack((pixel_3_axis, pixel_3_axis[0, :]))]
-
-            return pixel
-
-        else:
-            axes = {'Axial': (0, 1, 2), 'Sagittal': (1, 2, 0), 'Coronal': (0, 2, 1)}
-            xi, yi, ni = axes[plane]
-            m = self.image.display.matrix
-            x_axis, y_axis = m[:, xi], m[:, yi]
-            sx, sy = self.image.spacing[xi], self.image.spacing[yi]
-
-            pixel = []
-            for pos in points:
-                v = np.asarray(pos) - np.asarray(origin)
-                col = v.dot(x_axis) / sx
-                row = v.dot(y_axis) / sy
-                xy = np.stack([col, row], axis=-1)
-                pixel += [np.vstack((xy, xy[0, :]))]
-
-            return pixel
-
-    def convert_pixel_to_position(self, pixel=None):
-        """
-        Convert x-y-z pixel contours to world contours.
-
-        Fractional indices are allowed. No closing point is added, so a
-        round trip through `convert_position_to_pixel` keeps the repeated
-        point.
-
-        Parameters
-        ----------
-        pixel : list[np.ndarray]
-            Pixel contours, (N, 3) x-y-z indices.
-
-        Returns
-        -------
-        list[np.ndarray]
-            World contours, (N, 3) in mm.
-
-        Examples
-        --------
-        The first voxel maps to the image origin:
-
-        >>> import numpy as np
-        >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image['CT 01']
-        >>> roi = image.roi['Liver']
-        >>> position = roi.convert_pixel_to_position([np.array([[0.0, 0.0, 0.0]])])
-        >>> np.allclose(position[0][0], image.origin)
-        True
-
-        Round trip of the ROI's own contours:
-
-        >>> back = roi.convert_pixel_to_position(roi.contour_pixel)
-        >>> np.allclose(back[0][:-1], roi.contour_position[0])
-        True
-        """
-        pixel_to_position_matrix = self.image.compute_matrix_pixel_to_position()
-
-        position = []
-        for ii, pix in enumerate(pixel):
-            p_concat = np.concatenate((pix, np.ones((pix.shape[0], 1))), axis=1)
-            position += [p_concat.dot(pixel_to_position_matrix.T)[:, :3]]
-
-        return position
-
-    def create_mesh(self, reduction=0, interpolate=False):
-        """
-        Build a smooth closed surface mesh from the world contours.
-
-        Sets `mesh`, `volume`, `com` and `bounds` (left unchanged if no mesh
-        could be built).
-
-        Parameters
-        ----------
-        reduction : float
-            Decimation fraction applied once at the end, 0 to 1. 0 keeps
-            every triangle; 0.5 removes about half.
-
-        interpolate : bool
-            How far apart contour planes can be and still be joined.
-            False (default): only contours on adjacent image slices are joined,
-            using the slice spacing from `spacing` and `direction`. A missing
-            slice leaves a gap, and each side is capped half a slice past its
-            last contour. `origin`, `spacing` and `direction` must describe the
-            grid the contours were drawn on (for RTSTRUCT, the referenced image).
-            True: the slice spacing is the median spacing between contoured
-            slices, so missing slices are filled by shape interpolation. Use this
-            for deliberately sparse contours, contours drawn on a different grid,
-            or sagittal / coronal contours. Gaps larger than 1.5x that spacing
-            are still left open.
-
-        Returns
-        -------
-        None
-
-        Examples
-        --------
-        Full-resolution mesh:
-
-        >>> import medicalimageanalysis as mia
-        >>> roi = mia.Data.image['CT 01'].roi['Liver']
-        >>> roi.create_mesh()
-        >>> full = roi.mesh.n_cells
-
-        Lighter mesh for display or registration:
-
-        >>> roi.create_mesh(reduction=0.5)
-        >>> roi.mesh.n_cells < full
-        True
-        """
-        self.mesh = contours_to_mesh(self.contour_position,
-                                     self.image.origin,
-                                     self.image.spacing,
-                                     np.asarray(self.image.matrix, float),
-                                     reduction=reduction,
-                                     interpolate=interpolate)
-
-        if self.mesh is not None:
-            self.volume = self.mesh.volume
-            self.com = self.mesh.center
-            self.bounds = self.mesh.bounds
-
-    def create_discrete_mesh(self):
-        """
-        Build a voxel-stepped (un-smoothed) mesh from the pixel contours.
-
-        The surface follows the voxel faces, so its volume matches the voxel
-        count of the mask. Sets `mesh`, `volume`, `com` and `bounds`.
-
-        Returns
-        -------
-        None
-
-        Examples
-        --------
-        Compare the stepped volume with the smooth one:
-
-        >>> import medicalimageanalysis as mia
-        >>> roi = mia.Data.image['CT 01'].roi['Liver']
-        >>> roi.create_mesh()
-        >>> smooth_ml = roi.volume / 1000
-        >>> roi.create_discrete_mesh()
-        >>> discrete_ml = roi.volume / 1000
-        """
-        meshing = ContourToDiscreteMesh(contour_pixel=self.contour_pixel,
-                                        spacing=self.image.spacing,
-                                        origin=self.image.origin,
-                                        dimensions=self.image.dimensions,
-                                        matrix=self.image.matrix,
-                                        plane=self.plane)
-        self.mesh = meshing.compute_mesh(discrete=True)
-
-        self.volume = self.mesh.volume
-        self.com = self.mesh.center
-        self.bounds = self.mesh.bounds
-
-    def create_display_mesh(self, iterations=20, angle=60, passband=0.001):
-        """
-        Smooth the current mesh in place with a windowed sinc filter.
-
-        `volume`, `com` and `bounds` are not updated, so they still describe
-        the mesh before smoothing.
-
-        Parameters
-        ----------
-        iterations : int
-            Number of smoothing passes.
-
-        angle : float
-            Feature angle in degrees; edges sharper than this are kept.
-
-        passband : float
-            Filter passband. Smaller values smooth more.
-
-        Returns
-        -------
-        None
-
-        Examples
-        --------
-        Smooth a stepped mesh for 3D rendering:
-
-        >>> import medicalimageanalysis as mia
-        >>> roi = mia.Data.image['CT 01'].roi['Liver']
-        >>> roi.create_discrete_mesh()
-        >>> roi.create_display_mesh(iterations=30, passband=0.0005)
-        """
-        refine = Refinement(self.mesh)
-        self.mesh = refine.smooth(iterations=iterations, angle=angle, passband=passband)
-
-    def create_decimate_mesh(self, percent=None, set_mesh=False):
-        """
-        Decimate the current mesh.
-
-        Parameters
-        ----------
-        percent : float | None
-            Fraction of triangles to remove, 0 to 1. If None, it is chosen
-            so that about 10 * sqrt(n_points) points remain.
-
-        set_mesh : bool
-            If True, also replace `self.mesh` with the result.
-
-        Returns
-        -------
-        pv.PolyData
-            Decimated mesh.
-
-        Examples
-        --------
-        Preview a 90 % reduction without touching the ROI:
-
-        >>> import medicalimageanalysis as mia
-        >>> roi = mia.Data.image['CT 01'].roi['Liver']
-        >>> light = roi.create_decimate_mesh(percent=0.9)
-        >>> light.n_cells < roi.mesh.n_cells
-        True
-
-        Automatic target, kept on the ROI:
-
-        >>> mesh = roi.create_decimate_mesh(set_mesh=True)
-        >>> roi.mesh is mesh
-        True
-        """
-        if percent is None:
-            points = np.round(10 * np.sqrt(self.mesh.number_of_points))
-            percent = 1 - (points / self.mesh.number_of_points)
-
-        mesh = self.mesh.decimate(percent)
-        if set_mesh:
-            self.mesh = mesh
-
-        return mesh
-
-    def create_cluster_mesh(self, points=None, set_mesh=False):
-        """
-        Remesh the current surface to near-uniform triangles (pyacvd).
-
-        Parameters
-        ----------
-        points : int | None
-            Target number of points. If None, it is chosen from the mesh
-            volume and complexity.
-
-        set_mesh : bool
-            If True, also replace `self.mesh` with the result.
-
-        Returns
-        -------
-        pv.PolyData
-            Clustered closed surface.
-
-        Examples
-        --------
-        Uniform 3000-point surface for registration or FE meshing:
-
-        >>> import medicalimageanalysis as mia
-        >>> roi = mia.Data.image['CT 01'].roi['Liver']
-        >>> mesh = roi.create_cluster_mesh(points=3000)
-
-        Automatic target, kept on the ROI:
-
-        >>> roi.create_cluster_mesh(set_mesh=True)
-        """
-        refine = Refinement(self.mesh)
-        mesh = refine.cluster(points=points)
-        if set_mesh:
-            self.mesh = mesh
-
-        return mesh
 
     def compute_bounding_box(self, position=True):
         """
@@ -1049,6 +631,335 @@ class Roi(object):
 
         return result[0], result[1]
 
+    def convert_pixel_to_position(self, pixel=None):
+        """
+        Convert x-y-z pixel contours to world contours.
+
+        Fractional indices are allowed. No closing point is added, so a
+        round trip through `convert_position_to_pixel` keeps the repeated
+        point.
+
+        Parameters
+        ----------
+        pixel : list[np.ndarray]
+            Pixel contours, (N, 3) x-y-z indices.
+
+        Returns
+        -------
+        list[np.ndarray]
+            World contours, (N, 3) in mm.
+
+        Examples
+        --------
+        The first voxel maps to the image origin:
+
+        >>> import numpy as np
+        >>> import medicalimageanalysis as mia
+        >>> image = mia.Data.image['CT 01']
+        >>> roi = image.roi['Liver']
+        >>> position = roi.convert_pixel_to_position([np.array([[0.0, 0.0, 0.0]])])
+        >>> np.allclose(position[0][0], image.origin)
+        True
+
+        Round trip of the ROI's own contours:
+
+        >>> back = roi.convert_pixel_to_position(roi.contour_pixel)
+        >>> np.allclose(back[0][:-1], roi.contour_position[0])
+        True
+        """
+        pixel_to_position_matrix = self.image.compute_matrix_pixel_to_position()
+
+        position = []
+        for ii, pix in enumerate(pixel):
+            p_concat = np.concatenate((pix, np.ones((pix.shape[0], 1))), axis=1)
+            position += [p_concat.dot(pixel_to_position_matrix.T)[:, :3]]
+
+        return position
+
+    def convert_position_to_pixel(self, points, base=True, plane=None, origin=None):
+        """
+        Convert world contours to pixel coordinates.
+
+        With `base=True` the result is the image's own x-y-z pixel index.
+        With `base=False` it is the 2D (column, row) pixel of a displayed
+        plane, using the current view rotation (`image.display.matrix`) and
+        the plane's top-left `origin`. Each returned loop is closed by
+        repeating its first point.
+
+        Parameters
+        ----------
+        points : list[np.ndarray]
+            World contours, (N, 3) in mm.
+
+        base : bool
+            True for image pixel indices, False for display pixels.
+
+        plane : str | None
+            'Axial', 'Sagittal' or 'Coronal'. Required when `base=False`.
+
+        origin : array-like (3,) | None
+            World position of the plane's top-left pixel, e.g.
+            `image.display.position[plane]`. Required when `base=False`.
+
+        Returns
+        -------
+        list[np.ndarray]
+            (N + 1, 3) x-y-z indices if `base=True`, else (N + 1, 2)
+            (column, row).
+
+        Examples
+        --------
+        Image pixel indices; the loop gains a closing point:
+
+        >>> import numpy as np
+        >>> import medicalimageanalysis as mia
+        >>> image = mia.Data.image['CT 01']
+        >>> roi = image.roi['Liver']
+        >>> square = np.array([[-20, -20, 50], [20, -20, 50], [20, 20, 50], [-20, 20, 50]], dtype=float)
+        >>> pixel = roi.convert_position_to_pixel([square])
+        >>> pixel[0].shape
+        (5, 3)
+
+        Display pixels on the axial slice currently shown:
+
+        >>> xy = roi.convert_position_to_pixel([square], base=False, plane='Axial',
+        ...                                    origin=image.display.position['Axial'])
+        >>> xy[0].shape
+        (5, 2)
+        """
+        if base:
+            position_to_pixel_matrix = self.image.compute_matrix_position_to_pixel()
+            pixel = []
+            for pos in points:
+                p_concat = np.concatenate((pos, np.ones((pos.shape[0], 1))), axis=1)
+                pixel_3_axis = p_concat.dot(position_to_pixel_matrix.T)[:, :3]
+                pixel += [np.vstack((pixel_3_axis, pixel_3_axis[0, :]))]
+
+            return pixel
+
+        else:
+            axes = {'Axial': (0, 1, 2), 'Sagittal': (1, 2, 0), 'Coronal': (0, 2, 1)}
+            xi, yi, ni = axes[plane]
+            m = self.image.display.matrix
+            x_axis, y_axis = m[:, xi], m[:, yi]
+            sx, sy = self.image.spacing[xi], self.image.spacing[yi]
+
+            pixel = []
+            for pos in points:
+                v = np.asarray(pos) - np.asarray(origin)
+                col = v.dot(x_axis) / sx
+                row = v.dot(y_axis) / sy
+                xy = np.stack([col, row], axis=-1)
+                pixel += [np.vstack((xy, xy[0, :]))]
+
+            return pixel
+
+    def create_cluster_mesh(self, points=None, set_mesh=False):
+        """
+        Remesh the current surface to near-uniform triangles (pyacvd).
+
+        Parameters
+        ----------
+        points : int | None
+            Target number of points. If None, it is chosen from the mesh
+            volume and complexity.
+
+        set_mesh : bool
+            If True, also replace `self.mesh` with the result.
+
+        Returns
+        -------
+        pv.PolyData
+            Clustered closed surface.
+
+        Examples
+        --------
+        Uniform 3000-point surface for registration or FE meshing:
+
+        >>> import medicalimageanalysis as mia
+        >>> roi = mia.Data.image['CT 01'].roi['Liver']
+        >>> mesh = roi.create_cluster_mesh(points=3000)
+
+        Automatic target, kept on the ROI:
+
+        >>> roi.create_cluster_mesh(set_mesh=True)
+        """
+        refine = Refinement(self.mesh)
+        mesh = refine.cluster(points=points)
+        if set_mesh:
+            self.mesh = mesh
+
+        return mesh
+
+    def create_decimate_mesh(self, percent=None, set_mesh=False):
+        """
+        Decimate the current mesh.
+
+        Parameters
+        ----------
+        percent : float | None
+            Fraction of triangles to remove, 0 to 1. If None, it is chosen
+            so that about 10 * sqrt(n_points) points remain.
+
+        set_mesh : bool
+            If True, also replace `self.mesh` with the result.
+
+        Returns
+        -------
+        pv.PolyData
+            Decimated mesh.
+
+        Examples
+        --------
+        Preview a 90 % reduction without touching the ROI:
+
+        >>> import medicalimageanalysis as mia
+        >>> roi = mia.Data.image['CT 01'].roi['Liver']
+        >>> light = roi.create_decimate_mesh(percent=0.9)
+        >>> light.n_cells < roi.mesh.n_cells
+        True
+
+        Automatic target, kept on the ROI:
+
+        >>> mesh = roi.create_decimate_mesh(set_mesh=True)
+        >>> roi.mesh is mesh
+        True
+        """
+        if percent is None:
+            points = np.round(10 * np.sqrt(self.mesh.number_of_points))
+            percent = 1 - (points / self.mesh.number_of_points)
+
+        mesh = self.mesh.decimate(percent)
+        if set_mesh:
+            self.mesh = mesh
+
+        return mesh
+
+    def create_discrete_mesh(self):
+        """
+        Build a voxel-stepped (un-smoothed) mesh from the pixel contours.
+
+        The surface follows the voxel faces, so its volume matches the voxel
+        count of the mask. Sets `mesh`, `volume`, `com` and `bounds`.
+
+        Returns
+        -------
+        None
+
+        Examples
+        --------
+        Compare the stepped volume with the smooth one:
+
+        >>> import medicalimageanalysis as mia
+        >>> roi = mia.Data.image['CT 01'].roi['Liver']
+        >>> roi.create_mesh()
+        >>> smooth_ml = roi.volume / 1000
+        >>> roi.create_discrete_mesh()
+        >>> discrete_ml = roi.volume / 1000
+        """
+        meshing = ContourToDiscreteMesh(contour_pixel=self.contour_pixel,
+                                        spacing=self.image.spacing,
+                                        origin=self.image.origin,
+                                        dimensions=self.image.dimensions,
+                                        matrix=self.image.matrix,
+                                        plane=self.plane)
+        self.mesh = meshing.compute_mesh(discrete=True)
+
+        self.volume = self.mesh.volume
+        self.com = self.mesh.center
+        self.bounds = self.mesh.bounds
+
+    def create_display_mesh(self, iterations=20, angle=60, passband=0.001):
+        """
+        Smooth the current mesh in place with a windowed sinc filter.
+
+        `volume`, `com` and `bounds` are not updated, so they still describe
+        the mesh before smoothing.
+
+        Parameters
+        ----------
+        iterations : int
+            Number of smoothing passes.
+
+        angle : float
+            Feature angle in degrees; edges sharper than this are kept.
+
+        passband : float
+            Filter passband. Smaller values smooth more.
+
+        Returns
+        -------
+        None
+
+        Examples
+        --------
+        Smooth a stepped mesh for 3D rendering:
+
+        >>> import medicalimageanalysis as mia
+        >>> roi = mia.Data.image['CT 01'].roi['Liver']
+        >>> roi.create_discrete_mesh()
+        >>> roi.create_display_mesh(iterations=30, passband=0.0005)
+        """
+        refine = Refinement(self.mesh)
+        self.mesh = refine.smooth(iterations=iterations, angle=angle, passband=passband)
+
+    def create_mesh(self, reduction=0, interpolate=False):
+        """
+        Build a smooth closed surface mesh from the world contours.
+
+        Sets `mesh`, `volume`, `com` and `bounds` (left unchanged if no mesh
+        could be built).
+
+        Parameters
+        ----------
+        reduction : float
+            Decimation fraction applied once at the end, 0 to 1. 0 keeps
+            every triangle; 0.5 removes about half.
+
+        interpolate : bool
+            How far apart contour planes can be and still be joined.
+            False (default): only contours on adjacent image slices are joined,
+            using the slice spacing from `spacing` and `direction`. A missing
+            slice leaves a gap, and each side is capped half a slice past its
+            last contour. `origin`, `spacing` and `direction` must describe the
+            grid the contours were drawn on (for RTSTRUCT, the referenced image).
+            True: the slice spacing is the median spacing between contoured
+            slices, so missing slices are filled by shape interpolation. Use this
+            for deliberately sparse contours, contours drawn on a different grid,
+            or sagittal / coronal contours. Gaps larger than 1.5x that spacing
+            are still left open.
+
+        Returns
+        -------
+        None
+
+        Examples
+        --------
+        Full-resolution mesh:
+
+        >>> import medicalimageanalysis as mia
+        >>> roi = mia.Data.image['CT 01'].roi['Liver']
+        >>> roi.create_mesh()
+        >>> full = roi.mesh.n_cells
+
+        Lighter mesh for display or registration:
+
+        >>> roi.create_mesh(reduction=0.5)
+        >>> roi.mesh.n_cells < full
+        True
+        """
+        self.mesh = contours_to_mesh(self.contour_position,
+                                     self.image.origin,
+                                     self.image.spacing,
+                                     np.asarray(self.image.matrix, float),
+                                     reduction=reduction,
+                                     interpolate=interpolate)
+
+        if self.mesh is not None:
+            self.volume = self.mesh.volume
+            self.com = self.mesh.center
+            self.bounds = self.mesh.bounds
+
     def create_sitk_mask(self):
         """
         Rasterize the contours into a SimpleITK image on the image grid.
@@ -1085,6 +996,93 @@ class Roi(object):
         sitk_mask.SetSpacing(self.image.spacing)
 
         return sitk_mask
+
+    # ---- Set ----
+
+    def add_mesh(self, mesh):
+        """
+        Attach an existing mesh and read its volume, center and bounds.
+
+        Unlike `update_mesh`, the contours are kept.
+
+        Parameters
+        ----------
+        mesh : pv.PolyData
+            Closed surface in mm, in this image's world.
+
+        Returns
+        -------
+        None
+
+        Examples
+        --------
+        Attach a mesh loaded from disk:
+
+        >>> import pyvista as pv
+        >>> import medicalimageanalysis as mia
+        >>> roi = mia.Data.image['CT 01'].roi['Liver']
+        >>> roi.add_mesh(pv.read('C:/Data/liver.stl'))
+        >>> roi.volume / 1000   # mL
+        """
+        self.mesh = mesh
+
+        self.volume = mesh.volume
+        self.com = mesh.center
+        self.bounds = mesh.bounds
+
+    def clear(self):
+        """
+        Remove the contours, mesh and derived geometry.
+
+        Name, color, visibility, file paths and group are kept.
+
+        Returns
+        -------
+        None
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> roi = mia.Data.image['CT 01'].roi['Liver']
+        >>> roi.clear()
+        >>> roi.contour_position is None, roi.mesh is None, roi.volume is None
+        (True, True, True)
+        """
+        self.contour_position = None
+        self.contour_pixel = None
+
+        self.mesh = None
+        self.cutter = None
+        self.volume = None
+        self.com = None
+        self.bounds = None
+
+        self.fixed_name = False
+        self.visual = {'2d': None, '3d': None, 'opacity': None, 'multicolor': None}
+        self.misc = {}
+
+    def clear_slice_cache(self):
+        """
+        Drop cached mesh slices.
+
+        Only needed if the mesh is edited in place (mesh.points = ...,
+        transform with inplace=True); replacing the mesh through the setter
+        or `update_mesh` clears it automatically.
+
+        Returns
+        -------
+        None
+
+        Examples
+        --------
+        Shift the mesh 2 mm in place, then clear the stale slices:
+
+        >>> import medicalimageanalysis as mia
+        >>> roi = mia.Data.image['CT 01'].roi['Liver']
+        >>> roi.mesh.points += [0.0, 0.0, 2.0]
+        >>> roi.clear_slice_cache()
+        """
+        self._slice_cache.clear()
 
     def convert_mask(self, mask):
         """
@@ -1130,6 +1128,43 @@ class Roi(object):
             self.volume = None
             self.com = None
             self.bounds = None
+
+    def update_mesh(self, mesh):
+        """
+        Replace the ROI with an external mesh and drop the contours.
+
+        Use this when the mesh is now the source of truth (deformed,
+        registered or edited in 3D). For a mesh that should sit alongside
+        the existing contours, use `add_mesh`.
+
+        Parameters
+        ----------
+        mesh : pv.PolyData
+            Closed surface in mm, in this image's world.
+
+        Returns
+        -------
+        None
+
+        Examples
+        --------
+        Replace the liver with a deformed surface:
+
+        >>> import pyvista as pv
+        >>> import medicalimageanalysis as mia
+        >>> roi = mia.Data.image['CT 01'].roi['Liver']
+        >>> roi.update_mesh(pv.read('C:/Data/liver_deformed.vtk'))
+        >>> roi.contour_position is None
+        True
+        """
+        self.mesh = mesh
+        self.volume = mesh.volume
+        self.com = mesh.center
+        self.bounds = mesh.bounds
+
+
+        self.contour_pixel = None
+        self.contour_position = None
 
     def update_pixel(self, pixel, plane='Axial', ):
         """
@@ -1231,40 +1266,3 @@ class Roi(object):
             self.contour_pixel = None
             self.contour_position = None
             self.mesh = None
-
-    def update_mesh(self, mesh):
-        """
-        Replace the ROI with an external mesh and drop the contours.
-
-        Use this when the mesh is now the source of truth (deformed,
-        registered or edited in 3D). For a mesh that should sit alongside
-        the existing contours, use `add_mesh`.
-
-        Parameters
-        ----------
-        mesh : pv.PolyData
-            Closed surface in mm, in this image's world.
-
-        Returns
-        -------
-        None
-
-        Examples
-        --------
-        Replace the liver with a deformed surface:
-
-        >>> import pyvista as pv
-        >>> import medicalimageanalysis as mia
-        >>> roi = mia.Data.image['CT 01'].roi['Liver']
-        >>> roi.update_mesh(pv.read('C:/Data/liver_deformed.vtk'))
-        >>> roi.contour_position is None
-        True
-        """
-        self.mesh = mesh
-        self.volume = mesh.volume
-        self.com = mesh.center
-        self.bounds = mesh.bounds
-
-
-        self.contour_pixel = None
-        self.contour_position = None

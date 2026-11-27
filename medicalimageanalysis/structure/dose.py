@@ -114,6 +114,8 @@ class Dose(Image):
         self.moi = {}
         self.planeoi = {}
         self.model = {}
+        for kind in Data.GROUP_KINDS:
+            setattr(self, kind + '_group', {})          # doses hold no groups
 
         self.tags = dose.image_set
         self.array = None if dose.array is None else self._to_gy(dose.array)    # None for a tag-only read
@@ -158,6 +160,95 @@ class Dose(Image):
         self.misc = {}
 
         self.display = None if self.array is None else Display(self)
+
+    # ---- Registry ----
+
+    # ------------------------------------------------------------------------------------------------------------
+    # Private methods
+    # ------------------------------------------------------------------------------------------------------------
+    def _raise_no_annotations(self):
+        """Doses carry no ROIs, POIs, markups or planes: put them on the image in the dose's frame of reference."""
+        raise TypeError(f"'{self.image_name}' is a dose; ROIs, POIs, markups and planes belong on an image in its "
+                        f"frame of reference.")
+
+    def _register(self):
+        """Store this dose in ``Data.dose`` (used by :meth:`Image.load_metadata`).
+
+        A loaded dose keeps its saved id unless another image or dose already uses it (then it gets a new one). If its
+        name is already registered, it replaces that entry and takes its id. A dose registered before loading (under
+        another name or id) is moved, never held twice.
+        """
+        for name, item in list(Data.dose.items()):
+            if item is self and name != self.image_name:
+                del Data.dose[name]
+
+        if self.image_name in Data.dose:
+            Data.dose[self.image_name] = self
+        else:
+            saved_id = getattr(self, 'id', None)
+            taken = saved_id is not None and (saved_id in Data.image or saved_id in Data.dose)
+            Data.dose.add(self, self.image_name, item_id=None if taken else saved_id)
+        self.dose_name = self.image_name
+
+    # ------------------------------------------------------------------------------------------------------------
+    # Public methods
+    # ------------------------------------------------------------------------------------------------------------
+    def add_model(self, roi_names, kind='tet', name=None, cavities=None, cluster_points=None, edge_length_fac=0.05,
+                  edge_length_abs=None, region_edge_lengths=None, epsilon=1e-3, optimize=True, simplify=True,
+                  coarsen=False, stop_energy=10.0, num_opt_iter=80, color=None, visible=True, build=False, group=None):
+        """Not available on a dose; raises TypeError. Build the model from an image's ROIs instead.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> mia.Data.image['CT 01'].add_model('Liver', build=True)
+        """
+        self._raise_no_annotations()
+
+    def add_moi(self, kind, points, view_plane='Axial', position=None, name=None, color=None, visible=True,
+                text=None, group=None):
+        """Not available on a dose; raises TypeError. Add the markup to an image in the dose's frame instead.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> mia.Data.image['CT 01'].add_moi('line', points)
+        """
+        self._raise_no_annotations()
+
+    def add_planeoi(self, origin, normal, x_axis=None, name=None, extent=None, keep_side=None, group=None,
+                    color=None, visible=True):
+        """Not available on a dose; raises TypeError. Add the plane to an image in the dose's frame instead.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> mia.Data.image['CT 01'].add_planeoi(origin=[0.0, 0.0, 0.0], normal=[0.0, 0.0, 1.0])
+        """
+        self._raise_no_annotations()
+
+    def add_poi(self, poi_name=None, color=None, visible=False, path=None, point=None, match=True, group=None):
+        """Not available on a dose; raises TypeError. Add the POI to an image in the dose's frame instead.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> mia.Data.image['CT 01'].add_poi('Iso', point=[0.0, -20.0, 15.5])
+        """
+        self._raise_no_annotations()
+
+    def add_roi(self, roi_name=None, color=None, visible=False, path=None, contour=None, plane='Axial', match=True,
+                group=None):
+        """Not available on a dose; raises TypeError. Add the ROI to an image in the dose's frame instead.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> mia.Data.image['CT 01'].add_roi('Liver', contour=contours)
+        """
+        self._raise_no_annotations()
+
+    # ---- Compute ----
 
     # ------------------------------------------------------------------------------------------------------------
     # Static methods
@@ -226,25 +317,6 @@ class Dose(Image):
 
         raise ValueError(f"Unknown metric {metric!r}: use Volume, Dmin, Dmax, Dmean, Dmedian, Dstd, D<x>, D<x>cc, "
                          f"V<x>Gy, V<x>Gy_cc, VS<x>Gy, VS<x>Gy_cc, V<x>% or V<x>%_cc.")
-
-    # ------------------------------------------------------------------------------------------------------------
-    # Private methods
-    # ------------------------------------------------------------------------------------------------------------
-    def _raise_no_annotations(self):
-        """Doses carry no ROIs, POIs, markups or planes: put them on the image in the dose's frame of reference."""
-        raise TypeError(f"'{self.image_name}' is a dose; ROIs, POIs, markups and planes belong on an image in its "
-                        f"frame of reference.")
-
-    def _register(self):
-        """Store this dose in ``Data.dose`` (used by :meth:`Image.load_metadata`).
-
-        A loaded dose keeps its saved id. If its name is already registered, it replaces that entry and takes its id.
-        """
-        if self.image_name in Data.dose:
-            Data.dose[self.image_name] = self
-        else:
-            Data.dose.add(self, self.image_name, item_id=getattr(self, 'id', None))
-        self.dose_name = self.image_name
 
     def _registration_matrix(self, image_name, rigid_name=None):
         """4x4 dose native world -> image world (image_name and rigid_name are names or ids).
@@ -342,64 +414,6 @@ class Dose(Image):
             array = array.astype(np.float32) * np.float32(scaling)
 
         return np.ascontiguousarray(array, dtype=np.float32)
-
-    # ------------------------------------------------------------------------------------------------------------
-    # Public methods
-    # ------------------------------------------------------------------------------------------------------------
-    def add_model(self, roi_names, kind='tet', name=None, cavities=None, cluster_points=None, edge_length_fac=0.05,
-                  edge_length_abs=None, region_edge_lengths=None, epsilon=1e-3, optimize=True, simplify=True,
-                  coarsen=False, stop_energy=10.0, num_opt_iter=80, color=None, visible=True, build=False, group=None):
-        """Not available on a dose; raises TypeError. Build the model from an image's ROIs instead.
-
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> mia.Data.image['CT 01'].add_model('Liver', build=True)
-        """
-        self._raise_no_annotations()
-
-    def add_moi(self, kind, points, view_plane='Axial', position=None, name=None, color=None, visible=True,
-                text=None, group=None):
-        """Not available on a dose; raises TypeError. Add the markup to an image in the dose's frame instead.
-
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> mia.Data.image['CT 01'].add_moi('line', points)
-        """
-        self._raise_no_annotations()
-
-    def add_planeoi(self, origin, normal, x_axis=None, name=None, extent=None, keep_side=None, group=None,
-                    color=None, visible=True):
-        """Not available on a dose; raises TypeError. Add the plane to an image in the dose's frame instead.
-
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> mia.Data.image['CT 01'].add_planeoi(origin=[0.0, 0.0, 0.0], normal=[0.0, 0.0, 1.0])
-        """
-        self._raise_no_annotations()
-
-    def add_poi(self, poi_name=None, color=None, visible=False, path=None, point=None, match=True, group=None):
-        """Not available on a dose; raises TypeError. Add the POI to an image in the dose's frame instead.
-
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> mia.Data.image['CT 01'].add_poi('Iso', point=[0.0, -20.0, 15.5])
-        """
-        self._raise_no_annotations()
-
-    def add_roi(self, roi_name=None, color=None, visible=False, path=None, contour=None, plane='Axial', match=True,
-                group=None):
-        """Not available on a dose; raises TypeError. Add the ROI to an image in the dose's frame instead.
-
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> mia.Data.image['CT 01'].add_roi('Liver', contour=contours)
-        """
-        self._raise_no_annotations()
 
     def compute_dose_on_image(self, image_name, rigid_name=None, bounds=None):
         """Dose (Gy) resampled trilinearly onto an image's voxel grid, 0 outside the dose grid.
@@ -564,6 +578,8 @@ class Dose(Image):
             return [0.0, float(np.max(self.array))]
 
         return [0, 1]
+
+    # ---- Load ----
 
     def input_mhd(self, filename, roi_names, values, plane='Axial'):
         """Not available on a dose; raises TypeError. Load the label map onto an image in the dose's frame instead.

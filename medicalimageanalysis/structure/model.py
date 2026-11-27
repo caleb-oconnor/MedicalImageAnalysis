@@ -31,8 +31,8 @@ Description:
       and is saved. The id stays the same through a rebuild, so anything that used the model records the build_count
       it saw (``Deformable.set_model``) and can tell when the model has been rebuilt since
       (``Deformable.check_model``). To keep an old mesh next to a new recipe, make a new model instead of rebuilding.
-    * ``group_id`` puts the model in a group (``Data.group``, None = ungrouped), like any other item. Set it with
-      ``group=`` here or ``Data.set_group('model', ...)``.
+    * ``group_id`` puts the model in a model group (``image.model_group``, None = ungrouped), like any other item.
+      Set it with ``group=`` here or ``Data.set_group('model', ...)``.
     * Results that belong to the mesh (temperature, material maps) go in ``mesh.point_data`` / ``mesh.cell_data`` and
       are saved with it. Results that belong to one registration (nodal displacements, the DVF) stay in that
       Deformable, which refers to the model by id and keeps a frozen copy of the mesh it used.
@@ -109,14 +109,14 @@ class Model(object):
     visible : bool, default True
         Show in the views.
     group : str or int, optional
-        Group (name or id) to put the model in; a name is created when missing. None = ungrouped.
+        Model group (path or id) to put the model in; a path is created when missing. None = ungrouped.
 
     Attributes
     ----------
     id : int or None
         Permanent id, written by ``image.model``. None until the model is added.
     group_id : int or None
-        Group the model is in (``Data.group``), None = ungrouped.
+        Model group the model is in (``image.model_group``), None = ungrouped.
     surfaces : list of pyvista.PolyData or None
         Clustered surface of each source ROI, in region order. None until built.
     mesh : pyvista.UnstructuredGrid, pyvista.PolyData or None
@@ -154,7 +154,7 @@ class Model(object):
         self.kind = kind
         self.color = list(random_color()) if color is None else list(color)
         self.visible = visible
-        self.group_id = Data.resolve_group(group)
+        self.group_id = Data.resolve_group('model', group)
 
         self.roi_ids = [Data.get_roi_id(roi) for roi in self._as_list(roi_names)]
         self.cavity_ids = [] if cavities is None else [Data.get_roi_id(roi) for roi in self._as_list(cavities)]
@@ -190,10 +190,7 @@ class Model(object):
         self._volume_cache = None       # Volume wrapper around mesh, rebuilt when mesh is replaced
         self.misc = {}
 
-    @staticmethod
-    def _as_list(names):
-        """A single name or id becomes a one-item list, anything else a list."""
-        return [names] if isinstance(names, (str, int, np.integer)) else list(names)
+    # ---- Compute ----
 
     @staticmethod
     def _cell_edges(flat, closed):
@@ -227,90 +224,6 @@ class Model(object):
         digest.update(np.ascontiguousarray(mesh.faces, dtype=np.int64).tobytes())
 
         return digest.hexdigest()
-
-    @classmethod
-    def from_bytes(cls, image, data):
-        """Rebuild a model from :meth:`to_bytes` output, not yet added to the image.
-
-        ``id`` and ``name`` hold the saved values; :meth:`Image.add_saved_model` adds it with them (or a new id when the
-        saved one is taken). The source ROIs do not have to be loaded. The saved group goes through
-        ``Data.live_group_id``, so load the groups first (:meth:`Image.load_markups` before :meth:`Image.load_models`).
-
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image['CT 01']
-        >>> with open('C:/Data/CT 01/model_7.npz', 'rb') as f:
-        ...     model = mia.Model.from_bytes(image, f.read())
-        """
-        with np.load(io.BytesIO(data), allow_pickle=False) as arrays:
-            record = json.loads(str(arrays['record']))
-            schema = record.get('schema', 1)
-            if schema > cls.SCHEMA_VERSION:
-                raise ValueError(f"Record schema {schema} is newer than supported ({cls.SCHEMA_VERSION}).")
-
-            model = cls.__new__(cls)
-            model.image = image
-            model.id = record['id']
-            model.name = record['name']
-            model.kind = record['kind']
-            model.color = record['color']
-            model.visible = record['visible']
-            model.group_id = Data.live_group_id(record.get('group_id'))
-            model.roi_ids = list(record['roi_ids'])
-            model.cavity_ids = list(record['cavity_ids'])
-            for key in ('cluster_points', 'edge_length_fac', 'edge_length_abs', 'region_edge_lengths', 'epsilon',
-                        'optimize', 'simplify', 'coarsen', 'stop_energy', 'num_opt_iter', 'source_keys'):
-                setattr(model, key, record[key])
-            model.build_count = int(record.get('build_count', 0))
-            model._volume_cache = None
-            model.misc = {}
-
-            model.surfaces = None
-            if record['n_surfaces']:
-                model.surfaces = [pv.PolyData(arrays[f'surface_{i}_points'], arrays[f'surface_{i}_faces'])
-                                  for i in range(record['n_surfaces'])]
-
-            model.mesh = None
-            if 'points' in arrays:
-                if model.kind == 'tet':
-                    model.mesh = pv.UnstructuredGrid({pv.CellType.TETRA: arrays['tets']}, arrays['points'])
-                else:
-                    model.mesh = pv.PolyData(arrays['points'], arrays['faces'])
-                for key in arrays.files:
-                    if key.startswith('point_data_'):
-                        model.mesh.point_data[key[len('point_data_'):]] = arrays[key]
-                    elif key.startswith('cell_data_'):
-                        model.mesh.cell_data[key[len('cell_data_'):]] = arrays[key]
-
-        return model
-
-    @classmethod
-    def load(cls, image, path):
-        """Read a model written by :meth:`save`, not yet added to the image (see :meth:`from_bytes`).
-
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> image = mia.Data.image['CT 01']
-        >>> model = mia.Model.load(image, 'C:/Data/liver_fe.npz')
-        >>> image.add_saved_model(model)
-        """
-        with open(path, 'rb') as f:
-            return cls.from_bytes(image, f.read())
-
-    def _record(self):
-        """State as plain JSON types (everything but the arrays)."""
-        return {'schema': self.SCHEMA_VERSION, 'id': self.id, 'name': self.name,
-                'image_id': getattr(self.image, 'id', None), 'kind': self.kind,
-                'color': [int(c) for c in self.color], 'visible': bool(self.visible), 'group_id': self.group_id,
-                'roi_ids': list(self.roi_ids), 'cavity_ids': list(self.cavity_ids),
-                'cluster_points': self.cluster_points, 'edge_length_fac': self.edge_length_fac,
-                'edge_length_abs': self.edge_length_abs, 'region_edge_lengths': self.region_edge_lengths,
-                'epsilon': self.epsilon, 'optimize': bool(self.optimize), 'simplify': bool(self.simplify),
-                'coarsen': bool(self.coarsen), 'stop_energy': self.stop_energy, 'num_opt_iter': self.num_opt_iter,
-                'source_keys': self.source_keys, 'build_count': int(self.build_count),
-                'n_surfaces': 0 if self.surfaces is None else len(self.surfaces)}
 
     def _region_index(self, region):
         """Region index of an ROI name or id (or -1, the outside of the mesh)."""
@@ -503,21 +416,6 @@ class Model(object):
 
         return result
 
-    def export(self, path):
-        """Write the mesh to any format pyvista writes (.vtu, .vtk, ...) for FEBio pre-processing or ParaView.
-
-        'Region' holds region indices; the ROI of region i is ``roi_ids[i]``.
-
-        Examples
-        --------
-        >>> import medicalimageanalysis as mia
-        >>> mia.Data.image['CT 01'].model['Liver FE'].export('C:/Data/liver_fe.vtu')
-        """
-        if self.mesh is None:
-            raise ValueError(f"Model '{self.name}' is not built.")
-
-        self.mesh.save(path, binary=False)
-
     def extract_boundary(self, region, neighbor=None):
         """A region's boundary faces with global node / element ids, for FEBio surfaces, contacts and loads.
 
@@ -600,6 +498,134 @@ class Model(object):
         """
         return self._volume().region_node_ids(self._region_index(region))
 
+    # ---- Set ----
+
+    def update_mesh(self, mesh, surfaces=None):
+        """Use a mesh built elsewhere (another mesher, a script) as this model, and record the current source ROI
+        meshes as its source. Counts as a rebuild (``build_count`` goes up by one).
+
+        A tet mesh needs cell array 'Region' (indices into ``roi_ids``).
+
+        Examples
+        --------
+        >>> import pyvista as pv
+        >>> import medicalimageanalysis as mia
+        >>> model = mia.Data.image['CT 01'].model['Liver FE']
+        >>> model.update_mesh(pv.read('C:/Data/liver_fe_edited.vtu'))
+        """
+        if self.kind == 'tet' and 'Region' not in mesh.cell_data:
+            raise ValueError("A tet model's mesh needs cell array 'Region' (indices into roi_ids).")
+
+        self.mesh = mesh
+        if surfaces is not None:
+            self.surfaces = list(surfaces)
+        self.source_keys = [self._mesh_key(source) for source in self._source_meshes()]
+        self.build_count += 1
+        self._volume_cache = None
+
+    # ---- Load ----
+
+    @classmethod
+    def from_bytes(cls, image, data):
+        """Rebuild a model from :meth:`to_bytes` output, not yet added to the image.
+
+        ``id`` and ``name`` hold the saved values; :meth:`Image.add_saved_model` adds it with them (or a new id when the
+        saved one is taken). The source ROIs do not have to be loaded. ``group_id`` holds the saved value;
+        :meth:`Image.add_saved_model` maps it onto the session's group.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> image = mia.Data.image['CT 01']
+        >>> with open('C:/Data/CT 01/model_7.npz', 'rb') as f:
+        ...     model = mia.Model.from_bytes(image, f.read())
+        """
+        with np.load(io.BytesIO(data), allow_pickle=False) as arrays:
+            record = json.loads(str(arrays['record']))
+            schema = record.get('schema', 1)
+            if schema > cls.SCHEMA_VERSION:
+                raise ValueError(f"Record schema {schema} is newer than supported ({cls.SCHEMA_VERSION}).")
+
+            model = cls.__new__(cls)
+            model.image = image
+            model.id = record['id']
+            model.name = record['name']
+            model.kind = record['kind']
+            model.color = record['color']
+            model.visible = record['visible']
+            model.group_id = record.get('group_id')
+            model.roi_ids = list(record['roi_ids'])
+            model.cavity_ids = list(record['cavity_ids'])
+            for key in ('cluster_points', 'edge_length_fac', 'edge_length_abs', 'region_edge_lengths', 'epsilon',
+                        'optimize', 'simplify', 'coarsen', 'stop_energy', 'num_opt_iter', 'source_keys'):
+                setattr(model, key, record[key])
+            model.build_count = int(record.get('build_count', 0))
+            model._volume_cache = None
+            model.misc = {}
+
+            model.surfaces = None
+            if record['n_surfaces']:
+                model.surfaces = [pv.PolyData(arrays[f'surface_{i}_points'], arrays[f'surface_{i}_faces'])
+                                  for i in range(record['n_surfaces'])]
+
+            model.mesh = None
+            if 'points' in arrays:
+                if model.kind == 'tet':
+                    model.mesh = pv.UnstructuredGrid({pv.CellType.TETRA: arrays['tets']}, arrays['points'])
+                else:
+                    model.mesh = pv.PolyData(arrays['points'], arrays['faces'])
+                for key in arrays.files:
+                    if key.startswith('point_data_'):
+                        model.mesh.point_data[key[len('point_data_'):]] = arrays[key]
+                    elif key.startswith('cell_data_'):
+                        model.mesh.cell_data[key[len('cell_data_'):]] = arrays[key]
+
+        return model
+
+    @classmethod
+    def load(cls, image, path):
+        """Read a model written by :meth:`save`, not yet added to the image (see :meth:`from_bytes`).
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> image = mia.Data.image['CT 01']
+        >>> model = mia.Model.load(image, 'C:/Data/liver_fe.npz')
+        >>> image.add_saved_model(model)
+        """
+        with open(path, 'rb') as f:
+            return cls.from_bytes(image, f.read())
+
+    # ---- Save ----
+
+    def _record(self):
+        """State as plain JSON types (everything but the arrays)."""
+        return {'schema': self.SCHEMA_VERSION, 'id': self.id, 'name': self.name,
+                'image_id': getattr(self.image, 'id', None), 'kind': self.kind,
+                'color': [int(c) for c in self.color], 'visible': bool(self.visible), 'group_id': self.group_id,
+                'roi_ids': list(self.roi_ids), 'cavity_ids': list(self.cavity_ids),
+                'cluster_points': self.cluster_points, 'edge_length_fac': self.edge_length_fac,
+                'edge_length_abs': self.edge_length_abs, 'region_edge_lengths': self.region_edge_lengths,
+                'epsilon': self.epsilon, 'optimize': bool(self.optimize), 'simplify': bool(self.simplify),
+                'coarsen': bool(self.coarsen), 'stop_energy': self.stop_energy, 'num_opt_iter': self.num_opt_iter,
+                'source_keys': self.source_keys, 'build_count': int(self.build_count),
+                'n_surfaces': 0 if self.surfaces is None else len(self.surfaces)}
+
+    def export(self, path):
+        """Write the mesh to any format pyvista writes (.vtu, .vtk, ...) for FEBio pre-processing or ParaView.
+
+        'Region' holds region indices; the ROI of region i is ``roi_ids[i]``.
+
+        Examples
+        --------
+        >>> import medicalimageanalysis as mia
+        >>> mia.Data.image['CT 01'].model['Liver FE'].export('C:/Data/liver_fe.vtu')
+        """
+        if self.mesh is None:
+            raise ValueError(f"Model '{self.name}' is not built.")
+
+        self.mesh.save(path, binary=False)
+
     def save(self, path):
         """Write the model to one .npz file (record, surfaces, mesh and its data arrays). Written to a temporary name
         and swapped in, so a crash never leaves a half-written file. No pickle.
@@ -645,25 +671,9 @@ class Model(object):
 
         return buffer.getvalue()
 
-    def update_mesh(self, mesh, surfaces=None):
-        """Use a mesh built elsewhere (another mesher, a script) as this model, and record the current source ROI
-        meshes as its source. Counts as a rebuild (``build_count`` goes up by one).
+    # ---- Other ----
 
-        A tet mesh needs cell array 'Region' (indices into ``roi_ids``).
-
-        Examples
-        --------
-        >>> import pyvista as pv
-        >>> import medicalimageanalysis as mia
-        >>> model = mia.Data.image['CT 01'].model['Liver FE']
-        >>> model.update_mesh(pv.read('C:/Data/liver_fe_edited.vtu'))
-        """
-        if self.kind == 'tet' and 'Region' not in mesh.cell_data:
-            raise ValueError("A tet model's mesh needs cell array 'Region' (indices into roi_ids).")
-
-        self.mesh = mesh
-        if surfaces is not None:
-            self.surfaces = list(surfaces)
-        self.source_keys = [self._mesh_key(source) for source in self._source_meshes()]
-        self.build_count += 1
-        self._volume_cache = None
+    @staticmethod
+    def _as_list(names):
+        """A single name or id becomes a one-item list, anything else a list."""
+        return [names] if isinstance(names, (str, int, np.integer)) else list(names)
