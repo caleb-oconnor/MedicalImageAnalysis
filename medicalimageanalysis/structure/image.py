@@ -1395,7 +1395,7 @@ class Image(object):
             self._store_annotation('roi', name, Roi(self, name=name, color=color, visible=visible, filepaths=filepaths))
 
         mask = external(self.array, threshold=threshold, only_mask=True)
-        positions = mask_to_contours(mask, self.origin, self.spacing, self.matrix)
+        positions = mask_to_contours(mask, self.origin, self.spacing, self.matrix, as_list=True)
         contours = self.roi[name].convert_position_to_pixel(points=positions)
 
         self.roi[name].contour_pixel = contours
